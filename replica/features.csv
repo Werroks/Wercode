@@ -1,0 +1,64 @@
+feature,area,priority,original,clone,notes
+Open a folder as workspace (dialog and CLI argument),workspace,must,yes,no,
+Terminal in the center running the user's shell,terminal,must,yes,no,in Cursor it is a bottom panel
+Correct VT emulation (colors cursor alt screen mouse),terminal,must,yes,no,alacritty_terminal
+Terminal resize follows window and splitter,terminal,must,yes,no,
+Scrollback with mouse wheel,terminal,must,yes,no,
+Select copy paste in terminal,terminal,must,yes,no,
+Multiple terminal tabs,terminal,must,yes,no,
+New terminal starts in workspace root,terminal,must,yes,no,
+Choose shell (PowerShell cmd bash zsh WSL),terminal,must,yes,no,
+File tree in right sidebar,files,must,yes,no,Agent layout puts sidebar on the right
+Lazy expand and collapse folders,files,must,yes,no,
+Live update of tree on file changes,files,must,yes,no,notify
+Respect .gitignore (dim or hide),files,must,yes,no,
+Git status marks in tree,files,must,yes,no,
+Three buttons above the sidebar switching panels,shell,must,partial,no,Cursor uses an activity bar with many icons
+Resizable and collapsible sidebar,shell,must,yes,no,
+Git panel: list of changed files,git,must,yes,no,
+Git panel: stage and unstage files,git,must,yes,no,
+Git panel: commit with message,git,must,yes,no,
+Current branch and ahead/behind,git,must,yes,no,
+Settings: font size theme shell,settings,must,yes,no,
+Restore last workspace and layout on launch,workspace,must,yes,no,
+Terminal splits (side by side and stacked),terminal,must,yes,no,user decision 2026-11-11
+Dark theme by default plus several built-in color schemes in settings,settings,must,yes,no,user decision 2026-11-11; own palettes only
+Clickable file paths and URLs in terminal output,terminal,should,yes,no,
+Click file opens it in the built-in editor,files,must,yes,no,
+Insert file path into terminal (click or drag),files,should,partial,no,key feature for CLI agents
+Open file in $EDITOR in a terminal tab,files,should,no,no,own feature
+Context menu: new rename delete reveal copy path,files,should,yes,no,
+Diff view for a changed file,git,should,yes,no,
+Push pull fetch buttons,git,should,yes,no,shell out to git
+Switch and create branch,git,should,yes,no,
+Discard changes,git,should,yes,no,confirm first
+Command palette,shell,should,yes,no,
+Quick open file by fuzzy name,shell,should,yes,no,
+Configurable keybindings,settings,should,yes,no,
+Recent workspaces list,workspace,should,yes,no,
+Word-level diff highlighting,git,could,yes,no,
+Commit history / graph,git,could,yes,no,
+Stage individual hunks,git,could,yes,no,
+Git worktrees switcher,git,could,yes,no,useful for parallel CLI agents
+Custom themes from file,settings,could,yes,no,
+Sidebar on left option,shell,could,yes,no,
+Multiple windows,workspace,could,yes,no,
+Image preview,files,could,yes,no,
+Built-in editor: open edit save with syntax highlight,editor,must,yes,no,user decision 2026-11-11; gpui-component editor or own on ropey + tree-sitter
+Editor tabs alongside terminal tabs,editor,must,yes,no,
+Undo redo find and replace in file,editor,must,yes,no,
+Unsaved changes marker and prompt on close,editor,must,yes,no,
+Reload file changed on disk (agent edits it),editor,must,partial,no,critical when CLI agents write files
+Search button: project-wide text search panel,search,must,yes,no,third button; user decision
+Recent projects switcher at the top of the window,workspace,must,yes,no,user decision
+Editor splits,editor,could,yes,no,
+LSP (go to definition hover diagnostics),editor,could,yes,no,after MVP and opt-in; language servers use a lot of RAM
+AI chat and agent panel,ai,skip,yes,skip,user runs a CLI agent in the terminal
+Tab autocomplete model,ai,skip,yes,skip,Cursor's own model and service
+Cloud agents and handoff,ai,skip,yes,skip,Cursor's infrastructure
+Agents list and tiled agent tabs,ai,skip,yes,skip,
+Built-in browser and Design Mode,browser,skip,yes,skip,
+Extensions and Marketplace,extensions,skip,yes,skip,VS Code ecosystem is not ours to rebuild
+MCP and Secrets settings,settings,skip,yes,skip,
+Accounts teams billing,account,skip,yes,skip,
+Create and manage pull requests,git,skip,yes,skip,use gh in the terminal

@@ -1,0 +1,35 @@
+name = "Black"
+appearance = "dark"
+
+[ui]
+bg = "#000000"
+surface = "#0c0c0c"
+surface_2 = "#161616"
+border = "#262626"
+border_input = "#6b6b6b"
+text = "#e8e8e8"
+text_muted = "#9a9a9a"
+accent = "#5aa2ff"
+on_accent = "#000000"
+danger = "#ff6b6b"
+success = "#5fd38d"
+warning = "#e6c15a"
+selection = "#1f3a5f"
+
+[terminal]
+foreground = "#e8e8e8"
+background = "#000000"
+cursor = "#e8e8e8"
+selection = "#1f3a5f"
+ansi = ["#1a1a1a", "#ff6b6b", "#5fd38d", "#e6c15a", "#5aa2ff", "#c58af9", "#4fd1c5", "#cfcfcf", "#6e6e6e", "#ff8f8f", "#86e3a9", "#f2d583", "#86bbff", "#d8b0ff", "#7fe3d9", "#ffffff"]
+
+[syntax]
+keyword = "#c58af9"
+string = "#5fd38d"
+comment = "#7c7c7c"
+function = "#5aa2ff"
+type = "#4fd1c5"
+number = "#e6c15a"
+constant = "#ff9e64"
+variable = "#e8e8e8"
+operator = "#9a9a9a"

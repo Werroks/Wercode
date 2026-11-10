@@ -1,0 +1,35 @@
+name = "Graphite"
+appearance = "dark"
+
+[ui]
+bg = "#1c1e21"
+surface = "#24272b"
+surface_2 = "#2d3136"
+border = "#383d43"
+border_input = "#808a95"
+text = "#dfe3e8"
+text_muted = "#a3acb6"
+accent = "#79b4f5"
+on_accent = "#101214"
+danger = "#f47f7a"
+success = "#72d695"
+warning = "#dfb650"
+selection = "#2f4a6b"
+
+[terminal]
+foreground = "#dfe3e8"
+background = "#1c1e21"
+cursor = "#dfe3e8"
+selection = "#2f4a6b"
+ansi = ["#2d3136", "#f47f7a", "#72d695", "#dfb650", "#79b4f5", "#c9a4f2", "#5fcfd6", "#cdd3da", "#808a95", "#f9a19c", "#93e3ae", "#ecca78", "#a0cbfa", "#dcc2f8", "#8adfe5", "#f5f7fa"]
+
+[syntax]
+keyword = "#c9a4f2"
+string = "#72d695"
+comment = "#8b949e"
+function = "#79b4f5"
+type = "#5fcfd6"
+number = "#dfb650"
+constant = "#f0a070"
+variable = "#dfe3e8"
+operator = "#a3acb6"

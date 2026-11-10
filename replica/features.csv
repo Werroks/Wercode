@@ -1,20 +1,20 @@
 feature,area,priority,original,clone,notes
-Open a folder as workspace (dialog and CLI argument),workspace,must,yes,no,
-Terminal in the center running the user's shell,terminal,must,yes,no,in Cursor it is a bottom panel
-Correct VT emulation (colors cursor alt screen mouse),terminal,must,yes,no,alacritty_terminal
-Terminal resize follows window and splitter,terminal,must,yes,no,
-Scrollback with mouse wheel,terminal,must,yes,no,
-Select copy paste in terminal,terminal,must,yes,no,
+Open a folder as workspace (dialog and CLI argument),workspace,must,yes,partial,CLI argument only
+Terminal in the center running the user's shell,terminal,must,yes,yes,in Cursor it is a bottom panel
+Correct VT emulation (colors cursor alt screen mouse),terminal,must,yes,partial,alacritty_terminal; no mouse reporting to programs yet
+Terminal resize follows window and splitter,terminal,must,yes,yes,no debounce yet
+Scrollback with mouse wheel,terminal,must,yes,partial,implemented; not hand-tested
+Select copy paste in terminal,terminal,must,yes,partial,implemented; not hand-tested
 Multiple terminal tabs,terminal,must,yes,no,
-New terminal starts in workspace root,terminal,must,yes,no,
-Choose shell (PowerShell cmd bash zsh WSL),terminal,must,yes,no,
-File tree in right sidebar,files,must,yes,no,Agent layout puts sidebar on the right
-Lazy expand and collapse folders,files,must,yes,no,
+New terminal starts in workspace root,terminal,must,yes,yes,
+Choose shell (PowerShell cmd bash zsh WSL),terminal,must,yes,partial,auto-detect and settings.toml; no UI
+File tree in right sidebar,files,must,yes,yes,Agent layout puts sidebar on the right
+Lazy expand and collapse folders,files,must,yes,partial,"expand/collapse works; tree is read eagerly, capped at 5000"
 Live update of tree on file changes,files,must,yes,no,notify
-Respect .gitignore (dim or hide),files,must,yes,no,
+Respect .gitignore (dim or hide),files,must,yes,yes,hidden
 Git status marks in tree,files,must,yes,no,
 Three buttons above the sidebar switching panels,shell,must,partial,no,Cursor uses an activity bar with many icons
-Resizable and collapsible sidebar,shell,must,yes,no,
+Resizable and collapsible sidebar,shell,must,yes,partial,resizable; not collapsible
 Git panel: list of changed files,git,must,yes,no,
 Git panel: stage and unstage files,git,must,yes,no,
 Git panel: commit with message,git,must,yes,no,
@@ -22,7 +22,7 @@ Current branch and ahead/behind,git,must,yes,no,
 Settings: font size theme shell,settings,must,yes,no,
 Restore last workspace and layout on launch,workspace,must,yes,no,
 Terminal splits (side by side and stacked),terminal,must,yes,no,user decision 2026-11-11
-Dark theme by default plus several built-in color schemes in settings,settings,must,yes,no,user decision 2026-11-11; own palettes only
+Dark theme by default plus several built-in color schemes in settings,settings,must,yes,partial,user decision 2026-11-11; own palettes only; 5 schemes via settings.toml; no settings screen
 Clickable file paths and URLs in terminal output,terminal,should,yes,no,
 Click file opens it in the built-in editor,files,must,yes,no,
 Insert file path into terminal (click or drag),files,should,partial,no,key feature for CLI agents

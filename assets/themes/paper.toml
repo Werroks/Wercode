@@ -1,0 +1,35 @@
+name = "Paper"
+appearance = "light"
+
+[ui]
+bg = "#fbfaf7"
+surface = "#f1efe9"
+surface_2 = "#e6e3da"
+border = "#d8d4c8"
+border_input = "#8a8577"
+text = "#1f1d1a"
+text_muted = "#575349"
+accent = "#2b5fc7"
+on_accent = "#ffffff"
+danger = "#b3261e"
+success = "#1e7a45"
+warning = "#8a5a00"
+selection = "#cfe0ff"
+
+[terminal]
+foreground = "#1f1d1a"
+background = "#fbfaf7"
+cursor = "#1f1d1a"
+selection = "#cfe0ff"
+ansi = ["#1f1d1a", "#b3261e", "#1e7a45", "#8a5a00", "#2b5fc7", "#8a3fb0", "#0f7480", "#575349", "#6f6a60", "#c2332a", "#1c7c44", "#8f5f00", "#2f63cc", "#9447ba", "#0e7682", "#3a372f"]
+
+[syntax]
+keyword = "#8a3fb0"
+string = "#1e7a45"
+comment = "#6f6a60"
+function = "#2b5fc7"
+type = "#0f7480"
+number = "#8a5a00"
+constant = "#a8471a"
+variable = "#1f1d1a"
+operator = "#575349"

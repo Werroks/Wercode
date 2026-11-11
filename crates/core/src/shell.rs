@@ -31,6 +31,36 @@ pub fn resolve(setting: &str, extra_args: &[String]) -> Shell {
     shell
 }
 
+/// Wraps the user's prompt so PowerShell announces its directory (OSC 9;9)
+/// every time it shows one. Runs after the profile, so a custom prompt is kept.
+/// No double quotes inside: the text travels as one command-line argument.
+const POWERSHELL_INTEGRATION: &str = "$Global:__wercode_prompt = $function:prompt; \
+function Global:prompt { \
+$l = $ExecutionContext.SessionState.Path.CurrentLocation; \
+if ($l.Provider.Name -eq 'FileSystem') { \
+[Console]::Write('' + [char]27 + ']9;9;' + $l.ProviderPath + [char]7) }; \
+& $Global:__wercode_prompt }";
+
+/// Adds what the shell needs to report its working directory, when we know
+/// how to ask and the user has not given the shell a command of their own.
+pub fn with_integration(mut shell: Shell) -> Shell {
+    let stem = shell
+        .program
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_powershell = stem == "pwsh" || stem == "powershell";
+    let has_command = shell.args.iter().any(|a| {
+        let a = a.to_ascii_lowercase();
+        ["-command", "-c", "-file", "-f", "-encodedcommand", "-e", "-ec", "-noexit"]
+            .contains(&a.as_str())
+    });
+    if is_powershell && !has_command {
+        shell.args.extend(["-NoExit".into(), "-Command".into(), POWERSHELL_INTEGRATION.into()]);
+    }
+    shell
+}
+
 #[cfg(windows)]
 fn auto() -> Shell {
     for name in ["pwsh.exe", "powershell.exe"] {

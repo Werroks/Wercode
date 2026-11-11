@@ -14,9 +14,25 @@ pub struct Settings {
     /// "auto", a program name, or a path to an executable.
     pub shell: String,
     pub shell_args: Vec<String>,
+    /// Let the shell report its working directory, so splits open where you
+    /// are and relative paths in output can be clicked.
+    pub shell_integration: bool,
+    /// Ask before closing a terminal that is still running a program.
+    pub confirm_close: bool,
+    pub cursor_blink: bool,
     pub scrollback: usize,
     pub copy_on_select: bool,
+    /// Width of the side panel on first launch; later the dragged width is remembered.
     pub panel_width: f32,
+    /// Which side the files/search/git panel sits on: "left" or "right".
+    pub panel_side: String,
+}
+
+impl Settings {
+    /// Anything other than "right" means left, so a typo cannot hide the panel.
+    pub fn panel_on_right(&self) -> bool {
+        self.panel_side.eq_ignore_ascii_case("right")
+    }
 }
 
 impl Default for Settings {
@@ -28,9 +44,13 @@ impl Default for Settings {
             line_height: 1.2,
             shell: "auto".into(),
             shell_args: Vec::new(),
+            shell_integration: true,
+            confirm_close: true,
+            cursor_blink: true,
             scrollback: 10_000,
             copy_on_select: false,
             panel_width: 300.0,
+            panel_side: "left".into(),
         }
     }
 }
@@ -81,5 +101,8 @@ mod tests {
         assert_eq!(s.font_size, 16.0);
         assert_eq!(s.theme, "black");
         assert_eq!(s.scrollback, 10_000);
+        assert!(!s.panel_on_right());
+        let s: Settings = toml::from_str("panel_side = \"Right\"").unwrap();
+        assert!(s.panel_on_right());
     }
 }

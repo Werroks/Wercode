@@ -5,7 +5,9 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use alacritty_terminal::event::{Event as AEvent, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -16,7 +18,7 @@ use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, Color, CursorShape, NamedColor};
 use anyhow::{Context as _, Result};
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, PtySize, native_pty_system};
 
 use crate::shell::Shell;
 use crate::theme::{Rgb, TerminalColors};
@@ -30,6 +32,8 @@ pub enum TermEvent {
     Bell,
     /// The program asked to put text on the clipboard (OSC 52).
     ClipboardStore(String),
+    /// The shell reported its working directory (shell integration).
+    Cwd(PathBuf),
     /// The shell exited, with its exit code if known.
     Exit(Option<u32>),
 }
@@ -81,7 +85,14 @@ pub struct Modes {
     pub app_cursor: bool,
     pub alt_screen: bool,
     pub bracketed_paste: bool,
+    /// The program wants mouse events (any of the modes below).
     pub mouse_report: bool,
+    /// Report motion while a button is held.
+    pub mouse_drag: bool,
+    /// Report all motion.
+    pub mouse_motion: bool,
+    /// Use the SGR encoding (`ESC [ < ...`) rather than the legacy one.
+    pub mouse_sgr: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,10 +149,17 @@ impl EventListener for Listener {
 pub struct Terminal {
     term: Arc<Mutex<Term<Listener>>>,
     writer: Writer,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    /// Sizes for the PTY; applied by a helper thread once resizing settles.
+    pty_resize: Mutex<mpsc::Sender<PtySize>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     size: Mutex<Size>,
+    pid: Option<u32>,
+    cwd: Arc<Mutex<Option<PathBuf>>>,
 }
+
+/// How long the window must stop changing size before the PTY is told.
+/// Resizing a ConPTY on every frame of a drag makes the shell redraw in a storm.
+const PTY_RESIZE_DELAY: Duration = Duration::from_millis(60);
 
 impl Terminal {
     /// Starts the shell. `notify` is called from background threads, so it
@@ -174,6 +192,8 @@ impl Terminal {
         drop(pair.slave);
 
         let killer = child.clone_killer();
+        let pid = child.process_id();
+        let cwd = Arc::new(Mutex::new(opts.cwd.clone().filter(|p| p.is_dir())));
         let mut reader = pair.master.try_clone_reader().context("pty reader")?;
         let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().context("pty writer")?));
 
@@ -186,10 +206,12 @@ impl Terminal {
         {
             let term = term.clone();
             let notify = notify.clone();
+            let cwd = cwd.clone();
             std::thread::Builder::new()
                 .name("pty-reader".into())
                 .spawn(move || {
                     let mut parser: ansi::Processor = ansi::Processor::new();
+                    let mut osc = crate::osc::CwdScanner::default();
                     let mut buf = vec![0u8; 64 * 1024];
                     loop {
                         match reader.read(&mut buf) {
@@ -197,6 +219,12 @@ impl Terminal {
                             Ok(n) => {
                                 if let Ok(mut term) = term.lock() {
                                     parser.advance(&mut *term, &buf[..n]);
+                                }
+                                if let Some(dir) = osc.feed(&buf[..n]) {
+                                    if let Ok(mut cwd) = cwd.lock() {
+                                        *cwd = Some(dir.clone());
+                                    }
+                                    notify(TermEvent::Cwd(dir));
                                 }
                                 notify(TermEvent::Wakeup);
                             }
@@ -218,12 +246,36 @@ impl Terminal {
                 .context("pty wait thread")?;
         }
 
+        // PTY resizer. It owns the master end, so the PTY closes when the
+        // `Terminal` (and with it the sender) is dropped.
+        let (resize_tx, resize_rx) = mpsc::channel::<PtySize>();
+        {
+            let master = pair.master;
+            std::thread::Builder::new()
+                .name("pty-resize".into())
+                .spawn(move || {
+                    while let Ok(mut wanted) = resize_rx.recv() {
+                        loop {
+                            match resize_rx.recv_timeout(PTY_RESIZE_DELAY) {
+                                Ok(newer) => wanted = newer,
+                                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                            }
+                        }
+                        let _ = master.resize(wanted);
+                    }
+                })
+                .context("pty resize thread")?;
+        }
+
         Ok(Terminal {
             term,
             writer,
-            master: Mutex::new(pair.master),
+            pty_resize: Mutex::new(resize_tx),
             killer: Mutex::new(killer),
             size: Mutex::new(size),
+            pid,
+            cwd,
         })
     }
 
@@ -264,14 +316,52 @@ impl Terminal {
         if let Ok(mut term) = self.term.lock() {
             term.resize(new);
         }
-        if let Ok(master) = self.master.lock() {
-            let _ = master.resize(PtySize {
+        if let Ok(tx) = self.pty_resize.lock() {
+            let _ = tx.send(PtySize {
                 rows: new.rows as u16,
                 cols: new.cols as u16,
                 pixel_width: 0,
                 pixel_height: 0,
             });
         }
+    }
+
+    /// The shell's working directory: what the OS says where that is cheap to
+    /// ask, else what shell integration last reported, else where it started.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        if let Some(dir) =
+            self.pid.and_then(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).ok())
+        {
+            return Some(dir);
+        }
+        self.cwd.lock().ok().and_then(|c| c.clone())
+    }
+
+    /// True while the shell is running something (it has child processes).
+    /// Used to ask before closing a terminal that is in the middle of work.
+    pub fn has_running_children(&self) -> bool {
+        self.pid.is_some_and(crate::process::has_children)
+    }
+
+    /// The characters of one viewport row, one per column. The second half of
+    /// a double-width character is `\0`.
+    pub fn row_text(&self, row: usize) -> Vec<char> {
+        let term = self.term.lock().unwrap();
+        if row >= term.screen_lines() {
+            return Vec::new();
+        }
+        let line = Line(row as i32 - term.grid().display_offset() as i32);
+        (0..term.columns())
+            .map(|col| {
+                let cell = &term.grid()[line][Column(col)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    '\0'
+                } else {
+                    cell.c
+                }
+            })
+            .collect()
     }
 
     pub fn modes(&self) -> Modes {
@@ -282,6 +372,9 @@ impl Terminal {
             alt_screen: m.contains(TermMode::ALT_SCREEN),
             bracketed_paste: m.contains(TermMode::BRACKETED_PASTE),
             mouse_report: m.intersects(TermMode::MOUSE_MODE),
+            mouse_drag: m.contains(TermMode::MOUSE_DRAG),
+            mouse_motion: m.contains(TermMode::MOUSE_MOTION),
+            mouse_sgr: m.contains(TermMode::SGR_MOUSE),
         }
     }
 
@@ -496,5 +589,39 @@ mod tests {
         assert_eq!(term.size(), (100, 30));
         let f = term.frame(&palette);
         assert_eq!((f.cols, f.rows), (100, 30));
+    }
+
+    /// With shell integration the shell tells us where it is after `cd`.
+    #[cfg(windows)]
+    #[test]
+    fn powershell_reports_its_directory() {
+        let shell = crate::shell::with_integration(crate::shell::resolve("auto", &[]));
+        if !shell.args.iter().any(|a| a == "-NoExit") {
+            return; // No PowerShell on this machine.
+        }
+        let target = std::env::temp_dir();
+        let target = std::fs::canonicalize(&target).unwrap_or(target);
+        let (tx, rx) = mpsc::channel();
+        let term = Terminal::spawn(
+            SpawnOptions { shell, cwd: None, cols: 80, rows: 24, scrollback: 100 },
+            move |e| {
+                let _ = tx.send(e);
+            },
+        )
+        .unwrap();
+        term.write(format!("cd '{}'\r", target.display()).as_bytes());
+
+        let same = |a: &std::path::Path| {
+            std::fs::canonicalize(a).map(|a| a == target).unwrap_or(false)
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seen = false;
+        while Instant::now() < deadline && !seen {
+            if let Ok(TermEvent::Cwd(dir)) = rx.recv_timeout(Duration::from_millis(200)) {
+                seen = same(&dir);
+            }
+        }
+        assert!(seen, "no directory report; last known: {:?}", term.cwd());
+        assert!(term.cwd().is_some_and(|d| same(&d)));
     }
 }

@@ -1,23 +1,28 @@
 //! The terminal widget: paints a [`Frame`] and feeds input back to the shell.
 
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::terminal::{
     CursorKind, Frame, FrameCell, SelectKind, SpawnOptions, TermEvent, Terminal,
 };
+use wercode_core::links::{self, Link, LinkTarget};
 use wercode_core::theme::Rgb;
 
-use super::input;
+use super::mouse::{self, Kind as MouseKind};
+use super::{SendBackTab, SendTab, input};
 use crate::theme::{AppState, hsla};
 
 const PADDING: f32 = 8.0;
+const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 /// Where the grid was last painted, for turning pointer positions into cells.
 #[derive(Clone, Copy, Default)]
@@ -29,18 +34,31 @@ struct Metrics {
 
 pub enum TerminalViewEvent {
     TitleChanged,
-    Exited,
+    /// The shell exited, with its exit code if known.
+    Exited(Option<u32>),
+    /// The user clicked a file path in the output.
+    OpenPath { path: PathBuf, line: Option<u32>, col: Option<u32> },
 }
 
 pub struct TerminalView {
     term: Option<Arc<Terminal>>,
     focus: FocusHandle,
     metrics: Rc<Cell<Metrics>>,
+    /// Short name of the shell program, shown in the tab.
+    shell_name: SharedString,
     title: SharedString,
     error: Option<SharedString>,
     exit_code: Option<Option<u32>>,
     selecting: bool,
     scroll_remainder: f32,
+    /// The link under the pointer while the open-link modifier is held: (row, link).
+    hover: Option<(usize, Link)>,
+    /// Button being reported to a program that asked for mouse events.
+    reported_button: Option<u8>,
+    last_reported_cell: Option<(usize, usize)>,
+    blink_on: bool,
+    focused: bool,
+    _blink: Task<()>,
     dirty: Arc<AtomicBool>,
     _events: Option<Task<()>>,
 }
@@ -77,6 +95,11 @@ impl TerminalView {
             }
         };
 
+        let shell = if settings.shell_integration {
+            wercode_core::shell::with_integration(shell)
+        } else {
+            shell
+        };
         let spawned = Terminal::spawn(
             SpawnOptions { shell, cwd, cols: 80, rows: 24, scrollback: settings.scrollback },
             notify,
@@ -94,22 +117,92 @@ impl TerminalView {
             }
         });
 
+        // The cursor blinks only in the focused terminal, so idle and
+        // background terminals cost no repaints.
+        let blink = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK_INTERVAL).await;
+                let alive = this.update(cx, |this, cx| {
+                    this.blink_on = !this.blink_on;
+                    if this.focused && cx.global::<AppState>().settings.cursor_blink {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
+
         Self {
             term,
             focus: cx.focus_handle(),
             metrics: Rc::new(Cell::new(Metrics::default())),
+            shell_name: title.clone(),
             title,
             error,
             exit_code: None,
             selecting: false,
             scroll_remainder: 0.0,
+            hover: None,
+            reported_button: None,
+            last_reported_cell: None,
+            blink_on: true,
+            focused: false,
+            _blink: blink,
             dirty,
             _events: Some(events),
         }
     }
 
-    pub fn title(&self) -> SharedString {
-        self.title.clone()
+    /// The name for this terminal's tab: the program's title, or the shell
+    /// name when the title is only the path of the shell executable.
+    pub fn label(&self) -> SharedString {
+        let title = self.title.as_ref();
+        let is_exe_path = (title.contains('\\') || title.contains('/'))
+            && Path::new(title).extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+        let name = if title.trim().is_empty() || is_exe_path {
+            self.shell_name.clone()
+        } else {
+            self.title.clone()
+        };
+        // Tell tabs apart by where their shell is.
+        match self.cwd().and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned())) {
+            Some(dir) if name == self.shell_name => format!("{name} \u{b7} {dir}").into(),
+            _ => name,
+        }
+    }
+
+    /// Columns and rows of the grid, as last laid out.
+    #[cfg(test)]
+    pub fn grid_size(&self) -> Option<(usize, usize)> {
+        self.term.as_ref().map(|t| t.size())
+    }
+
+    /// The shell's working directory, when known.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        self.term.as_ref().and_then(|t| t.cwd())
+    }
+
+    pub fn has_exited(&self) -> bool {
+        self.term.is_none() || self.exit_code.is_some()
+    }
+
+    /// True when closing this terminal would kill a program the shell is running.
+    pub fn is_busy(&self) -> bool {
+        !self.has_exited() && self.term.as_ref().is_some_and(|t| t.has_running_children())
+    }
+
+    fn send(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        let Some(term) = &self.term else { return };
+        if self.exit_code.is_some() {
+            return;
+        }
+        term.clear_selection();
+        term.scroll_to_bottom();
+        term.write(bytes);
+        self.blink_on = true;
+        cx.notify();
     }
 
     /// Types text into the shell as if pasted (used for inserting file paths).
@@ -134,9 +227,13 @@ impl TerminalView {
             TermEvent::ClipboardStore(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
+            TermEvent::Cwd(_) => {
+                // The tab label shows the directory.
+                cx.emit(TerminalViewEvent::TitleChanged);
+            }
             TermEvent::Exit(code) => {
                 self.exit_code = Some(code);
-                cx.emit(TerminalViewEvent::Exited);
+                cx.emit(TerminalViewEvent::Exited(code));
                 cx.notify();
             }
         }
@@ -240,16 +337,72 @@ impl TerminalView {
             return;
         }
         if let Some(bytes) = input::encode(ks, term.modes().app_cursor) {
-            term.clear_selection();
-            term.scroll_to_bottom();
-            term.write(&bytes);
-            cx.notify();
+            self.send(&bytes, cx);
             cx.stop_propagation();
+        }
+    }
+
+    /// Sends a mouse report if the program asked for them and the user is not
+    /// holding Shift (which keeps the mouse for selecting, as in xterm).
+    fn report_mouse(
+        &mut self,
+        button: u8,
+        kind: MouseKind,
+        position: Point<Pixels>,
+        modifiers: &Modifiers,
+    ) -> bool {
+        let Some(term) = self.term.clone() else { return false };
+        let modes = term.modes();
+        if !modes.mouse_report || modifiers.shift || self.exit_code.is_some() {
+            return false;
+        }
+        let Some((row, col, _)) = self.cell_at(position) else { return false };
+        if kind == MouseKind::Motion {
+            let wanted = modes.mouse_motion || (modes.mouse_drag && button != mouse::NONE);
+            if !wanted || self.last_reported_cell == Some((row, col)) {
+                return true;
+            }
+        }
+        self.last_reported_cell = Some((row, col));
+        let mods = mouse::Mods { shift: false, alt: modifiers.alt, control: modifiers.control };
+        if let Some(bytes) = mouse::encode(button, kind, col, row, mods, modes.mouse_sgr) {
+            term.write(&bytes);
+        }
+        true
+    }
+
+    fn link_at(&self, position: Point<Pixels>) -> Option<(usize, Link)> {
+        let term = self.term.as_ref()?;
+        let (row, col, _) = self.cell_at(position)?;
+        let cwd = term.cwd();
+        let link = links::link_at(&term.row_text(row), col, cwd.as_deref())?;
+        Some((row, link))
+    }
+
+    fn open_link(&mut self, link: &Link, cx: &mut Context<Self>) {
+        match &link.target {
+            LinkTarget::Url(url) => cx.open_url(url),
+            LinkTarget::Path { path, line, col } => cx.emit(TerminalViewEvent::OpenPath {
+                path: path.clone(),
+                line: *line,
+                col: *col,
+            }),
         }
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // Ctrl+click (Cmd+click on macOS) opens the link under the pointer.
+        if event.modifiers.secondary(cx)
+            && let Some((_, link)) = self.link_at(event.position)
+        {
+            self.open_link(&link, cx);
+            return;
+        }
+        if self.report_mouse(mouse::LEFT, MouseKind::Press, event.position, &event.modifiers) {
+            self.reported_button = Some(mouse::LEFT);
+            return;
+        }
         let Some(term) = self.term.clone() else { return };
         let Some((row, col, right)) = self.cell_at(event.position) else { return };
         let kind = match event.click_count {
@@ -267,6 +420,26 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let held = match event.pressed_button {
+            Some(MouseButton::Left) => mouse::LEFT,
+            Some(MouseButton::Middle) => mouse::MIDDLE,
+            Some(MouseButton::Right) => mouse::RIGHT,
+            _ => mouse::NONE,
+        };
+        if !self.selecting
+            && self.report_mouse(held, MouseKind::Motion, event.position, &event.modifiers)
+        {
+            self.set_hover(None, cx);
+            return;
+        }
+
+        let hover = if event.modifiers.secondary(cx) && !self.selecting {
+            self.link_at(event.position)
+        } else {
+            None
+        };
+        self.set_hover(hover, cx);
+
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             self.selecting = false;
             return;
@@ -278,8 +451,39 @@ impl TerminalView {
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selecting {
+    fn set_hover(&mut self, hover: Option<(usize, Link)>, cx: &mut Context<Self>) {
+        if self.hover != hover {
+            self.hover = hover;
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let button = match event.button {
+            MouseButton::Left => mouse::LEFT,
+            MouseButton::Middle => mouse::MIDDLE,
+            MouseButton::Right => mouse::RIGHT,
+            _ => return,
+        };
+        if self.reported_button == Some(button) {
+            self.reported_button = None;
+            self.last_reported_cell = None;
+            // Sent even with Shift held: the program saw the press.
+            if let Some(term) = self.term.clone()
+                && let Some((row, col, _)) = self.cell_at(event.position)
+            {
+                let modes = term.modes();
+                let mods = mouse::Mods::default();
+                if modes.mouse_report
+                    && let Some(bytes) =
+                        mouse::encode(button, MouseKind::Release, col, row, mods, modes.mouse_sgr)
+                {
+                    term.write(&bytes);
+                }
+            }
+            return;
+        }
+        if button != mouse::LEFT || !self.selecting {
             return;
         }
         self.selecting = false;
@@ -290,8 +494,12 @@ impl TerminalView {
     }
 
     /// Right click: copy the selection if there is one, otherwise paste.
-    fn on_right_click(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_right_click(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        if self.report_mouse(mouse::RIGHT, MouseKind::Press, event.position, &event.modifiers) {
+            self.reported_button = Some(mouse::RIGHT);
+            return;
+        }
         if self.copy_selection(cx) {
             if let Some(term) = &self.term {
                 term.clear_selection();
@@ -301,6 +509,26 @@ impl TerminalView {
             self.paste_clipboard(cx);
         }
     }
+
+    fn on_middle_click(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        if self.report_mouse(mouse::MIDDLE, MouseKind::Press, event.position, &event.modifiers) {
+            self.reported_button = Some(mouse::MIDDLE);
+        }
+    }
+
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Releasing Ctrl removes the link underline without waiting for a mouse move.
+        if !event.modifiers.secondary(cx) {
+            self.set_hover(None, cx);
+        }
+    }
+
 
     fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(term) = self.term.clone() else { return };
@@ -317,6 +545,24 @@ impl TerminalView {
         self.scroll_remainder -= lines as f32;
 
         let modes = term.modes();
+        if modes.mouse_report && !event.modifiers.shift {
+            let button = if lines > 0 { mouse::WHEEL_UP } else { mouse::WHEEL_DOWN };
+            if let Some((row, col, _)) = self.cell_at(event.position) {
+                let mods = mouse::Mods {
+                    shift: false,
+                    alt: event.modifiers.alt,
+                    control: event.modifiers.control,
+                };
+                if let Some(bytes) =
+                    mouse::encode(button, MouseKind::Press, col, row, mods, modes.mouse_sgr)
+                {
+                    for _ in 0..lines.unsigned_abs().min(50) {
+                        term.write(&bytes);
+                    }
+                }
+            }
+            return;
+        }
         if modes.alt_screen {
             // Full-screen programs have no history: send arrow keys instead.
             let seq: &[u8] = match (lines > 0, modes.app_cursor) {
@@ -340,8 +586,13 @@ struct Painted {
     lines: Vec<(usize, usize, ShapedLine)>,
     metrics: Metrics,
     focused: bool,
+    /// False in the "off" half of a blink.
+    show_cursor: bool,
     cursor_color: Hsla,
     default_bg: Rgb,
+    link_color: Hsla,
+    /// Hovered link to underline: (row, first column, one past the last).
+    hover: Option<(usize, usize, usize)>,
 }
 
 fn same_style(a: &FrameCell, b: &FrameCell) -> bool {
@@ -358,7 +609,15 @@ impl Render for TerminalView {
         let font_size = px(state.settings.font_size);
         let line_h = px((state.settings.font_size * state.settings.line_height).round());
         let focused = self.focus.is_focused(window);
+        let show_cursor = self.blink_on || !state.settings.cursor_blink;
+        let link_color = hsla(state.scheme.ui.accent);
+        let hover = self.hover.as_ref().map(|(row, link)| (*row, link.start, link.end));
         let bg = hsla(palette.background);
+        if focused && !self.focused {
+            // Start a fresh blink so the cursor is visible the moment focus arrives.
+            self.blink_on = true;
+        }
+        self.focused = focused;
 
         let mut root = div()
             .id("terminal")
@@ -368,12 +627,21 @@ impl Render for TerminalView {
             .relative()
             .bg(bg)
             .p(px(PADDING))
+            .map(|d| if hover.is_some() { d.cursor_pointer() } else { d.cursor_text() })
+            .on_action(cx.listener(|this, _: &SendTab, _, cx| this.send(b"\t", cx)))
+            .on_action(cx.listener(|this, _: &SendBackTab, _, cx| this.send(b"\x1b[Z", cx)))
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_click))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_click))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_scroll(cx.listener(Self::on_scroll));
 
         let Some(term) = self.term.clone() else {
@@ -398,7 +666,10 @@ impl Render for TerminalView {
                 term.resize(cols, rows);
 
                 let mut frame = term.frame(&palette);
-                if focused && let Some((row, col, CursorKind::Block)) = frame.cursor {
+                if focused
+                    && show_cursor
+                    && let Some((row, col, CursorKind::Block)) = frame.cursor
+                {
                     let cell = &mut frame.cells[row * frame.cols + col];
                     cell.bg = palette.cursor;
                     cell.fg = palette.background;
@@ -460,8 +731,11 @@ impl Render for TerminalView {
                     lines,
                     metrics,
                     focused,
+                    show_cursor,
                     cursor_color: hsla(palette.cursor),
                     default_bg: palette.background,
+                    link_color,
+                    hover,
                 }
             },
             move |_bounds, painted: Painted, window, cx| {
@@ -495,7 +769,22 @@ impl Render for TerminalView {
                     let _ = line.paint(at, line_h, TextAlign::Left, None, window, cx);
                 }
 
-                if let Some((row, col, kind)) = frame.cursor {
+                if let Some((row, start, end)) = painted.hover
+                    && row < frame.rows
+                    && start < end.min(frame.cols)
+                {
+                    let b = cell_bounds(row, start, end.min(frame.cols) - start);
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(b.origin.x, b.origin.y + b.size.height - px(1.)),
+                            size(b.size.width, px(1.)),
+                        ),
+                        painted.link_color,
+                    ));
+                }
+
+                let cursor = frame.cursor.filter(|_| painted.show_cursor || !painted.focused);
+                if let Some((row, col, kind)) = cursor {
                     let b = cell_bounds(row, col, 1);
                     let color = painted.cursor_color;
                     let t = px(1.);

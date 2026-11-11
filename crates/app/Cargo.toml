@@ -9,3 +9,6 @@ anyhow = "1.0.104"
 futures = "0.3"
 gpui-kit = "0.9.1"
 wercode-core = { version = "0.1.0", path = "../core" }
+
+[dev-dependencies]
+gpui-kit = { version = "0.9.1", features = ["test-support"] }

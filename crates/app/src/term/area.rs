@@ -1,0 +1,820 @@
+//! The centre of the window: terminal tabs, each split into panes.
+
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+
+use super::view::{TerminalView, TerminalViewEvent};
+use super::{
+    ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
+};
+use crate::theme::AppState;
+
+const TAB_BAR_HEIGHT: f32 = 36.0;
+/// Thickness of the strip between two panes that can be grabbed.
+const DIVIDER: f32 = 5.0;
+/// Neither side of a split may shrink below this share.
+const MIN_RATIO: f32 = 0.1;
+
+pub enum AreaEvent {
+    /// The user clicked a file path in terminal output. The position is for
+    /// the built-in editor, which does not exist yet.
+    #[allow(dead_code)]
+    OpenPath { path: PathBuf, line: Option<u32>, col: Option<u32> },
+}
+
+type Pane = Entity<TerminalView>;
+
+struct Split {
+    id: usize,
+    /// `Horizontal` puts the panes side by side, `Vertical` stacks them.
+    axis: Axis,
+    /// Share of the space taken by `first`.
+    ratio: f32,
+    first: Node,
+    second: Node,
+    /// Where the split was last laid out, for turning a drag into a ratio.
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+}
+
+enum Node {
+    Leaf(Pane),
+    Split(Box<Split>),
+}
+
+impl Node {
+    fn leaves(&self, out: &mut Vec<Pane>) {
+        match self {
+            Node::Leaf(pane) => out.push(pane.clone()),
+            Node::Split(split) => {
+                split.first.leaves(out);
+                split.second.leaves(out);
+            }
+        }
+    }
+
+    /// Puts `new` next to the pane `target`. Returns false if `target` is not here.
+    fn split(&mut self, target: EntityId, axis: Axis, new: &Pane, id: usize) -> bool {
+        match self {
+            Node::Leaf(pane) if pane.entity_id() == target => {
+                let first = Node::Leaf(pane.clone());
+                *self = Node::Split(Box::new(Split {
+                    id,
+                    axis,
+                    ratio: 0.5,
+                    first,
+                    second: Node::Leaf(new.clone()),
+                    bounds: Rc::default(),
+                }));
+                true
+            }
+            Node::Leaf(_) => false,
+            Node::Split(split) => {
+                split.first.split(target, axis, new, id) || split.second.split(target, axis, new, id)
+            }
+        }
+    }
+
+    /// The tree without the pane `target`; its neighbour takes the freed space.
+    fn without(self, target: EntityId) -> Option<Node> {
+        match self {
+            Node::Leaf(pane) => (pane.entity_id() != target).then_some(Node::Leaf(pane)),
+            Node::Split(split) => {
+                let Split { id, axis, ratio, first, second, bounds } = *split;
+                match (first.without(target), second.without(target)) {
+                    (Some(first), Some(second)) => {
+                        Some(Node::Split(Box::new(Split { id, axis, ratio, first, second, bounds })))
+                    }
+                    (Some(only), None) | (None, Some(only)) => Some(only),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
+
+    fn find_split(&mut self, id: usize) -> Option<&mut Split> {
+        match self {
+            Node::Leaf(_) => None,
+            Node::Split(split) => {
+                if split.id == id {
+                    return Some(split);
+                }
+                if let Some(found) = split.first.find_split(id) {
+                    return Some(found);
+                }
+                split.second.find_split(id)
+            }
+        }
+    }
+}
+
+struct Tab {
+    id: usize,
+    root: Node,
+    /// The pane that has (or last had) the keyboard.
+    active: Pane,
+}
+
+impl Tab {
+    fn panes(&self) -> Vec<Pane> {
+        let mut out = Vec::new();
+        self.root.leaves(&mut out);
+        out
+    }
+}
+
+/// Terminals side by side in one tab. More than this and none of them is
+/// wide enough to read; open another tab instead.
+const MAX_PANES: usize = 4;
+
+#[derive(Clone, Copy)]
+enum CloseTarget {
+    Pane(EntityId),
+    Tab(usize),
+}
+
+pub struct TerminalArea {
+    root_dir: PathBuf,
+    tabs: Vec<Tab>,
+    active: usize,
+    next_id: usize,
+    /// Split whose divider is being dragged.
+    dragging: Option<usize>,
+    /// A close waiting for the user to confirm, and how many terminals are busy.
+    confirm: Option<(CloseTarget, usize)>,
+    confirm_focus: FocusHandle,
+    subscriptions: HashMap<EntityId, Subscription>,
+}
+
+impl EventEmitter<AreaEvent> for TerminalArea {}
+
+impl Focusable for TerminalArea {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.tabs[self.active].active.focus_handle(cx)
+    }
+}
+
+impl TerminalArea {
+    pub fn new(root_dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self {
+            root_dir,
+            tabs: Vec::new(),
+            active: 0,
+            next_id: 0,
+            dragging: None,
+            confirm: None,
+            confirm_focus: cx.focus_handle(),
+            subscriptions: HashMap::new(),
+        };
+        this.add_tab(window, cx);
+        this
+    }
+
+    /// How many terminals, in all tabs, are running a program right now.
+    pub fn busy_count(&self, cx: &App) -> usize {
+        self.tabs.iter().flat_map(|t| t.panes()).filter(|p| p.read(cx).is_busy()).count()
+    }
+
+    /// Terminals in all tabs.
+    #[cfg(test)]
+    pub fn pane_count(&self) -> usize {
+        self.tabs.iter().map(|t| t.panes().len()).sum()
+    }
+
+    fn id(&mut self) -> usize {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    fn spawn_pane(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Pane {
+        let pane = cx.new(|cx| TerminalView::new(Some(cwd), cx));
+        let subscription = cx.subscribe_in(&pane, window, |this, pane, event, window, cx| match event {
+            TerminalViewEvent::TitleChanged => cx.notify(),
+            // A shell that ended normally (`exit`) takes its pane with it. After
+            // a failure the pane stays, so the reason remains readable.
+            TerminalViewEvent::Exited(Some(0)) => this.remove_pane(pane.entity_id(), window, cx),
+            TerminalViewEvent::Exited(_) => cx.notify(),
+            TerminalViewEvent::OpenPath { path, line, col } => {
+                cx.emit(AreaEvent::OpenPath { path: path.clone(), line: *line, col: *col })
+            }
+        });
+        self.subscriptions.insert(pane.entity_id(), subscription);
+        pane
+    }
+
+    fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // New tabs start in the project folder; splits follow the pane they came from.
+        let pane = self.spawn_pane(self.root_dir.clone(), window, cx);
+        let id = self.id();
+        self.tabs.push(Tab { id, root: Node::Leaf(pane.clone()), active: pane });
+        self.active = self.tabs.len() - 1;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(self.active) {
+            let handle = tab.active.focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+    }
+
+    fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index < self.tabs.len() {
+            self.active = index;
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn split_active(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        if tab.panes().len() >= MAX_PANES {
+            return;
+        }
+        let source = tab.active.clone();
+        let cwd = source.read(cx).cwd().unwrap_or_else(|| self.root_dir.clone());
+        let pane = self.spawn_pane(cwd, window, cx);
+        let id = self.id();
+        let tab = &mut self.tabs[self.active];
+        if tab.root.split(source.entity_id(), axis, &pane, id) {
+            tab.active = pane;
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.tabs.len() as isize;
+        let next = (self.active as isize + step).rem_euclid(count) as usize;
+        self.select_tab(next, window, cx);
+    }
+
+    fn cycle_pane(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let panes = tab.panes();
+        let current = panes.iter().position(|p| *p == tab.active).unwrap_or(0) as isize;
+        let next = (current + step).rem_euclid(panes.len() as isize) as usize;
+        tab.active = panes[next].clone();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Closes a pane or a tab, asking first if that would kill a running program.
+    fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let panes = match target {
+            CloseTarget::Pane(id) => self
+                .tabs
+                .iter()
+                .flat_map(|t| t.panes())
+                .filter(|p| p.entity_id() == id)
+                .collect::<Vec<_>>(),
+            CloseTarget::Tab(id) => {
+                self.tabs.iter().filter(|t| t.id == id).flat_map(|t| t.panes()).collect()
+            }
+        };
+        let busy = panes.iter().filter(|p| p.read(cx).is_busy()).count();
+        if busy > 0 && cx.global::<AppState>().settings.confirm_close {
+            self.confirm = Some((target, busy));
+            window.focus(&self.confirm_focus, cx);
+            cx.notify();
+        } else {
+            self.close(target, window, cx);
+        }
+    }
+
+    fn close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            CloseTarget::Pane(id) => self.remove_pane(id, window, cx),
+            CloseTarget::Tab(id) => {
+                let panes: Vec<Pane> =
+                    self.tabs.iter().filter(|t| t.id == id).flat_map(|t| t.panes()).collect();
+                for pane in panes {
+                    self.remove_pane(pane.entity_id(), window, cx);
+                }
+            }
+        }
+    }
+
+    fn remove_pane(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|t| t.panes().iter().any(|p| p.entity_id() == id))
+        else {
+            return;
+        };
+        self.subscriptions.remove(&id);
+        let tab = self.tabs.remove(index);
+        let was_active = tab.active.entity_id() == id;
+        match tab.root.without(id) {
+            Some(root) => {
+                let mut panes = Vec::new();
+                root.leaves(&mut panes);
+                let active = if was_active { panes[0].clone() } else { tab.active };
+                self.tabs.insert(index, Tab { id: tab.id, root, active });
+            }
+            None => {
+                if self.active > index || self.active >= self.tabs.len() {
+                    self.active = self.active.saturating_sub(1);
+                }
+            }
+        }
+        if self.tabs.is_empty() {
+            // The centre is never empty: closing the last terminal starts a new one.
+            self.add_tab(window, cx);
+            return;
+        }
+        // Keep the keyboard where it was unless its pane is the one that went away.
+        let focus_lost = !self
+            .tabs
+            .iter()
+            .flat_map(|t| t.panes())
+            .any(|p| p.focus_handle(cx).is_focused(window));
+        if focus_lost && self.confirm.is_none() {
+            self.focus_active(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn answer_confirm(&mut self, close: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((target, _)) = self.confirm.take() else { return };
+        if close {
+            self.close(target, window, cx);
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn on_drag(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.dragging else { return };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.dragging = None;
+            return;
+        }
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(split) = tab.root.find_split(id) else { return };
+        let bounds = split.bounds.get();
+        let ratio = match split.axis {
+            Axis::Horizontal if bounds.size.width > px(0.) => {
+                (event.position.x - bounds.origin.x) / bounds.size.width
+            }
+            Axis::Vertical if bounds.size.height > px(0.) => {
+                (event.position.y - bounds.origin.y) / bounds.size.height
+            }
+            _ => return,
+        };
+        split.ratio = ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO);
+        cx.notify();
+    }
+
+    fn render_node(&self, node: &Node, cx: &mut Context<Self>) -> AnyElement {
+        let split = match node {
+            Node::Leaf(pane) => return div().size_full().child(pane.clone()).into_any_element(),
+            Node::Split(split) => split,
+        };
+        let id = split.id;
+        let horizontal = split.axis == Axis::Horizontal;
+        let ratio = split.ratio;
+        let bounds = split.bounds.clone();
+        let line = cx.theme().border;
+        let background = crate::theme::hsla(cx.global::<AppState>().scheme.terminal.background);
+
+        let first = div()
+            .flex_none()
+            .overflow_hidden()
+            .map(|d| if horizontal { d.h_full().w(relative(ratio)) } else { d.w_full().h(relative(ratio)) })
+            .child(self.render_node(&split.first, cx));
+        let second = div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .child(self.render_node(&split.second, cx));
+        let divider = div()
+            .id(("divider", id))
+            .flex_none()
+            .flex()
+            .bg(background)
+            .map(|d| {
+                if horizontal {
+                    d.h_full().w(px(DIVIDER)).justify_center().cursor_col_resize()
+                } else {
+                    d.w_full().h(px(DIVIDER)).flex_col().justify_center().cursor_row_resize()
+                }
+            })
+            .child(div().bg(line).map(|d| {
+                if horizontal { d.h_full().w(px(1.)) } else { d.w_full().h(px(1.)) }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.dragging = Some(id);
+                    cx.stop_propagation();
+                }),
+            );
+
+        div()
+            .size_full()
+            .relative()
+            .flex()
+            .when(!horizontal, |d| d.flex_col())
+            .child(
+                canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(first)
+            .child(divider)
+            .child(second)
+            .into_any_element()
+    }
+
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (border, muted, foreground, active_bg, hover_bg) = (
+            theme.border,
+            theme.muted_foreground,
+            theme.foreground,
+            theme.tab_active,
+            theme.secondary_hover,
+        );
+
+        let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
+            let tab_id = tab.id;
+            let selected = index == self.active;
+            let label = tab.active.read(cx).label();
+            let panes = tab.panes().len();
+            h_flex()
+                .id(("tab", tab_id))
+                .h_full()
+                .min_w(px(64.))
+                .max_w(px(240.))
+                .flex_shrink(1.)
+                .pl_3()
+                .pr_1()
+                .gap_1()
+                .border_r_1()
+                .border_color(border)
+                .text_sm()
+                .text_color(if selected { foreground } else { muted })
+                .when(selected, |d| d.bg(active_bg))
+                .hover(|s| s.text_color(foreground))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.select_tab(index, window, cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.request_close(CloseTarget::Tab(tab_id), window, cx);
+                    }),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .when(panes > 1, |d| d.child(div().flex_none().text_xs().text_color(muted).child(format!("{panes}"))))
+                .child(
+                    div()
+                        .id(("close-tab", tab_id))
+                        .flex_none()
+                        .p(px(3.))
+                        .rounded_sm()
+                        .hover(|s| s.bg(hover_bg))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.request_close(CloseTarget::Tab(tab_id), window, cx);
+                        }))
+                        .child(Icon::new(IconName::Close).xsmall()),
+                )
+        });
+
+        let button = |id: &'static str, icon: IconName, tooltip: &'static str| {
+            Button::new(id).ghost().xsmall().icon(icon).tooltip(tooltip)
+        };
+        h_flex()
+            .h(px(TAB_BAR_HEIGHT))
+            .flex_none()
+            .w_full()
+            .border_b_1()
+            .border_color(border)
+            .child(h_flex().h_full().flex_1().min_w_0().overflow_hidden().children(tabs).child(
+                div().px_2().flex_none().child(
+                    button("new-tab", IconName::Plus, "New terminal (Ctrl+Shift+T)").on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.add_tab(window, cx)),
+                    ),
+                ),
+            ))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .px_2()
+                    .child(button("close-pane", IconName::Close, "Close this terminal (Ctrl+Shift+W)").on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            if let Some(tab) = this.tabs.get(this.active) {
+                                let target = CloseTarget::Pane(tab.active.entity_id());
+                                this.request_close(target, window, cx);
+                            }
+                        }),
+                    ))
+                    .child(button("split-right", IconName::PanelRight, "Split right (Ctrl+Shift+D)").on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.split_active(Axis::Horizontal, window, cx)
+                        }),
+                    ))
+                    .child(button("split-down", IconName::PanelBottom, "Split down (Ctrl+Shift+E)").on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.split_active(Axis::Vertical, window, cx)
+                        }),
+                    )),
+            )
+    }
+
+    fn render_confirm(&self, busy: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let text = if busy == 1 {
+            "A program is still running in this terminal. Closing it will stop the program.".to_string()
+        } else {
+            format!("Programs are still running in {busy} terminals. Closing them will stop the programs.")
+        };
+        div()
+            .id("confirm-close")
+            .track_focus(&self.confirm_focus)
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui_kit::black().opacity(0.5))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "enter" => this.answer_confirm(true, window, cx),
+                    "escape" => this.answer_confirm(false, window, cx),
+                    _ => {}
+                }
+                cx.stop_propagation();
+            }))
+            .child(
+                v_flex()
+                    .w(px(400.))
+                    .p_4()
+                    .gap_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .text_color(theme.popover_foreground)
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Close terminal?"))
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(text))
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(Button::new("confirm-cancel").small().label("Cancel").on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.answer_confirm(false, window, cx)
+                                }),
+                            ))
+                            .child(Button::new("confirm-close").small().danger().label("Close").on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.answer_confirm(true, window, cx)
+                                }),
+                            )),
+                    ),
+            )
+    }
+}
+
+impl Render for TerminalArea {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Whichever pane was clicked or tabbed into becomes its tab's active pane.
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && let Some(focused) =
+                tab.panes().into_iter().find(|p| p.focus_handle(cx).is_focused(window))
+        {
+            tab.active = focused;
+        }
+
+        let body = match self.tabs.get(self.active) {
+            Some(tab) => self.render_node(&tab.root, cx),
+            None => div().into_any_element(),
+        };
+        // While a question is on screen the shortcuts below must not act behind it.
+        let idle = self.confirm.is_none();
+
+        v_flex()
+            .id("terminal-area")
+            .key_context("TerminalArea")
+            .size_full()
+            .relative()
+            .bg(cx.theme().background)
+            .on_mouse_move(cx.listener(Self::on_drag))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.dragging = None),
+            )
+            .on_action(cx.listener(move |this, _: &NewTab, window, cx| {
+                if idle {
+                    this.add_tab(window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &SplitRight, window, cx| {
+                if idle {
+                    this.split_active(Axis::Horizontal, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &SplitDown, window, cx| {
+                if idle {
+                    this.split_active(Axis::Vertical, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &ClosePane, window, cx| {
+                if idle && let Some(tab) = this.tabs.get(this.active) {
+                    let target = CloseTarget::Pane(tab.active.entity_id());
+                    this.request_close(target, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &CloseTab, window, cx| {
+                if idle && let Some(tab) = this.tabs.get(this.active) {
+                    let target = CloseTarget::Tab(tab.id);
+                    this.request_close(target, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &NextTab, window, cx| {
+                if idle {
+                    this.cycle_tab(1, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &PrevTab, window, cx| {
+                if idle {
+                    this.cycle_tab(-1, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &NextPane, window, cx| {
+                if idle {
+                    this.cycle_pane(1, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &PrevPane, window, cx| {
+                if idle {
+                    this.cycle_pane(-1, window, cx);
+                }
+            }))
+            .child(self.render_tab_bar(cx))
+            .child(div().flex_1().min_h_0().w_full().child(body))
+            .when_some(self.confirm, |d, (_, busy)| d.child(self.render_confirm(busy, cx)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, WindowOptions};
+    use wercode_core::config::Settings;
+
+    use super::TerminalArea;
+
+    fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<TerminalArea>) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::apply(Settings::default(), cx);
+            crate::term::init(cx);
+            let dir = std::env::temp_dir();
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| TerminalArea::new(dir, window, cx))
+            })
+            .unwrap()
+        })
+    }
+
+    fn press(cx: &mut TestAppContext, window: AnyWindowHandle, keys: &[&str]) {
+        cx.update_window(window, |_, window, cx| {
+            for key in keys {
+                window.press(key, cx);
+            }
+        })
+        .unwrap();
+    }
+
+    /// (number of tabs, active tab index, panes in the active tab)
+    fn shape(cx: &mut TestAppContext, area: &Entity<TerminalArea>) -> (usize, usize, usize) {
+        area.read_with(cx, |a, _| (a.tabs.len(), a.active, a.tabs[a.active].panes().len()))
+    }
+
+    #[gpui_kit::test]
+    async fn shortcuts_split_switch_and_close(cx: &mut TestAppContext) {
+        let (window, area) = open(cx);
+        assert_eq!(shape(cx, &area), (1, 0, 1));
+
+        press(cx, window, &["ctrl-shift-d", "ctrl-shift-e"]);
+        assert_eq!(shape(cx, &area), (1, 0, 3));
+
+        press(cx, window, &["ctrl-shift-t"]);
+        assert_eq!(shape(cx, &area), (2, 1, 1));
+        press(cx, window, &["ctrl-tab"]);
+        assert_eq!(shape(cx, &area), (2, 0, 3));
+        press(cx, window, &["ctrl-shift-tab"]);
+        assert_eq!(shape(cx, &area), (2, 1, 1));
+
+        // Closing the only pane of a tab closes the tab.
+        press(cx, window, &["ctrl-shift-w"]);
+        assert_eq!(shape(cx, &area), (1, 0, 3));
+
+        // Moving between panes changes which one a close removes.
+        let before = area.read_with(cx, |a, _| a.tabs[0].active.entity_id());
+        press(cx, window, &["ctrl-alt-left"]);
+        let after = area.read_with(cx, |a, _| a.tabs[0].active.entity_id());
+        assert_ne!(before, after);
+        press(cx, window, &["ctrl-shift-w"]);
+        assert_eq!(shape(cx, &area), (1, 0, 2));
+        let panes = area.read_with(cx, |a, _| a.tabs[0].panes());
+        assert!(panes.iter().all(|p| p.entity_id() != after));
+
+        // The centre is never left empty.
+        press(cx, window, &["ctrl-shift-q"]);
+        assert_eq!(shape(cx, &area), (1, 0, 1));
+    }
+
+    #[gpui_kit::test]
+    async fn splits_share_the_space_and_the_divider_moves(cx: &mut TestAppContext) {
+        let (window, area) = open(cx);
+        let sizes = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+            area.read_with(cx, |a, cx| {
+                a.tabs[0].panes().iter().map(|p| p.read(cx).grid_size().unwrap()).collect::<Vec<_>>()
+            })
+        };
+        let whole = sizes(cx)[0];
+        assert!(whole.0 > 40 && whole.1 > 10, "one pane fills the window: {whole:?}");
+
+        press(cx, window, &["ctrl-shift-d"]);
+        let side = sizes(cx);
+        assert_eq!(side.len(), 2);
+        // Side by side: same height, each about half the width.
+        assert_eq!(side[0].1, whole.1);
+        assert_eq!(side[1].1, whole.1);
+        assert!(side[0].0.abs_diff(side[1].0) <= 2, "{side:?}");
+        assert!(side[0].0 + side[1].0 <= whole.0 && side[0].0 + side[1].0 + 6 > whole.0, "{side:?}");
+
+        // Drag the divider a quarter of the way to the left.
+        let bounds = area.read_with(cx, |a, _| match &a.tabs[0].root {
+            super::Node::Split(split) => split.bounds.get(),
+            super::Node::Leaf(_) => panic!("expected a split"),
+        });
+        let from = gpui_kit::point(bounds.center().x, bounds.center().y);
+        let to = gpui_kit::point(bounds.origin.x + bounds.size.width * 0.25, bounds.center().y);
+        cx.update_window(window, |_, window, cx| window.drag(from, to, cx)).unwrap();
+        let dragged = sizes(cx);
+        assert!(dragged[0].0 * 2 < dragged[1].0, "left pane should be about a third: {dragged:?}");
+
+        press(cx, window, &["ctrl-shift-e"]);
+        let stacked = sizes(cx);
+        assert_eq!(stacked.len(), 3);
+        // The right pane was split top and bottom: same width, about half the height each.
+        assert_eq!(stacked[1].0, stacked[2].0);
+        assert!(stacked[1].1.abs_diff(stacked[2].1) <= 1, "{stacked:?}");
+        assert!(stacked[1].1 < whole.1);
+    }
+
+    #[gpui_kit::test]
+    async fn closing_a_busy_terminal_asks_first(cx: &mut TestAppContext) {
+        let (window, area) = open(cx);
+        press(cx, window, &["ctrl-shift-d"]);
+        let pane = area.read_with(cx, |a, _| a.tabs[0].active.clone());
+        // Something that keeps running for a while on any Windows or Unix shell.
+        let command = if cfg!(windows) { "ping -n 60 127.0.0.1\r" } else { "sleep 60\r" };
+        pane.read_with(cx, |p, _| p.insert_text(command));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !pane.read_with(cx, |p, _| p.is_busy()) {
+            assert!(std::time::Instant::now() < deadline, "the command never started");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        press(cx, window, &["ctrl-shift-w"]);
+        assert!(area.read_with(cx, |a, _| a.confirm.is_some()));
+        assert_eq!(shape(cx, &area), (1, 0, 2), "nothing closes before the answer");
+
+        // Shortcuts do not act behind the question; Escape keeps the terminal.
+        press(cx, window, &["ctrl-shift-t", "escape"]);
+        assert!(area.read_with(cx, |a, _| a.confirm.is_none()));
+        assert_eq!(shape(cx, &area), (1, 0, 2));
+
+        press(cx, window, &["ctrl-shift-w", "enter"]);
+        assert!(area.read_with(cx, |a, _| a.confirm.is_none()));
+        assert_eq!(shape(cx, &area), (1, 0, 1));
+    }
+
+    #[gpui_kit::test]
+    async fn tab_key_goes_to_the_shell_not_to_focus_navigation(cx: &mut TestAppContext) {
+        let (window, area) = open(cx);
+        let pane = area.read_with(cx, |a, _| a.tabs[0].active.clone());
+        press(cx, window, &["tab", "shift-tab"]);
+        cx.update_window(window, |_, window, cx| {
+            use gpui_kit::Focusable as _;
+            assert!(pane.focus_handle(cx).is_focused(window));
+        })
+        .unwrap();
+    }
+}

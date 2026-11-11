@@ -12,7 +12,7 @@ use gpui_kit::component::tree::{TreeEvent, TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wercode_core::fs_tree;
+use wercode_core::{file_icons, fs_tree};
 use wercode_core::git::{FileStatus, RepoStatus};
 
 /// Upper bound on entries read at once, so a huge repository cannot stall the window.
@@ -30,6 +30,8 @@ pub struct FilesPanel {
     truncated: bool,
     /// Ids of the folders the user has opened; kept across re-reads of the disk.
     expanded: HashSet<SharedString>,
+    /// Ids of everything that is a folder, including empty ones.
+    folders: Arc<HashSet<SharedString>>,
     git: Option<Arc<RepoStatus>>,
     /// The name field for a new file or folder, while it is showing.
     creating: Option<(Creating, PathBuf)>,
@@ -38,7 +40,12 @@ pub struct FilesPanel {
     _subscriptions: Vec<Subscription>,
 }
 
-fn build(dir: &Path, budget: &mut usize, expanded: &HashSet<SharedString>) -> Vec<TreeItem> {
+fn build(
+    dir: &Path,
+    budget: &mut usize,
+    expanded: &HashSet<SharedString>,
+    folders: &mut HashSet<SharedString>,
+) -> Vec<TreeItem> {
     let mut items = Vec::new();
     for entry in fs_tree::list_dir(dir) {
         if *budget == 0 {
@@ -48,7 +55,8 @@ fn build(dir: &Path, budget: &mut usize, expanded: &HashSet<SharedString>) -> Ve
         let id: SharedString = entry.path.to_string_lossy().into_owned().into();
         let mut item = TreeItem::new(id.clone(), entry.name);
         if entry.is_dir {
-            item = item.children(build(&entry.path, budget, expanded)).expanded(expanded.contains(&id));
+            folders.insert(id.clone());
+            item = item.children(build(&entry.path, budget, expanded, folders)).expanded(expanded.contains(&id));
         }
         items.push(item);
     }
@@ -69,7 +77,8 @@ impl FilesPanel {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let expanded = HashSet::new();
         let mut budget = MAX_ENTRIES;
-        let items = build(&root, &mut budget, &expanded);
+        let mut folders = HashSet::new();
+        let items = build(&root, &mut budget, &expanded, &mut folders);
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
         let name_input = cx.new(|cx| InputState::new(window, cx));
         let subscriptions = vec![
@@ -92,6 +101,7 @@ impl FilesPanel {
             tree,
             truncated: budget == 0,
             expanded,
+            folders: Arc::new(folders),
             git: None,
             creating: None,
             name_input,
@@ -103,7 +113,9 @@ impl FilesPanel {
     /// Reads the folder from disk again, keeping open folders open.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let mut budget = MAX_ENTRIES;
-        let items = build(&self.root, &mut budget, &self.expanded);
+        let mut folders = HashSet::new();
+        let items = build(&self.root, &mut budget, &self.expanded, &mut folders);
+        self.folders = Arc::new(folders);
         self.truncated = budget == 0;
         self.tree.update(cx, |tree, cx| tree.set_items(items, cx));
         cx.notify();
@@ -125,7 +137,7 @@ impl FilesPanel {
             return self.root.clone();
         };
         let path = PathBuf::from(entry.item().id.as_ref());
-        if entry.is_folder() {
+        if self.folders.contains(&entry.item().id) {
             path
         } else {
             path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.root.clone())
@@ -269,10 +281,10 @@ impl Render for FilesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let git = self.git.clone();
+        let folders = self.folders.clone();
 
         v_flex()
             .size_full()
-            .bg(cx.theme().background)
             .child(self.render_header(cx))
             .when_some(self.creating.clone(), |this, (kind, dir)| {
                 this.child(self.render_name_field(kind, &dir, cx))
@@ -283,7 +295,14 @@ impl Render for FilesPanel {
             .child(
                 div().flex_1().min_h_0().child(
                     tree(&self.tree, move |ix, entry, _selected, _window, cx| {
-                        let folder = entry.is_folder();
+                        // An empty folder has no children, so the tree alone cannot tell.
+                        let folder = folders.contains(&entry.item().id);
+                        let name = entry.item().label.as_ref();
+                        let picture = if folder {
+                            crate::assets::file_icon(file_icons::for_folder(name))
+                        } else {
+                            file_icons::for_file(name).and_then(crate::assets::file_icon)
+                        };
                         let path = Path::new(entry.item().id.as_ref());
                         let status = git.as_ref().and_then(|g| if folder { g.folder(path) } else { g.file(path) });
                         let color = status.map(|s| status_color(s, cx));
@@ -299,16 +318,19 @@ impl Render for FilesPanel {
                             Some(s) => div().text_xs().child(s.letter()).into_any_element(),
                             None => div().into_any_element(),
                         };
-                        ListItem::new(ix).pl(px(6.) + px(14.) * entry.depth() as f32).pr_3().child(
+                        ListItem::new(ix).py_0p5().pl(px(4.) + px(12.) * entry.depth() as f32).pr_3().child(
                             h_flex()
                                 .w_full()
                                 .gap_1p5()
                                 .text_sm()
                                 .when_some(color, |d, c| d.text_color(c))
-                                .child(if folder {
-                                    Icon::new(chevron).small().text_color(muted)
-                                } else {
-                                    Icon::new(IconName::File).small().text_color(muted)
+                                // A file keeps the width of the chevron, so names line up.
+                                .child(div().flex_none().w(px(14.)).when(folder, |d| {
+                                    d.child(Icon::new(chevron).xsmall().text_color(muted))
+                                }))
+                                .child(match picture {
+                                    Some(path) => img(path).flex_none().size(px(16.)).into_any_element(),
+                                    None => Icon::new(IconName::File).small().text_color(muted).into_any_element(),
                                 })
                                 .child(div().flex_1().min_w_0().truncate().child(entry.item().label.clone()))
                                 .child(div().flex_none().w(px(12.)).flex().justify_center().child(mark)),

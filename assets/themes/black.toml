@@ -3,9 +3,9 @@ appearance = "dark"
 
 [ui]
 bg = "#000000"
-surface = "#0c0c0c"
-surface_2 = "#161616"
-border = "#262626"
+surface = "#0f1012"
+surface_2 = "#1a1c20"
+border = "#25272c"
 border_input = "#6b6b6b"
 text = "#e8e8e8"
 text_muted = "#9a9a9a"

@@ -1,6 +1,7 @@
 //! Wercode core: everything that does not need a window.
 
 pub mod config;
+pub mod file_icons;
 pub mod fs_tree;
 pub mod git;
 pub mod links;

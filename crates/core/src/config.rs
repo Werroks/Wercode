@@ -10,6 +10,9 @@ pub struct Settings {
     pub theme: String,
     pub font_family: String,
     pub font_size: f32,
+    /// Weight of the terminal text: 400 is regular, 700 bold. Fonts without
+    /// that weight fall back to the nearest one they have.
+    pub font_weight: f32,
     pub line_height: f32,
     /// "auto", a program name, or a path to an executable.
     pub shell: String,
@@ -41,6 +44,7 @@ impl Default for Settings {
             theme: "black".into(),
             font_family: default_font().into(),
             font_size: 14.0,
+            font_weight: 500.0,
             line_height: 1.2,
             shell: "auto".into(),
             shell_args: Vec::new(),

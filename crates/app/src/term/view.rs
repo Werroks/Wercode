@@ -607,6 +607,7 @@ impl Render for TerminalView {
         let danger = hsla(state.scheme.ui.danger);
         let font_family: SharedString = state.settings.font_family.clone().into();
         let font_size = px(state.settings.font_size);
+        let font_weight = FontWeight(state.settings.font_weight.clamp(100.0, 900.0));
         let line_h = px((state.settings.font_size * state.settings.line_height).round());
         let focused = self.focus.is_focused(window);
         let show_cursor = self.blink_on || !state.settings.cursor_blink;
@@ -652,7 +653,8 @@ impl Render for TerminalView {
         let shared = self.metrics.clone();
         let grid = canvas(
             move |bounds, window, _cx| {
-                let base = font(font_family.clone());
+                let mut base = font(font_family.clone());
+                base.weight = font_weight;
                 let text_system = window.text_system().clone();
                 let font_id = text_system.resolve_font(&base);
                 let cell_w = text_system

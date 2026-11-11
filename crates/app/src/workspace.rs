@@ -423,6 +423,7 @@ impl Workspace {
                         this.switcher_open = !this.switcher_open;
                         cx.notify();
                     }))
+                    .child(img(crate::assets::LOGO).flex_none().size(px(16.)))
                     .child(name)
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
             )
@@ -594,7 +595,13 @@ impl Workspace {
                 .w(px(520.))
                 .max_w(relative(0.9))
                 .gap_1()
-                .child(div().px_3().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Wercode"))
+                .child(
+                    h_flex()
+                        .px_3()
+                        .gap_3()
+                        .child(img(crate::assets::LOGO).flex_none().size(px(40.)))
+                        .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Wercode")),
+                )
                 .child(
                     div()
                         .px_3()
@@ -640,6 +647,7 @@ impl Workspace {
 
         v_flex()
             .size_full()
+            .bg(theme.sidebar)
             .child(
                 h_flex()
                     .h(px(36.))
@@ -735,6 +743,7 @@ impl Workspace {
             .gap_3()
             .border_t_1()
             .border_color(border)
+            .bg(theme.sidebar)
             .text_xs()
             .text_color(muted)
             .child(git)
@@ -788,6 +797,7 @@ impl Render for Workspace {
             .relative()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .font_weight(FontWeight::MEDIUM)
             .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| this.pick_folder(window, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, _, cx| {

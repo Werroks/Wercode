@@ -1,47 +1,47 @@
 feature,area,priority,original,clone,notes
-Open a folder as workspace (dialog and CLI argument),workspace,must,yes,partial,CLI argument only
+Open a folder as workspace (dialog and CLI argument),workspace,must,yes,partial,CLI argument and system folder dialog; the dialog itself is not hand-tested
 Terminal in the center running the user's shell,terminal,must,yes,yes,in Cursor it is a bottom panel
-Correct VT emulation (colors cursor alt screen mouse),terminal,must,yes,partial,alacritty_terminal; no mouse reporting to programs yet
-Terminal resize follows window and splitter,terminal,must,yes,yes,no debounce yet
+Correct VT emulation (colors cursor alt screen mouse),terminal,must,yes,partial,alacritty_terminal; mouse reporting (SGR and legacy) implemented; not hand-tested in vim/htop
+Terminal resize follows window and splitter,terminal,must,yes,yes,PTY resize debounced 60 ms
 Scrollback with mouse wheel,terminal,must,yes,partial,implemented; not hand-tested
 Select copy paste in terminal,terminal,must,yes,partial,implemented; not hand-tested
-Multiple terminal tabs,terminal,must,yes,no,
+Multiple terminal tabs,terminal,must,yes,yes,Ctrl+Shift+T / Ctrl+Tab / middle click closes; covered by UI tests
 New terminal starts in workspace root,terminal,must,yes,yes,
-Choose shell (PowerShell cmd bash zsh WSL),terminal,must,yes,partial,auto-detect and settings.toml; no UI
-File tree in right sidebar,files,must,yes,yes,Agent layout puts sidebar on the right
+Choose shell (PowerShell cmd bash zsh WSL),terminal,must,yes,partial,auto-detect and settings.toml; no UI; cwd tracking only for PowerShell (and Linux via /proc)
+File tree in right sidebar,files,must,yes,yes,"left by default; panel_side = ""right"" in settings.toml moves it"
 Lazy expand and collapse folders,files,must,yes,partial,"expand/collapse works; tree is read eagerly, capped at 5000"
-Live update of tree on file changes,files,must,yes,no,notify
+Live update of tree on file changes,files,must,yes,partial,re-read when git status changes (2 s poll while the window is active) and by the Refresh button; no file watcher yet
 Respect .gitignore (dim or hide),files,must,yes,yes,hidden
-Git status marks in tree,files,must,yes,no,
-Three buttons above the sidebar switching panels,shell,must,partial,no,Cursor uses an activity bar with many icons
-Resizable and collapsible sidebar,shell,must,yes,partial,resizable; not collapsible
+Git status marks in tree,files,must,yes,yes,letters U M A D R ! on files; coloured dot on folders; parser unit-tested
+Three buttons above the sidebar switching panels,shell,must,partial,yes,files / search / git; search and git bodies are placeholders
+Resizable and collapsible sidebar,shell,must,yes,yes,Ctrl+Shift+B; width remembered
 Git panel: list of changed files,git,must,yes,no,
 Git panel: stage and unstage files,git,must,yes,no,
 Git panel: commit with message,git,must,yes,no,
-Current branch and ahead/behind,git,must,yes,no,
+Current branch and ahead/behind,git,must,yes,yes,status bar: branch; commits to push and pull; change and conflict counts; colour follows the state
 Settings: font size theme shell,settings,must,yes,no,
-Restore last workspace and layout on launch,workspace,must,yes,no,
-Terminal splits (side by side and stacked),terminal,must,yes,no,user decision 2026-11-11
+Restore last workspace and layout on launch,workspace,must,yes,partial,last project; panel; panel width; window size and position; not terminal tabs
+Terminal splits (side by side and stacked),terminal,must,yes,yes,user decision 2026-11-11; Ctrl+Shift+D / Ctrl+Shift+E; draggable divider; at most 4 terminals per tab; covered by UI tests
 Dark theme by default plus several built-in color schemes in settings,settings,must,yes,partial,user decision 2026-11-11; own palettes only; 5 schemes via settings.toml; no settings screen
-Clickable file paths and URLs in terminal output,terminal,should,yes,no,
+Clickable file paths and URLs in terminal output,terminal,should,yes,partial,Ctrl+click; detection unit-tested; pointer part not hand-tested; paths open in the system app until the editor exists
 Click file opens it in the built-in editor,files,must,yes,no,
 Insert file path into terminal (click or drag),files,should,partial,no,key feature for CLI agents
 Open file in $EDITOR in a terminal tab,files,should,no,no,own feature
-Context menu: new rename delete reveal copy path,files,should,yes,no,
+Context menu: new rename delete reveal copy path,files,should,yes,partial,New file and New folder buttons above the tree; no context menu; no rename or delete
 Diff view for a changed file,git,should,yes,no,
 Push pull fetch buttons,git,should,yes,no,shell out to git
 Switch and create branch,git,should,yes,no,
 Discard changes,git,should,yes,no,confirm first
-Command palette,shell,should,yes,no,
+Command palette,shell,should,yes,yes,Ctrl+Shift+P; 15 commands; covered by a UI test
 Quick open file by fuzzy name,shell,should,yes,no,
 Configurable keybindings,settings,should,yes,no,
-Recent workspaces list,workspace,should,yes,no,
+Recent workspaces list,workspace,should,yes,yes,in the title switcher and on the welcome screen
 Word-level diff highlighting,git,could,yes,no,
 Commit history / graph,git,could,yes,no,
 Stage individual hunks,git,could,yes,no,
 Git worktrees switcher,git,could,yes,no,useful for parallel CLI agents
 Custom themes from file,settings,could,yes,no,
-Sidebar on left option,shell,could,yes,no,
+Sidebar on left option,shell,could,yes,yes,panel_side in settings.toml
 Multiple windows,workspace,could,yes,no,
 Image preview,files,could,yes,no,
 Built-in editor: open edit save with syntax highlight,editor,must,yes,no,user decision 2026-11-11; gpui-component editor or own on ropey + tree-sitter
@@ -50,7 +50,7 @@ Undo redo find and replace in file,editor,must,yes,no,
 Unsaved changes marker and prompt on close,editor,must,yes,no,
 Reload file changed on disk (agent edits it),editor,must,partial,no,critical when CLI agents write files
 Search button: project-wide text search panel,search,must,yes,no,third button; user decision
-Recent projects switcher at the top of the window,workspace,must,yes,no,user decision
+Recent projects switcher at the top of the window,workspace,must,yes,yes,covered by a UI test
 Editor splits,editor,could,yes,no,
 LSP (go to definition hover diagnostics),editor,could,yes,no,after MVP and opt-in; language servers use a lot of RAM
 AI chat and agent panel,ai,skip,yes,skip,user runs a CLI agent in the terminal

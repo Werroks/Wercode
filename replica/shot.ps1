@@ -10,6 +10,7 @@ public class Win {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   public struct RECT { public int L, T, R, B; }
 }
 '@
@@ -17,6 +18,9 @@ public class Win {
 $h = $p.MainWindowHandle
 [Win]::SetForegroundWindow($h) | Out-Null
 Start-Sleep -Milliseconds 600
+# Windows may refuse to bring the window forward. Typing or capturing then would
+# hit whatever the user has in front, so stop instead.
+if ([Win]::GetForegroundWindow() -ne $h) { "wercode is not the foreground window; nothing typed or captured"; exit 2 }
 if ($Type) { [System.Windows.Forms.SendKeys]::SendWait($Type); Start-Sleep -Milliseconds 1500 }
 $r = New-Object Win+RECT
 [Win]::GetWindowRect($h, [ref]$r) | Out-Null

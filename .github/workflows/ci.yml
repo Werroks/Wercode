@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libxcb1-dev libx11-dev libx11-xcb-dev libfontconfig1-dev libfreetype6-dev \
+            libasound2-dev libssl-dev libvulkan-dev pkg-config
+      - name: Build
+        run: cargo build --workspace --locked
+      # The window tests need a display and a GPU; the core tests run everywhere.
+      - name: Test core
+        run: cargo test -p wercode-core --locked
+      - name: Test app
+        if: runner.os == 'Windows'
+        run: cargo test -p wercode --locked

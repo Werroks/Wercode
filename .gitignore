@@ -1,3 +1,6 @@
 target/
 *.log
 .DS_Store
+.ruff_cache/
+# Screenshots of the running app show local paths; keep them off the public repo.
+replica/clone-screens/

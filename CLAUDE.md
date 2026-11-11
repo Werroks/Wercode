@@ -24,17 +24,17 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
   `panel/` (file tree), `assets.rs` (bundled icons), `theme.rs`.
 - `assets/themes/*.toml` — built-in colour schemes, compiled in.
-- `replica/` — planning notes (`features.csv`, `build-log.md`, `architecture.md`)
-  and Windows-only helper scripts. Not shipped.
+- `docs/` — planning notes: `features.csv`, `build-log.md`, `architecture.md`.
+- `tools/drive.ps1` — Windows-only helper for checking the running window. Not shipped.
 
 ## Commands
 
 - `cargo run -- <folder>` runs the app; without a folder it reopens the last
   project or shows the welcome screen.
 - `cargo test` runs everything. App tests open headless windows and real shells.
-- `replica/drive.ps1` clicks, types and screenshots the running window on
-  Windows without taking the keyboard focus. Prefer it over `shot.ps1`, which
-  types into whatever window is in front.
+- `tools/drive.ps1` clicks, types and screenshots the running window on
+  Windows without taking the keyboard focus. Save screenshots outside the
+  repository: they show local paths.
 
 ## Things that bite
 
@@ -47,5 +47,5 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   test build. Do not `cargo update` them blindly.
 - Git is read by running the system `git` (`core::git`). Keep it off the UI
   thread and keep `GIT_OPTIONAL_LOCKS=0`.
-- After finishing a feature, update `replica/features.csv` and
-  `replica/build-log.md`.
+- After finishing a feature, update `docs/features.csv` and
+  `docs/build-log.md`.

@@ -1,10 +1,10 @@
 # Drives the running Wercode window for checks. Reference tooling, never shipped.
 #
-# Unlike shot.ps1 this never touches the keyboard focus or other windows: input
+# This never touches the keyboard focus or other windows: input
 # is posted to the Wercode window only, and the picture is taken from that
 # window only (PrintWindow), so it works while Wercode is in the background.
 #
-#   powershell -File replica\drive.ps1 "click:343,89; text:echo hi; key:13; sleep:800; shot:C:\tmp\a.png"
+#   powershell -File tools\drive.ps1 "click:343,89; text:echo hi; key:13; sleep:800; shot:C:\tmp\a.png"
 #
 # Steps (coordinates are client pixels):
 #   click:x,y   rclick:x,y   move:x,y   drag:x1,y1,x2,y2   wheel:x,y,delta

@@ -1,4 +1,4 @@
-feature,area,priority,original,clone,notes
+feature,area,priority,reference,done,notes
 Open a folder as workspace (dialog and CLI argument),workspace,must,yes,partial,CLI argument and system folder dialog; the dialog itself is not hand-tested
 Terminal in the center running the user's shell,terminal,must,yes,yes,in Cursor it is a bottom panel
 Correct VT emulation (colors cursor alt screen mouse),terminal,must,yes,partial,alacritty_terminal; mouse reporting (SGR and legacy) implemented; not hand-tested in vim/htop

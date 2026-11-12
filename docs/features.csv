@@ -13,11 +13,11 @@ Lazy expand and collapse folders,files,must,yes,partial,"expand/collapse works; 
 Live update of tree on file changes,files,must,yes,partial,re-read when git status changes (2 s poll while the window is active) and by the Refresh button; no file watcher yet
 Respect .gitignore (dim or hide),files,must,yes,yes,hidden
 Git status marks in tree,files,must,yes,yes,letters U M A D R ! on files; coloured dot on folders; parser unit-tested
-Three buttons above the sidebar switching panels,shell,must,partial,yes,files / search / git; search and git bodies are placeholders
+Three buttons above the sidebar switching panels,shell,must,partial,yes,files / search / git; the search body is a placeholder
 Resizable and collapsible sidebar,shell,must,yes,yes,Ctrl+Shift+B; width remembered
-Git panel: list of changed files,git,must,yes,no,
-Git panel: stage and unstage files,git,must,yes,no,
-Git panel: commit with message,git,must,yes,no,
+Git panel: list of changed files,git,must,yes,yes,Staged Changes and Changes lists with status letters; covered by a UI test
+Git panel: stage and unstage files,git,must,yes,yes,per file and all at once; works before the first commit too
+Git panel: commit with message,git,must,yes,yes,Ctrl+Enter or the button; with nothing staged it stages everything first; git errors are shown under the field
 Current branch and ahead/behind,git,must,yes,yes,status bar: branch; commits to push and pull; change and conflict counts; colour follows the state
 Settings: font size theme shell,settings,must,yes,no,
 Restore last workspace and layout on launch,workspace,must,yes,partial,last project; panel; panel width; window size and position; not terminal tabs

@@ -64,7 +64,7 @@ fn build(
 }
 
 /// The colour a status paints the file name and its mark with.
-fn status_color(status: FileStatus, cx: &App) -> Hsla {
+pub(crate) fn status_color(status: FileStatus, cx: &App) -> Hsla {
     let theme = cx.theme();
     match status {
         FileStatus::Untracked | FileStatus::Added | FileStatus::Renamed => theme.success,

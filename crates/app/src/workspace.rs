@@ -15,7 +15,7 @@ use gpui_kit::*;
 use wercode_core::git::{self, RepoStatus};
 use wercode_core::state::{self, State};
 
-use crate::panel::FilesPanel;
+use crate::panel::{FilesPanel, GitPanel, GitPanelEvent};
 use crate::term::{
     AreaEvent, ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
     TerminalArea,
@@ -118,9 +118,10 @@ struct Project {
     root: PathBuf,
     terminals: Entity<TerminalArea>,
     files: Entity<FilesPanel>,
+    changes: Entity<GitPanel>,
     /// `None` outside a repository, and until the first read finishes.
     git: Option<Arc<RepoStatus>>,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
     _git_poll: Task<()>,
 }
 
@@ -176,11 +177,18 @@ impl Workspace {
     fn open(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Project {
         let terminals = cx.new(|cx| TerminalArea::new(root.clone(), window, cx));
         let files = cx.new(|cx| FilesPanel::new(root.clone(), window, cx));
-        let subscription = cx.subscribe(&terminals, |_, _, event, cx| match event {
-            // Until the built-in editor exists, a clicked path opens in
-            // whatever the system uses for that file type.
-            AreaEvent::OpenPath { path, .. } => cx.open_with_system(path),
-        });
+        let changes = cx.new(|cx| GitPanel::new(root.clone(), window, cx));
+        let subscriptions = [
+            cx.subscribe(&terminals, |_, _, event, cx| match event {
+                // Until the built-in editor exists, a clicked path opens in
+                // whatever the system uses for that file type.
+                AreaEvent::OpenPath { path, .. } => cx.open_with_system(path),
+            }),
+            // Staging or committing shows at once, without waiting for the next poll.
+            cx.subscribe(&changes, |this, _, event, cx| match event {
+                GitPanelEvent::Changed => this.refresh_git(cx),
+            }),
+        ];
         window.set_window_title(&format!("{} - Wercode", folder_name(&root)));
 
         let dir = root.clone();
@@ -201,7 +209,7 @@ impl Workspace {
             }
         });
 
-        Project { root, terminals, files, git: None, _subscription: subscription, _git_poll: git_poll }
+        Project { root, terminals, files, changes, git: None, _subscriptions: subscriptions, _git_poll: git_poll }
     }
 
     #[cfg(test)]
@@ -212,6 +220,28 @@ impl Workspace {
     #[cfg(test)]
     fn root(&self) -> Option<PathBuf> {
         self.project.as_ref().map(|p| p.root.clone())
+    }
+
+    /// Reads the repository status now instead of at the next poll.
+    fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
+        let dir = project.root.clone();
+        cx.spawn(async move |this, cx| {
+            let path = dir.clone();
+            let status = cx.background_executor().spawn(async move { git::status(&path) }).await;
+            let _ = this.update(cx, |this, cx| this.set_git(&dir, status, cx));
+        })
+        .detach();
+    }
+
+    #[cfg(test)]
+    fn changes(&self) -> Option<Entity<GitPanel>> {
+        self.project.as_ref().map(|p| p.changes.clone())
+    }
+
+    #[cfg(test)]
+    fn git(&self) -> Option<Arc<RepoStatus>> {
+        self.project.as_ref().and_then(|p| p.git.clone())
     }
 
     fn set_git(&mut self, root: &Path, status: Option<RepoStatus>, cx: &mut Context<Self>) {
@@ -226,6 +256,7 @@ impl Workspace {
         };
         project.git = status.map(Arc::new);
         let git = project.git.clone();
+        project.changes.update(cx, |changes, cx| changes.set_git(git.clone(), cx));
         project.files.update(cx, |files, cx| {
             files.set_git(git, cx);
             if files_changed {
@@ -642,7 +673,7 @@ impl Workspace {
         let body = match self.panel {
             PanelKind::Files => project.files.clone().into_any_element(),
             PanelKind::Search => placeholder("Search across the project is not built yet."),
-            PanelKind::Git => placeholder("The git panel is not built yet. Use git in the terminal for now."),
+            PanelKind::Git => project.changes.clone().into_any_element(),
         };
 
         v_flex()
@@ -972,6 +1003,77 @@ mod tests {
         // Splitting stops at four terminals in a tab, however often it is asked for.
         press(cx, f.window, &["ctrl-shift-d", "ctrl-shift-e", "ctrl-shift-d", "ctrl-shift-d", "ctrl-shift-e"]);
         assert_eq!(f.workspace.read_with(cx, |w, cx| w.pane_count(cx)), 4);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn git_panel_stages_unstages_and_commits(cx: &mut TestAppContext) {
+        use std::process::Command;
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        // The repository has to exist before the window opens the folder.
+        let repo = std::env::temp_dir().join(format!("wercode-ws-gitpanel-{}", std::process::id())).join("one");
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "trunk"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        std::fs::write(repo.join("b.txt"), "b").unwrap();
+
+        let f = open(cx, "gitpanel");
+        press(cx, f.window, &["ctrl-shift-g"]);
+        cx.run_until_parked();
+        let counts = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            f.workspace.read_with(cx, |w, _| {
+                let git = w.git().expect("a repository");
+                (git.staged().count(), git.unstaged().count())
+            })
+        };
+        assert_eq!(counts(cx), (0, 2));
+        let panel = f.workspace.read_with(cx, |w, _| w.changes()).unwrap();
+
+        // The plus on a row stages that file; the minus takes it back out.
+        cx.update_window(f.window, |_, window, cx| window.click(("git-stage", 0usize), cx)).unwrap();
+        assert_eq!(counts(cx), (1, 1));
+        cx.update_window(f.window, |_, window, cx| window.click(("git-unstage", 0usize), cx)).unwrap();
+        assert_eq!(counts(cx), (0, 2));
+        cx.update_window(f.window, |_, window, cx| window.click("git-stage-all", cx)).unwrap();
+        assert_eq!(counts(cx), (2, 0));
+        cx.update_window(f.window, |_, window, cx| window.click("git-unstage-all", cx)).unwrap();
+        assert_eq!(counts(cx), (0, 2));
+
+        // No message, no commit.
+        cx.update_window(f.window, |_, window, cx| window.click("git-commit", cx)).unwrap();
+        assert_eq!(counts(cx), (0, 2));
+        assert!(panel.read_with(cx, |p, _| p.error().is_some()));
+
+        // Only the staged file goes into the commit.
+        cx.update_window(f.window, |_, window, cx| window.click(("git-stage", 0usize), cx)).unwrap();
+        assert_eq!(counts(cx), (1, 1));
+        cx.update_window(f.window, |_, window, cx| {
+            panel.update(cx, |p, cx| p.write_message("First", window, cx));
+        })
+        .unwrap();
+        cx.update_window(f.window, |_, window, cx| window.click("git-commit", cx)).unwrap();
+        assert_eq!(counts(cx), (0, 1));
+        assert_eq!(panel.read_with(cx, |p, cx| (p.error().map(str::to_string), p.message_text(cx), p.is_busy())), (None, String::new(), false));
+
+        // With nothing staged the button takes everything.
+        cx.update_window(f.window, |_, window, cx| {
+            panel.update(cx, |p, cx| p.write_message("Second", window, cx));
+        })
+        .unwrap();
+        cx.update_window(f.window, |_, window, cx| window.click("git-commit", cx)).unwrap();
+        assert_eq!(counts(cx), (0, 0));
+        let log = Command::new("git").arg("-C").arg(&repo).args(["log", "--format=%s"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).lines().collect::<Vec<_>>(), ["Second", "First"]);
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

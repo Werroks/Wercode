@@ -22,7 +22,7 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   shell lookup, PTY terminal, links, git status, file listing.
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
-  `panel/` (file tree), `assets.rs` (bundled icons), `theme.rs`.
+  `panel/` (file tree, git panel), `assets.rs` (bundled icons), `theme.rs`.
 - `assets/themes/*.toml` — built-in colour schemes, compiled in.
 - `docs/` — planning notes: `features.csv`, `build-log.md`, `architecture.md`.
 - `tools/drive.ps1` — Windows-only helper for checking the running window. Not shipped.
@@ -47,5 +47,7 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   test build. Do not `cargo update` them blindly.
 - Git is read by running the system `git` (`core::git`). Keep it off the UI
   thread and keep `GIT_OPTIONAL_LOCKS=0`.
+- The Windows icon is resource 1 of the executable (`crates/app/build.rs`);
+  the window takes it from there, so keep that number.
 - After finishing a feature, update `docs/features.csv` and
   `docs/build-log.md`.

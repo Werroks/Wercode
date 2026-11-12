@@ -31,6 +31,16 @@ impl FileStatus {
     }
 }
 
+/// One changed file as the git panel lists it: what is already in the index
+/// and what is still only in the working tree. A file can have both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    /// Absolute path.
+    pub path: PathBuf,
+    pub staged: Option<FileStatus>,
+    pub unstaged: Option<FileStatus>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepoStatus {
     /// Top folder of the repository; file paths below are absolute.
@@ -45,6 +55,8 @@ pub struct RepoStatus {
     /// Commits on the remote not pulled yet.
     pub behind: u32,
     pub files: BTreeMap<PathBuf, FileStatus>,
+    /// The same files in the order git lists them, split by index and working tree.
+    pub changes: Vec<Change>,
     /// Folders containing changed files, with the strongest status inside.
     pub folders: BTreeMap<PathBuf, FileStatus>,
 }
@@ -56,6 +68,14 @@ impl RepoStatus {
 
     pub fn conflicts(&self) -> usize {
         self.files.values().filter(|s| **s == FileStatus::Conflict).count()
+    }
+
+    pub fn staged(&self) -> impl Iterator<Item = &Change> {
+        self.changes.iter().filter(|c| c.staged.is_some())
+    }
+
+    pub fn unstaged(&self) -> impl Iterator<Item = &Change> {
+        self.changes.iter().filter(|c| c.unstaged.is_some())
     }
 
     pub fn file(&self, path: &Path) -> Option<FileStatus> {
@@ -108,6 +128,22 @@ fn kind(xy: &str) -> FileStatus {
     }
 }
 
+/// One side of the `XY` pair: `X` is the index, `Y` the working tree.
+fn side(code: char) -> Option<FileStatus> {
+    match code {
+        'M' | 'T' => Some(FileStatus::Modified),
+        'A' => Some(FileStatus::Added),
+        'D' => Some(FileStatus::Deleted),
+        'R' | 'C' => Some(FileStatus::Renamed),
+        _ => None,
+    }
+}
+
+fn sides(xy: &str) -> (Option<FileStatus>, Option<FileStatus>) {
+    let mut codes = xy.chars();
+    (codes.next().and_then(side), codes.next().and_then(side))
+}
+
 /// Parses `git status --porcelain=v2 --branch -z`.
 pub fn parse(root: &Path, text: &str) -> RepoStatus {
     let mut status = RepoStatus { root: root.to_path_buf(), ..Default::default() };
@@ -132,18 +168,21 @@ pub fn parse(root: &Path, text: &str) -> RepoStatus {
                 continue;
             }
             // "1 XY sub mH mI mW hH hI path"
-            "1" => rest.splitn(8, ' ').nth(7).map(|path| (path, kind(&rest[..2]))),
+            "1" => rest.splitn(8, ' ').nth(7).map(|path| (path, kind(&rest[..2]), sides(&rest[..2]))),
             // "2 XY sub mH mI mW hH hI Xscore path", then the old path as its own record.
             "2" => {
                 records.next();
-                rest.splitn(9, ' ').nth(8).map(|path| (path, kind(&rest[..2])))
+                rest.splitn(9, ' ').nth(8).map(|path| (path, kind(&rest[..2]), sides(&rest[..2])))
             }
             // "u XY sub m1 m2 m3 mW h1 h2 h3 path"
-            "u" => rest.splitn(10, ' ').nth(9).map(|path| (path, FileStatus::Conflict)),
-            "?" => Some((rest, FileStatus::Untracked)),
+            "u" => rest
+                .splitn(10, ' ')
+                .nth(9)
+                .map(|path| (path, FileStatus::Conflict, (None, Some(FileStatus::Conflict)))),
+            "?" => Some((rest, FileStatus::Untracked, (None, Some(FileStatus::Untracked)))),
             _ => None,
         };
-        let Some((path, file_status)) = entry else { continue };
+        let Some((path, file_status, (staged, unstaged))) = entry else { continue };
         let full = root.join(path.trim_end_matches('/'));
         for folder in full.ancestors().skip(1) {
             let strongest = status.folders.entry(folder.to_path_buf()).or_insert(file_status);
@@ -152,9 +191,66 @@ pub fn parse(root: &Path, text: &str) -> RepoStatus {
                 break;
             }
         }
+        status.changes.push(Change { path: full.clone(), staged, unstaged });
         status.files.insert(full, file_status);
     }
     status
+}
+
+/// Runs a git command that changes the repository and returns what git said
+/// when it failed. Blocks; call it off the UI thread.
+fn run(dir: &Path, args: &[&str], paths: &[PathBuf]) -> Result<(), String> {
+    let mut cmd = git(dir);
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Never wait for an answer nobody can type: no editor, no password prompt.
+    cmd.env("GIT_EDITOR", "true").env("GIT_TERMINAL_PROMPT", "0");
+    if !paths.is_empty() {
+        cmd.arg("--").args(paths);
+    }
+    let out = cmd.output().map_err(|e| format!("Could not run git: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let said = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
+    let (err, text) = (said(&out.stderr), said(&out.stdout));
+    Err(if !err.is_empty() {
+        err
+    } else if !text.is_empty() {
+        text
+    } else {
+        format!("git {} failed", args.first().copied().unwrap_or_default())
+    })
+}
+
+fn has_commits(dir: &Path) -> bool {
+    output(git(dir).args(["rev-parse", "--verify", "--quiet", "HEAD"])).is_some()
+}
+
+/// Puts the files into the index, deletions included. No paths means everything.
+pub fn stage(dir: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    run(dir, &["add", "--all"], paths)
+}
+
+/// Takes the files out of the index, leaving the working tree alone. No paths
+/// means everything.
+pub fn unstage(dir: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    if has_commits(dir) {
+        run(dir, &["reset", "--quiet"], paths)
+    } else if paths.is_empty() {
+        // Before the first commit there is nothing to reset to.
+        run(dir, &["rm", "--cached", "--quiet", "-r", "."], &[])
+    } else {
+        run(dir, &["rm", "--cached", "--quiet"], paths)
+    }
+}
+
+/// Commits what is in the index. The user's hooks and signing settings apply.
+pub fn commit(dir: &Path, message: &str) -> Result<(), String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("Write a commit message first.".into());
+    }
+    run(dir, &["commit", "--quiet", "-m", message], &[])
 }
 
 #[cfg(test)]
@@ -194,6 +290,20 @@ mod tests {
         assert_eq!(s.folder(&root.join("crates/app/src")), Some(FileStatus::Modified));
         assert_eq!(s.folder(&root.join("assets")), Some(FileStatus::Untracked));
         assert_eq!(s.folder(root), Some(FileStatus::Conflict));
+        // The panel's two lists: the index and the working tree.
+        let names = |list: Vec<&Change>| -> Vec<String> {
+            list.iter().map(|c| c.path.file_name().unwrap().to_string_lossy().into_owned()).collect()
+        };
+        assert_eq!(names(s.staged().collect()), ["new file.md", "b.rs"]);
+        assert_eq!(names(s.unstaged().collect()), ["main.rs", "gone.txt", "both.rs", "black.toml"]);
+    }
+
+    #[test]
+    fn a_file_can_be_staged_and_changed_again() {
+        let s = parse(Path::new("/r"), "1 MM N... 100644 100644 100644 aaa bbb a.rs\0");
+        assert_eq!(s.changed(), 1);
+        assert_eq!(s.staged().count(), 1);
+        assert_eq!(s.unstaged().count(), 1);
     }
 
     #[test]
@@ -221,6 +331,31 @@ mod tests {
         assert_eq!(s.branch.as_deref(), Some("trunk"));
         assert_eq!(s.changed(), 1);
         assert_eq!(s.files.values().next(), Some(&FileStatus::Untracked));
+
+        // Stage, unstage and commit, before and after the first commit.
+        let file = s.changes[0].path.clone();
+        for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")] {
+            assert!(git(&dir).args(["config", key, value]).status().unwrap().success());
+        }
+        for round in 0..2 {
+            if round == 1 {
+                std::fs::write(&file, "again").unwrap();
+            }
+            stage(&dir, &[file.clone()]).unwrap();
+            let s = status(&dir).unwrap();
+            assert_eq!((s.staged().count(), s.unstaged().count()), (1, 0), "round {round}");
+            unstage(&dir, &[file.clone()]).unwrap();
+            let s = status(&dir).unwrap();
+            assert_eq!((s.staged().count(), s.unstaged().count()), (0, 1), "round {round}");
+            stage(&dir, &[]).unwrap();
+            assert!(commit(&dir, "  ").is_err());
+            commit(&dir, &format!("Commit {round}")).unwrap();
+            let s = status(&dir).unwrap();
+            assert_eq!(s.changed(), 0, "round {round}");
+            assert!(!s.head.is_empty());
+        }
+        // Nothing staged: git refuses, and its words come back.
+        assert!(!commit(&dir, "Empty").unwrap_err().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

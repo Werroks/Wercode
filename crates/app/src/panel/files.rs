@@ -15,7 +15,8 @@ use gpui_kit::*;
 use wercode_core::{file_icons, fs_tree};
 use wercode_core::git::{FileStatus, RepoStatus};
 
-/// Upper bound on entries read at once, so a huge repository cannot stall the window.
+/// Upper bound on entries shown at once. Only open folders are read, so this
+/// is reached by opening very many of them, or one with thousands of files.
 const MAX_ENTRIES: usize = 5_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -42,30 +43,47 @@ pub struct FilesPanel {
     creating: Option<(Creating, PathBuf)>,
     name_input: Entity<InputState>,
     error: Option<String>,
+    /// The entry to select once the folder has been read again.
+    select_next: Option<SharedString>,
+    /// The folder being read in the background; a newer read replaces it.
+    reading: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
-fn build(
-    dir: &Path,
-    budget: &mut usize,
-    expanded: &HashSet<SharedString>,
+/// Reads the project folder and the folders that are open in the tree.
+fn read(root: &Path, expanded: &HashSet<SharedString>) -> (Vec<fs_tree::Node>, bool) {
+    let open: HashSet<PathBuf> = expanded.iter().map(|id| PathBuf::from(id.as_ref())).collect();
+    let mut budget = MAX_ENTRIES;
+    let nodes = fs_tree::read_tree(root, &open, &mut budget);
+    (nodes, budget == 0)
+}
+
+/// Turns what was read into rows. A closed folder with something inside gets
+/// one unseen child: the tree only opens a folder that has children.
+fn items(
+    nodes: Vec<fs_tree::Node>,
+    expanded: &mut HashSet<SharedString>,
     folders: &mut HashSet<SharedString>,
 ) -> Vec<TreeItem> {
-    let mut items = Vec::new();
-    for entry in fs_tree::list_dir(dir) {
-        if *budget == 0 {
-            break;
-        }
-        *budget -= 1;
-        let id: SharedString = entry.path.to_string_lossy().into_owned().into();
-        let mut item = TreeItem::new(id.clone(), entry.name);
-        if entry.is_dir {
-            folders.insert(id.clone());
-            item = item.children(build(&entry.path, budget, expanded, folders)).expanded(expanded.contains(&id));
-        }
-        items.push(item);
-    }
-    items
+    nodes
+        .into_iter()
+        .map(|node| {
+            let id: SharedString = node.entry.path.to_string_lossy().into_owned().into();
+            let mut item = TreeItem::new(id.clone(), node.entry.name);
+            if node.entry.is_dir {
+                folders.insert(id.clone());
+                if node.has_more {
+                    item = item.child(TreeItem::new(format!("{id}\u{1}"), ""));
+                } else if node.children.is_empty() {
+                    // Everything inside is gone (or ignored): nothing to keep open.
+                    expanded.remove(&id);
+                } else {
+                    item = item.children(items(node.children, expanded, folders)).expanded(true);
+                }
+            }
+            item
+        })
+        .collect()
 }
 
 /// The colour a status paints the file name and its mark with.
@@ -82,16 +100,20 @@ impl EventEmitter<FilesEvent> for FilesPanel {}
 
 impl FilesPanel {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let expanded = HashSet::new();
-        let mut budget = MAX_ENTRIES;
+        let mut expanded = HashSet::new();
         let mut folders = HashSet::new();
-        let items = build(&root, &mut budget, &expanded, &mut folders);
+        // Only the top level is read here, so the window does not wait for it.
+        let (nodes, truncated) = read(&root, &expanded);
+        let items = items(nodes, &mut expanded, &mut folders);
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
         let name_input = cx.new(|cx| InputState::new(window, cx));
         let subscriptions = vec![
-            cx.subscribe(&tree, |this, _, event: &TreeEvent, _| match event {
+            cx.subscribe(&tree, |this, _, event: &TreeEvent, cx| match event {
+                // What is inside a folder is read when it is opened.
                 TreeEvent::Expanded(id) => {
-                    this.expanded.insert(id.clone());
+                    if this.expanded.insert(id.clone()) {
+                        this.refresh(cx);
+                    }
                 }
                 TreeEvent::Collapsed(id) => {
                     this.expanded.remove(id);
@@ -106,25 +128,46 @@ impl FilesPanel {
         Self {
             root,
             tree,
-            truncated: budget == 0,
+            truncated,
             expanded,
             folders: Arc::new(folders),
             git: None,
             creating: None,
             name_input,
             error: None,
+            select_next: None,
+            reading: None,
             _subscriptions: subscriptions,
         }
     }
 
-    /// Reads the folder from disk again, keeping open folders open.
+    /// Reads the folder from disk again, keeping open folders open. The disk
+    /// is read in the background; the tree changes when that is done.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let mut budget = MAX_ENTRIES;
+        let (root, expanded) = (self.root.clone(), self.expanded.clone());
+        self.reading = Some(cx.spawn(async move |this, cx| {
+            let (nodes, truncated) = cx.background_executor().spawn(async move { read(&root, &expanded) }).await;
+            let _ = this.update(cx, |this, cx| this.show(nodes, truncated, cx));
+        }));
+    }
+
+    fn show(&mut self, nodes: Vec<fs_tree::Node>, truncated: bool, cx: &mut Context<Self>) {
         let mut folders = HashSet::new();
-        let items = build(&self.root, &mut budget, &self.expanded, &mut folders);
+        let selected = self.tree.read(cx).selected_item().map(|item| item.id.clone());
+        let items = items(nodes, &mut self.expanded, &mut folders);
         self.folders = Arc::new(folders);
-        self.truncated = budget == 0;
-        self.tree.update(cx, |tree, cx| tree.set_items(items, cx));
+        self.truncated = truncated;
+        // A newly made entry is selected; otherwise the selection stays on its file.
+        let created = self.select_next.take();
+        let select = created.clone().or(selected);
+        self.tree.update(cx, |tree, cx| {
+            tree.set_items(items, cx);
+            let index = select.and_then(|id| tree.index_of(&id));
+            tree.set_selected_index(index, cx);
+            if let (Some(index), true) = (index, created.is_some()) {
+                tree.scroll_to_item(index, ScrollStrategy::Center);
+            }
+        });
         cx.notify();
     }
 
@@ -192,15 +235,8 @@ impl FilesPanel {
                 for folder in path.ancestors().skip(1).take_while(|p| *p != self.root) {
                     self.expanded.insert(folder.to_string_lossy().into_owned().into());
                 }
+                self.select_next = Some(path.to_string_lossy().into_owned().into());
                 self.refresh(cx);
-                let id: SharedString = path.to_string_lossy().into_owned().into();
-                self.tree.update(cx, |tree, cx| {
-                    let ix = tree.index_of(&id);
-                    tree.set_selected_index(ix, cx);
-                    if let Some(ix) = ix {
-                        tree.scroll_to_item(ix, ScrollStrategy::Center);
-                    }
-                });
             }
             Err(e) => self.error = Some(format!("Could not create {name}: {e}")),
         }
@@ -365,5 +401,21 @@ impl Render for FilesPanel {
                         .child(format!("Showing the first {MAX_ENTRIES} entries")),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+impl FilesPanel {
+    /// Whether the tree has a row for this path right now.
+    pub fn shows(&self, path: &Path, cx: &App) -> bool {
+        let id: SharedString = path.to_string_lossy().into_owned().into();
+        self.tree.read(cx).index_of(&id).is_some()
+    }
+
+    /// Opens a folder the way a click on it does.
+    pub fn open_folder(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if self.expanded.insert(path.to_string_lossy().into_owned().into()) {
+            self.refresh(cx);
+        }
     }
 }

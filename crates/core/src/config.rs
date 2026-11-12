@@ -1,6 +1,6 @@
 //! User settings, stored as `settings.toml` in the platform config directory.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -80,10 +80,14 @@ pub fn settings_path() -> Option<PathBuf> {
 /// Loads settings. A missing file gives defaults; a broken file gives defaults
 /// plus a message for the user, and never stops the app from starting.
 pub fn load() -> (Settings, Option<String>) {
-    let Some(path) = settings_path() else {
-        return (Settings::default(), None);
-    };
-    match std::fs::read_to_string(&path) {
+    match settings_path() {
+        Some(path) => load_from(&path),
+        None => (Settings::default(), None),
+    }
+}
+
+pub fn load_from(path: &Path) -> (Settings, Option<String>) {
+    match std::fs::read_to_string(path) {
         Ok(text) => match toml::from_str::<Settings>(&text) {
             Ok(s) => (s, None),
             Err(e) => (
@@ -93,6 +97,56 @@ pub fn load() -> (Settings, Option<String>) {
         },
         Err(_) => (Settings::default(), None),
     }
+}
+
+fn item(setting: &toml::Value) -> Option<toml_edit::Item> {
+    use toml_edit::value;
+    Some(match setting {
+        toml::Value::String(s) => value(s.as_str()),
+        toml::Value::Integer(i) => value(*i),
+        toml::Value::Float(f) => value(*f),
+        toml::Value::Boolean(b) => value(*b),
+        toml::Value::Array(items) => {
+            let mut array = toml_edit::Array::new();
+            for entry in items {
+                array.push(entry.as_str()?);
+            }
+            value(array)
+        }
+        _ => return None,
+    })
+}
+
+/// Writes the settings into the file, changing only what differs from it.
+/// Comments and the order of the lines stay as the user left them, and a
+/// setting that still has its default value is not added.
+pub fn save_to(path: &Path, settings: &Settings) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    // A file that does not parse is the user's to fix; rewriting it would lose their work.
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|e| format!("{} has a mistake and was not changed: {e}", path.display()))?;
+    let on_disk: Settings = toml::from_str(&text).unwrap_or_default();
+    let table = |s: &Settings| match toml::Value::try_from(s) {
+        Ok(toml::Value::Table(table)) => table,
+        _ => Default::default(),
+    };
+    let (wanted, current) = (table(settings), table(&on_disk));
+    for (key, value) in &wanted {
+        if current.get(key) != Some(value)
+            && let Some(mut item) = item(value)
+        {
+            // A comment at the end of the line belongs to the setting, not to its old value.
+            if let (Some(old), Some(new)) = (doc.get(key).and_then(|i| i.as_value()), item.as_value_mut()) {
+                *new.decor_mut() = old.decor().clone();
+            }
+            doc[key.as_str()] = item;
+        }
+    }
+    let failed = |e: std::io::Error| format!("Could not write {}: {e}", path.display());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(failed)?;
+    }
+    std::fs::write(path, doc.to_string()).map_err(failed)
 }
 
 #[cfg(test)]
@@ -108,5 +162,46 @@ mod tests {
         assert!(!s.panel_on_right());
         let s: Settings = toml::from_str("panel_side = \"Right\"").unwrap();
         assert!(s.panel_on_right());
+    }
+
+    #[test]
+    fn saving_keeps_comments_and_writes_only_what_changed() {
+        let dir = std::env::temp_dir().join(format!("wercode-config-{}", std::process::id()));
+        let path = dir.join("settings.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // No file yet: only the changed setting is written.
+        let mut settings = Settings { theme: "paper".into(), ..Settings::default() };
+        save_to(&path, &settings).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "theme = \"paper\"");
+
+        std::fs::write(&path, "# my notes
+font_size = 16 # big
+theme = \"paper\"
+").unwrap();
+        let (loaded, error) = load_from(&path);
+        assert!(error.is_none());
+        settings = loaded;
+        settings.font_size = 18.0;
+        settings.shell = "cmd.exe".into();
+        settings.shell_args = vec!["/K".into()];
+        settings.cursor_blink = false;
+        save_to(&path, &settings).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# my notes
+font_size = 18.0 # big
+theme = \"paper\"
+"), "{text}");
+        let (again, error) = load_from(&path);
+        assert!(error.is_none());
+        assert_eq!((again.font_size, again.shell.as_str(), again.cursor_blink), (18.0, "cmd.exe", false));
+        assert_eq!(again.shell_args, ["/K"]);
+        assert!(!text.contains("scrollback"), "defaults are not written: {text}");
+
+        // A broken file is reported and left exactly as it was.
+        std::fs::write(&path, "theme = ").unwrap();
+        assert!(save_to(&path, &settings).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = ");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

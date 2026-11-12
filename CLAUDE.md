@@ -20,10 +20,11 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 
 - `crates/core` — no window, tested without a GPU: settings, state, themes,
   shell lookup, PTY terminal, links, git status, file listing, reading and
-  writing documents.
+  writing documents, project search, watching the folder for changes.
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
-  `panel/` (file tree, git panel), `editor.rs` (a file in a tab), `assets.rs` (bundled icons), `theme.rs`.
+  `panel/` (file tree, search, git panel), `editor.rs` (a file in a tab),
+  `settings.rs` (the settings screen), `assets.rs` (bundled icons), `theme.rs`.
 - `assets/themes/*.toml` — built-in colour schemes, compiled in.
 - `docs/` — planning notes: `features.csv`, `build-log.md`, `architecture.md`.
 - `tools/drive.ps1` — Windows-only helper for checking the running window. Not shipped.
@@ -52,6 +53,10 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   the window takes it from there, so keep that number.
 - A test must never use `state::state_path()`: that is the user's real saved
   state. Windows get the path passed in; tests pass one in a temp folder.
+- A test must not write the user's `settings.toml` either: the settings path
+  lives in `AppState` and stays unset in tests unless one sets a temp file.
+- An element a UI test clicks by id needs `.test_support()`, unless it is a
+  library button.
 - Plain Ctrl+S is bound only inside the editor (`EditorView` context).
 - After finishing a feature, update `docs/features.csv` and
   `docs/build-log.md`.

@@ -1,5 +1,7 @@
 //! The active colour scheme, shared by every view.
 
+use std::path::PathBuf;
+
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Global, Hsla, rgb};
 use wercode_core::config::Settings;
@@ -8,6 +10,8 @@ use wercode_core::theme::{Appearance, Rgb, Theme as Scheme};
 pub struct AppState {
     pub scheme: Scheme,
     pub settings: Settings,
+    /// Where the settings screen writes; `None` keeps changes in memory only.
+    pub settings_path: Option<PathBuf>,
 }
 
 impl Global for AppState {}
@@ -76,5 +80,37 @@ pub fn apply(settings: Settings, cx: &mut App) {
         t.mono_font_family = mono.into();
     });
 
-    cx.set_global(AppState { scheme, settings });
+    let settings_path = cx.try_global::<AppState>().and_then(|state| state.settings_path.clone());
+    cx.set_global(AppState { scheme, settings, settings_path });
+    cx.refresh_windows();
+}
+
+/// Says which file the settings live in. Tests leave it unset, so they never
+/// touch the user's own settings.
+pub fn set_settings_path(path: Option<PathBuf>, cx: &mut App) {
+    cx.global_mut::<AppState>().settings_path = path;
+}
+
+/// Changes the settings: every window shows the result at once, and the file
+/// is updated. An error means the file could not be written; the change still
+/// holds until the app is closed.
+pub fn change_settings(cx: &mut App, change: impl FnOnce(&mut Settings)) -> Result<(), String> {
+    let state = cx.global::<AppState>();
+    let (mut settings, path) = (state.settings.clone(), state.settings_path.clone());
+    change(&mut settings);
+    let saved = match &path {
+        Some(path) => wercode_core::config::save_to(path, &settings),
+        None => Ok(()),
+    };
+    apply(settings, cx);
+    saved
+}
+
+/// Reads the settings file again, picking up what was edited by hand.
+pub fn reload_settings(cx: &mut App) {
+    let Some(path) = cx.global::<AppState>().settings_path.clone() else { return };
+    // A file with a mistake in it keeps the settings that are in use.
+    if let (settings, None) = wercode_core::config::load_from(&path) {
+        apply(settings, cx);
+    }
 }

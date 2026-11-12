@@ -4,6 +4,7 @@
 mod assets;
 mod editor;
 mod panel;
+mod settings;
 mod term;
 mod theme;
 mod workspace;
@@ -41,6 +42,7 @@ fn main() {
     gpui_kit::application().with_assets(assets::AppAssets).run(move |cx| {
         gpui_kit::init(cx);
         theme::apply(settings, cx);
+        theme::set_settings_path(wercode_core::config::settings_path(), cx);
         term::init(cx);
         editor::init(cx);
         workspace::init(cx);

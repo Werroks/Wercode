@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt as _;
+use futures::channel::mpsc;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
@@ -13,10 +15,12 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, TitleB
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::git::{self, RepoStatus};
-use wercode_core::state::{self, State};
+use wercode_core::state::{self, Layout, State};
+use wercode_core::watch::{self, Watch};
 
 use crate::editor::Save;
-use crate::panel::{FilesEvent, FilesPanel, GitPanel, GitPanelEvent};
+use crate::panel::{FilesEvent, FilesPanel, GitPanel, GitPanelEvent, SearchEvent, SearchPanel};
+use crate::settings::{SettingsEvent, SettingsView};
 use crate::term::{
     ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
     TerminalArea,
@@ -25,7 +29,17 @@ use crate::theme::AppState;
 
 actions!(
     workspace,
-    [TogglePanel, OpenFolder, ShowFiles, ShowSearch, ShowGit, SwitchProject, CommandPalette, NewWindow]
+    [
+        TogglePanel,
+        OpenFolder,
+        ShowFiles,
+        ShowSearch,
+        ShowGit,
+        SwitchProject,
+        CommandPalette,
+        NewWindow,
+        OpenSettings
+    ]
 );
 
 /// How often the repository status is read again while the window is active.
@@ -129,11 +143,12 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("File: Save", Box::new(Save)),
         ("View: Toggle Side Panel", Box::new(TogglePanel)),
         ("View: Show Files", Box::new(ShowFiles)),
-        ("View: Show Search", Box::new(ShowSearch)),
+        ("Search: Find in Files", Box::new(ShowSearch)),
         ("View: Show Git", Box::new(ShowGit)),
         ("Window: New Window", Box::new(NewWindow)),
         ("Project: Open Folder\u{2026}", Box::new(OpenFolder)),
         ("Project: Switch to Recent\u{2026}", Box::new(SwitchProject)),
+        ("Preferences: Settings", Box::new(OpenSettings)),
     ]
 }
 
@@ -142,11 +157,16 @@ struct Project {
     root: PathBuf,
     terminals: Entity<TerminalArea>,
     files: Entity<FilesPanel>,
+    search: Entity<SearchPanel>,
     changes: Entity<GitPanel>,
     /// `None` outside a repository, and until the first read finishes.
     git: Option<Arc<RepoStatus>>,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 4],
     _git_poll: Task<()>,
+    /// Reports files changed by other programs. `None` when the system would
+    /// not watch the folder; the git poll then still notices new files.
+    _watch: Option<Watch>,
+    _watch_task: Task<()>,
 }
 
 pub struct Workspace {
@@ -157,6 +177,10 @@ pub struct Workspace {
     /// The list of recent projects under the title is showing.
     switcher_open: bool,
     palette: Option<Entity<CommandState>>,
+    /// The settings screen, while it is showing.
+    settings: Option<(Entity<SettingsView>, Subscription)>,
+    /// The user has agreed to close the window; do not ask again.
+    closing: bool,
     /// A terminal command is on its way to the terminals.
     forwarding: bool,
     state: State,
@@ -176,19 +200,26 @@ impl Workspace {
     ) -> Self {
         let project = root.map(|root| {
             state.touch_recent(&root);
-            Self::open(root, window, cx)
+            let layout = state.layouts.get(&root).cloned();
+            Self::open(root, layout.as_ref(), window, cx)
         });
         if project.is_none() {
             // Deferred: a title set while the window is being created is lost.
             window.defer(cx, |window, _| window.set_window_title("Wercode"));
         }
         let bounds = cx.observe_window_bounds(window, |this, window, cx| this.remember_window(window, cx));
+        let this = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |this, cx| this.should_close(window, cx)).unwrap_or(true)
+        });
         let this = Self {
             project,
             panel: PanelKind::from_name(&state.panel),
             panel_open: state.panel_open,
             switcher_open: false,
             palette: None,
+            settings: None,
+            closing: false,
             forwarding: false,
             state,
             state_path,
@@ -199,20 +230,43 @@ impl Workspace {
         this
     }
 
-    fn open(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Project {
-        let terminals = cx.new(|cx| TerminalArea::new(root.clone(), window, cx));
+    /// Opens a folder, with the tabs it had when it was last open.
+    fn open(root: PathBuf, layout: Option<&Layout>, window: &mut Window, cx: &mut Context<Self>) -> Project {
+        let terminals = cx.new(|cx| TerminalArea::new(root.clone(), layout, window, cx));
         let files = cx.new(|cx| FilesPanel::new(root.clone(), window, cx));
+        let search = cx.new(|cx| SearchPanel::new(root.clone(), window, cx));
         let changes = cx.new(|cx| GitPanel::new(root.clone(), window, cx));
         let subscriptions = [
             cx.subscribe_in(&files, window, |this, _, event, window, cx| match event {
-                FilesEvent::Open(path) => this.open_file(path.clone(), window, cx),
+                FilesEvent::Open(path) => this.open_file(path.clone(), None, window, cx),
+            }),
+            cx.subscribe_in(&search, window, |this, _, event, window, cx| match event {
+                SearchEvent::Open { path, line, column } => {
+                    this.open_file(path.clone(), Some((*line, *column)), window, cx)
+                }
             }),
             cx.subscribe_in(&changes, window, |this, _, event, window, cx| match event {
                 // Staging or committing shows at once, without waiting for the next poll.
                 GitPanelEvent::Changed => this.refresh_git(cx),
-                GitPanelEvent::Open(path) => this.open_file(path.clone(), window, cx),
+                GitPanelEvent::Open(path) => this.open_file(path.clone(), None, window, cx),
             }),
+            // Tabs opened, closed or split are written down for the next launch.
+            cx.observe(&terminals, |this, _, cx| this.remember_layout(cx)),
         ];
+
+        // The watcher reports from its own thread; this brings the news here.
+        let (changed, mut changes_seen) = mpsc::unbounded::<()>();
+        let watch = watch::watch(&root, move || {
+            let _ = changed.unbounded_send(());
+        });
+        let watched = root.clone();
+        let watch_task = cx.spawn(async move |this, cx| {
+            while changes_seen.next().await.is_some() {
+                if this.update(cx, |this, cx| this.disk_changed(&watched, cx)).is_err() {
+                    break;
+                }
+            }
+        });
         window.set_window_title(&format!("{} - Wercode", folder_name(&root)));
 
         let dir = root.clone();
@@ -233,7 +287,144 @@ impl Workspace {
             }
         });
 
-        Project { root, terminals, files, changes, git: None, _subscriptions: subscriptions, _git_poll: git_poll }
+        Project {
+            root,
+            terminals,
+            files,
+            search,
+            changes,
+            git: None,
+            _subscriptions: subscriptions,
+            _git_poll: git_poll,
+            _watch: watch,
+            _watch_task: watch_task,
+        }
+    }
+
+    /// Another program created, changed or removed files in the project.
+    fn disk_changed(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let Some(project) = self.project.as_ref().filter(|p| p.root == root) else { return };
+        project.files.update(cx, |files, cx| files.refresh(cx));
+        self.refresh_git(cx);
+    }
+
+    /// Notes which tabs are open, and saves that a moment later.
+    fn remember_layout(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
+        let layout = project.terminals.read(cx).layout(cx);
+        if self.state.layouts.get(&project.root) != Some(&layout) {
+            self.state.layouts.insert(project.root.clone(), layout);
+            self.save_later(cx);
+        }
+    }
+
+    /// Called when the user closes the window. Returns false to keep it open
+    /// while a question about unsaved files or running programs is answered.
+    fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.closing {
+            return true;
+        }
+        self.remember_layout(cx);
+        self.save();
+        let Some(project) = &self.project else { return true };
+        let area = project.terminals.read(cx);
+        let (busy, unsaved) = (area.busy_count(cx), area.unsaved_count(cx));
+        let terminals = project.terminals.clone();
+        if unsaved > 0 {
+            let title = if unsaved == 1 {
+                "Save changes to 1 file before closing?".to_string()
+            } else {
+                format!("Save changes to {unsaved} files before closing?")
+            };
+            let answer = window.prompt(
+                PromptLevel::Warning,
+                &title,
+                Some("Your changes will be lost if you do not save them."),
+                &["Save All", "Don't Save", "Cancel"],
+                cx,
+            );
+            cx.spawn_in(window, async move |this, cx| match answer.await {
+                Ok(0) => {
+                    let _ = terminals.update_in(cx, |area, window, cx| {
+                        let saved = move |window: &mut Window, cx: &mut App| {
+                            let _ = this.update(cx, |this, _| this.closing = true);
+                            window.remove_window();
+                        };
+                        area.save_all(saved, window, cx);
+                    });
+                }
+                Ok(1) => {
+                    let _ = this.update_in(cx, |this, window, _| {
+                        this.closing = true;
+                        window.remove_window();
+                    });
+                }
+                _ => {}
+            })
+            .detach();
+            return false;
+        }
+        if busy > 0 && cx.global::<AppState>().settings.confirm_close {
+            let detail = if busy == 1 {
+                "A program is still running in a terminal. Closing the window will stop it.".to_string()
+            } else {
+                format!("Programs are still running in {busy} terminals. Closing the window will stop them.")
+            };
+            let answer = window.prompt(PromptLevel::Warning, "Close window?", Some(&detail), &["Close", "Cancel"], cx);
+            cx.spawn_in(window, async move |this, cx| {
+                if answer.await == Ok(0) {
+                    let _ = this.update_in(cx, |this, window, _| {
+                        this.closing = true;
+                        window.remove_window();
+                    });
+                }
+            })
+            .detach();
+            return false;
+        }
+        true
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switcher_open = false;
+        self.palette = None;
+        // What was typed into the file by hand since the last look counts too.
+        crate::theme::reload_settings(cx);
+        let view = cx.new(|cx| SettingsView::new(window, cx));
+        let subscription = cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
+            SettingsEvent::Close => this.close_settings(window, cx),
+            SettingsEvent::OpenFile(path) => {
+                this.close_settings(window, cx);
+                this.open_settings_file(path.clone(), window, cx);
+            }
+        });
+        view.focus_handle(cx).focus(window, cx);
+        self.settings = Some((view, subscription));
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.take().is_some() {
+            self.focus_terminals(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Shows `settings.toml` itself, creating it first if it was never written.
+    fn open_settings_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if !path.exists() {
+            let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, ""));
+            if let Err(e) = made {
+                eprintln!("could not create {}: {e}", path.display());
+                return;
+            }
+        }
+        if self.project.is_some() {
+            self.open_file(path, None, window, cx);
+        } else {
+            // No project, no editor tabs: hand the file to the system.
+            cx.open_with_system(&path);
+        }
     }
 
     #[cfg(test)]
@@ -246,10 +437,11 @@ impl Workspace {
         self.project.as_ref().map(|p| p.root.clone())
     }
 
-    /// Shows a file in an editor tab.
-    fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Shows a file in an editor tab, at a 1-based line and column if given.
+    fn open_file(&mut self, path: PathBuf, at: Option<(u32, u32)>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(project) = &self.project {
-            project.terminals.update(cx, |area, cx| area.open_path(path, None, None, window, cx));
+            let (line, column) = (at.map(|at| at.0), at.map(|at| at.1));
+            project.terminals.update(cx, |area, cx| area.open_path(path, line, column, window, cx));
         }
     }
 
@@ -268,6 +460,21 @@ impl Workspace {
     #[cfg(test)]
     fn changes(&self) -> Option<Entity<GitPanel>> {
         self.project.as_ref().map(|p| p.changes.clone())
+    }
+
+    #[cfg(test)]
+    fn files(&self) -> Entity<FilesPanel> {
+        self.project.as_ref().unwrap().files.clone()
+    }
+
+    #[cfg(test)]
+    fn search(&self) -> Entity<SearchPanel> {
+        self.project.as_ref().unwrap().search.clone()
+    }
+
+    #[cfg(test)]
+    fn terminals(&self) -> Entity<TerminalArea> {
+        self.project.as_ref().unwrap().terminals.clone()
     }
 
     #[cfg(test)]
@@ -359,12 +566,20 @@ impl Workspace {
     }
 
     /// Shows a side panel; choosing the one already showing hides it.
-    fn show_panel(&mut self, kind: PanelKind, cx: &mut Context<Self>) {
+    fn show_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.panel_open && self.panel == kind {
             self.panel_open = false;
+            self.focus_terminals(window, cx);
         } else {
             self.panel = kind;
             self.panel_open = true;
+            // Asking for the search is asking to type a query.
+            if kind == PanelKind::Search
+                && let Some(project) = &self.project
+            {
+                let search = project.search.clone();
+                search.update(cx, |search, cx| search.focus_input(window, cx));
+            }
         }
         self.state.panel = self.panel.name().into();
         self.state.panel_open = self.panel_open;
@@ -463,20 +678,31 @@ impl Workspace {
         cx.defer(move |cx| open_window(None, state, state_path, None, cx));
     }
 
-    /// The saved state with the list of recent projects as it is on disk now:
-    /// another window may have added to it since this one started.
+    /// The saved state with the list of recent projects, and the tabs of the
+    /// other projects, as they are on disk now: another window may have
+    /// changed them since this one started.
     fn fresh_state(&self) -> State {
         let mut state = self.state.clone();
         if let Some(path) = &self.state_path {
-            state.recent = state::load_from(path).recent;
+            let on_disk = state::load_from(path);
+            state.recent = on_disk.recent;
+            let mine = self.project.as_ref().map(|p| &p.root);
+            for (project, layout) in on_disk.layouts {
+                if Some(&project) != mine {
+                    state.layouts.insert(project, layout);
+                }
+            }
         }
         state
     }
 
     fn open_folder(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // The tabs of the project being left are kept for when it is opened again.
+        self.remember_layout(cx);
         self.state = self.fresh_state();
         self.state.touch_recent(&path);
-        let project = Self::open(path, window, cx);
+        let layout = self.state.layouts.get(&path).cloned();
+        let project = Self::open(path, layout.as_ref(), window, cx);
         project.terminals.focus_handle(cx).focus(window, cx);
         self.project = Some(project);
         self.save_recent();
@@ -531,6 +757,16 @@ impl Workspace {
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
             )
             .child(div().flex_1())
+            .child(
+                div().pr_1().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(
+                    Button::new("open-settings")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Settings)
+                        .tooltip("Settings")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(window, cx))),
+                ),
+            )
             .when(self.project.is_some(), |bar| {
                 bar.child(
                     div()
@@ -635,6 +871,7 @@ impl Workspace {
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.switcher_open = false;
                 this.close_palette(window, cx);
+                this.close_settings(window, cx);
                 cx.notify();
             }),
         )
@@ -709,6 +946,15 @@ impl Workspace {
         )
     }
 
+    fn render_settings(&self, view: &Entity<SettingsView>, cx: &mut Context<Self>) -> impl IntoElement {
+        self.backdrop("settings-backdrop", cx)
+            .flex()
+            .justify_center()
+            .items_center()
+            .bg(gpui_kit::black().opacity(0.4))
+            .child(view.clone())
+    }
+
     fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
@@ -745,7 +991,7 @@ impl Workspace {
 
     fn render_panel(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (border, muted, selected_bg) = (theme.border, theme.muted_foreground, theme.secondary_hover);
+        let (border, selected_bg) = (theme.border, theme.secondary_hover);
         let tab = |id: &'static str, icon: Icon, tooltip: &'static str, kind: PanelKind| {
             let selected = self.panel == kind;
             div().rounded_md().when(selected, |d| d.bg(selected_bg)).child(
@@ -760,12 +1006,9 @@ impl Workspace {
                 )),
             )
         };
-        let placeholder = |text: &'static str| {
-            div().p_3().text_sm().text_color(muted).child(text).into_any_element()
-        };
         let body = match self.panel {
             PanelKind::Files => project.files.clone().into_any_element(),
-            PanelKind::Search => placeholder("Search across the project is not built yet."),
+            PanelKind::Search => project.search.clone().into_any_element(),
             PanelKind::Git => project.changes.clone().into_any_element(),
         };
 
@@ -924,13 +1167,17 @@ impl Render for Workspace {
             .font_weight(FontWeight::MEDIUM)
             .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| this.pick_folder(window, cx)))
-            .on_action(cx.listener(|this, _: &ShowFiles, _, cx| {
+            .on_action(cx.listener(|this, _: &ShowFiles, window, cx| {
                 if !(this.panel_open && this.panel == PanelKind::Files) {
-                    this.show_panel(PanelKind::Files, cx);
+                    this.show_panel(PanelKind::Files, window, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &ShowSearch, _, cx| this.show_panel(PanelKind::Search, cx)))
-            .on_action(cx.listener(|this, _: &ShowGit, _, cx| this.show_panel(PanelKind::Git, cx)))
+            .on_action(cx.listener(|this, _: &ShowSearch, window, cx| {
+                this.palette = None;
+                this.show_panel(PanelKind::Search, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowGit, window, cx| this.show_panel(PanelKind::Git, window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_action(cx.listener(|this, _: &NewWindow, _, cx| this.new_window(cx)))
             .on_action(cx.listener(|this, _: &SwitchProject, _, cx| {
                 this.palette = None;
@@ -955,6 +1202,9 @@ impl Render for Workspace {
             .children(status)
             .when(self.switcher_open, |d| d.child(self.render_switcher(cx)))
             .when_some(self.palette.clone(), |d, palette| d.child(self.render_palette(&palette, cx)))
+            .when_some(self.settings.as_ref().map(|(view, _)| view.clone()), |d, view| {
+                d.child(self.render_settings(&view, cx))
+            })
     }
 }
 
@@ -1183,6 +1433,277 @@ mod tests {
         assert_eq!(windows.len(), 2);
         // The first window keeps its project.
         assert!(f.workspace.read_with(cx, |w, _| w.root()).is_some());
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    /// Lets real threads (the file watcher) and the test clock both move
+    /// until `ready` holds.
+    fn wait_until(cx: &mut TestAppContext, what: &str, mut ready: impl FnMut(&mut TestAppContext) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            if ready(cx) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The folder `open` will use as the project, made ahead of time so a
+    /// test can put files in it first.
+    fn project_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wercode-ws-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("one")).unwrap();
+        normalize(&dir.join("one"))
+    }
+
+    #[gpui_kit::test]
+    async fn search_finds_text_and_opens_the_match(cx: &mut TestAppContext) {
+        use wercode_core::state::TabLayout;
+        let root = project_dir("search");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("a.rs"), "fn main() {}\n\n// the needle is here\n").unwrap();
+        std::fs::write(root.join("b.txt"), "Needle one\nnothing\nneedle two\n").unwrap();
+        std::fs::write(root.join("c.txt"), "nothing at all\n").unwrap();
+
+        let f = open(cx, "search");
+        press(cx, f.window, &["ctrl-shift-f"]);
+        assert_eq!(f.workspace.read_with(cx, |w, _| (w.panel_open, w.panel)), (true, PanelKind::Search));
+        // The shortcut puts the keyboard in the field: typing is the query.
+        cx.update_window(f.window, |_, window, cx| window.input("needle", cx)).unwrap();
+        press(cx, f.window, &["enter"]);
+        let search = f.workspace.read_with(cx, |w, _| w.search());
+        wait_until(cx, "the search", |cx| search.read_with(cx, |s, _| s.found().is_some()));
+        assert_eq!(search.read_with(cx, |s, _| s.found()), Some((2, 3)));
+        assert_eq!(search.read_with(cx, |s, _| s.status_text()), Some("3 results in 2 files".into()));
+        // Two file rows and three lines; the files come in name order.
+        assert_eq!(search.read_with(cx, |s, _| s.row_count()), 5);
+
+        // Clicking a file row folds its lines away, clicking again brings them back.
+        cx.update_window(f.window, |_, window, cx| window.click(("search-row", 0usize), cx)).unwrap();
+        assert_eq!(search.read_with(cx, |s, _| s.row_count()), 3);
+        cx.update_window(f.window, |_, window, cx| window.click(("search-row", 0usize), cx)).unwrap();
+        assert_eq!(search.read_with(cx, |s, _| s.row_count()), 5);
+
+        // The last row is the match in src/a.rs, on its third line.
+        cx.update_window(f.window, |_, window, cx| window.click(("search-row", 4usize), cx)).unwrap();
+        cx.run_until_parked();
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let layout = area.read_with(cx, |a, cx| a.layout(cx));
+        assert_eq!(layout.tabs.last(), Some(&TabLayout::File { path: root.join("src").join("a.rs") }));
+        assert_eq!(layout.active, 1);
+
+        // Options narrow it down; a pattern that is not valid says so.
+        cx.update_window(f.window, |_, window, cx| window.click("search-case", cx)).unwrap();
+        wait_until(cx, "the case-sensitive search", |cx| search.read_with(cx, |s, _| s.found().is_some()));
+        assert_eq!(search.read_with(cx, |s, _| s.found()), Some((2, 2)));
+        cx.update_window(f.window, |_, window, cx| window.click("search-regex", cx)).unwrap();
+        cx.update_window(f.window, |_, window, cx| {
+            search.update(cx, |s, cx| s.write_query("(", window, cx));
+        })
+        .unwrap();
+        wait_until(cx, "the error", |cx| search.read_with(cx, |s, _| s.status_text().is_some()));
+        assert!(search.read_with(cx, |s, _| s.status_text()).unwrap().starts_with("Not a valid pattern"));
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn the_tree_reads_folders_when_opened_and_follows_the_disk(cx: &mut TestAppContext) {
+        let root = project_dir("watch");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("inner.rs"), "").unwrap();
+        std::fs::write(root.join("top.txt"), "").unwrap();
+
+        let f = open(cx, "watch");
+        let files = f.workspace.read_with(cx, |w, _| w.files());
+        let shows = |cx: &mut TestAppContext, path: &std::path::Path| files.read_with(cx, |p, cx| p.shows(path, cx));
+        assert!(shows(cx, &root.join("top.txt")) && shows(cx, &root.join("src")));
+        // A closed folder has not been read yet.
+        assert!(!shows(cx, &root.join("src").join("inner.rs")));
+        files.update(cx, |p, cx| p.open_folder(&root.join("src"), cx));
+        wait_until(cx, "the folder to open", |cx| shows(cx, &root.join("src").join("inner.rs")));
+
+        // A file made by another program appears by itself, in an open folder or at the top.
+        std::fs::write(root.join("src").join("made-outside.rs"), "").unwrap();
+        std::fs::write(root.join("also-new.txt"), "").unwrap();
+        wait_until(cx, "the new files", |cx| {
+            shows(cx, &root.join("src").join("made-outside.rs")) && shows(cx, &root.join("also-new.txt"))
+        });
+        std::fs::remove_file(root.join("top.txt")).unwrap();
+        wait_until(cx, "the deleted file to go", |cx| !shows(cx, &root.join("top.txt")));
+        assert!(shows(cx, &root.join("src").join("inner.rs")), "open folders stay open");
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn settings_apply_at_once_and_are_written_to_the_file(cx: &mut TestAppContext) {
+        use crate::theme::AppState;
+        let f = open(cx, "settings");
+        let settings_file = f.dir.join("settings.toml");
+        std::fs::write(&settings_file, "# mine\nscrollback = 500\n").unwrap();
+        cx.update(|cx| crate::theme::set_settings_path(Some(settings_file.clone()), cx));
+        let settings = |cx: &mut TestAppContext| cx.update(|cx| cx.global::<AppState>().settings.clone());
+        assert_eq!(settings(cx).scrollback, 10_000);
+
+        // Opening the screen reads the file, so what was typed there by hand counts.
+        cx.update_window(f.window, |_, window, cx| window.click("open-settings", cx)).unwrap();
+        assert!(f.workspace.read_with(cx, |w, _| w.settings.is_some()));
+        assert_eq!(settings(cx).scrollback, 500);
+        let before = settings(cx);
+        assert_eq!((before.theme.as_str(), before.font_size, before.cursor_blink), ("black", 14.0, true));
+
+        let click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+            cx.update_window(f.window, |_, window, cx| window.click(id, cx)).unwrap();
+        };
+        // The second scheme in the list is Graphite.
+        click(cx, ("settings-scheme", 1usize).into());
+        click(cx, "settings-font-larger".into());
+        click(cx, "settings-font-larger".into());
+        click(cx, "settings-side-right".into());
+        click(cx, "settings-blink".into());
+        let after = settings(cx);
+        assert_eq!((after.theme.as_str(), after.font_size, after.cursor_blink), ("graphite", 16.0, false));
+        assert!(after.panel_on_right());
+        assert_eq!(cx.update(|cx| cx.global::<AppState>().scheme.name.clone()), "Graphite");
+
+        let text = std::fs::read_to_string(&settings_file).unwrap();
+        assert!(text.starts_with("# mine\nscrollback = 500\n"), "{text}");
+        let (saved, error) = wercode_core::config::load_from(&settings_file);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!((saved.theme.as_str(), saved.font_size, saved.cursor_blink), ("graphite", 16.0, false));
+        assert!(!text.contains("confirm_close"), "untouched settings are not written: {text}");
+
+        // Escape closes the screen and gives the keyboard back to the terminal.
+        press(cx, f.window, &["escape"]);
+        assert!(f.workspace.read_with(cx, |w, _| w.settings.is_none()));
+        press(cx, f.window, &["ctrl-shift-d"]);
+        assert_eq!(f.workspace.read_with(cx, |w, cx| w.pane_count(cx)), 2);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn closing_the_window_asks_about_unsaved_files(cx: &mut TestAppContext) {
+        let root = project_dir("close");
+        let path = root.join("notes.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let f = open(cx, "close");
+        let close = |cx: &mut TestAppContext| {
+            cx.update_window(f.window, |_, window, cx| f.workspace.update(cx, |w, cx| w.should_close(window, cx)))
+                .unwrap()
+        };
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(path.clone(), None, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, window, cx| window.input("zero ", cx)).unwrap();
+        cx.run_until_parked();
+
+        // Cancel keeps the window and the edits.
+        assert!(!close(cx), "the window must wait for the answer");
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
+        assert_eq!(f.workspace.read_with(cx, |w, cx| w.terminals().read(cx).unsaved_count(cx)), 1);
+
+        // Save All writes the file and then closes the window.
+        assert!(!close(cx));
+        cx.simulate_prompt_answer("Save All");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "zero one\n");
+        assert_eq!(cx.update(|cx| cx.windows().len()), 0);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn closing_without_saving_leaves_the_file_alone(cx: &mut TestAppContext) {
+        let root = project_dir("discard");
+        let path = root.join("notes.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let f = open(cx, "discard");
+        let close = |cx: &mut TestAppContext| {
+            cx.update_window(f.window, |_, window, cx| f.workspace.update(cx, |w, cx| w.should_close(window, cx)))
+                .unwrap()
+        };
+        // Nothing unsaved and nothing running: the window just closes.
+        assert!(close(cx));
+        assert!(!cx.has_pending_prompt());
+
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(path.clone(), None, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, window, cx| window.input("zero ", cx)).unwrap();
+        cx.run_until_parked();
+        assert!(!close(cx));
+        cx.simulate_prompt_answer("Don't Save");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
+        assert_eq!(cx.update(|cx| cx.windows().len()), 0);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn a_project_reopens_with_the_tabs_it_had(cx: &mut TestAppContext) {
+        use wercode_core::state::TabLayout;
+        let root = project_dir("reopen");
+        let path = root.join("notes.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let f = open(cx, "reopen");
+        press(cx, f.window, &["ctrl-shift-d", "ctrl-shift-t"]);
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(path.clone(), None, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        press(cx, f.window, &["ctrl-shift-tab"]);
+        let closed = cx
+            .update_window(f.window, |_, window, cx| f.workspace.update(cx, |w, cx| w.should_close(window, cx)))
+            .unwrap();
+        assert!(closed);
+
+        // What a new launch reads from the state file.
+        let saved = state::load_from(&f.state_path);
+        let shape = |layout: &wercode_core::state::Layout| {
+            let tabs: Vec<usize> = layout
+                .tabs
+                .iter()
+                .map(|tab| match tab {
+                    TabLayout::Terminals { panes } => panes.terminals(),
+                    TabLayout::File { .. } => 0,
+                })
+                .collect();
+            (tabs, layout.active)
+        };
+        let layout = saved.layouts.get(&root).expect("the tabs were saved");
+        assert_eq!(shape(layout), (vec![2, 1, 0], 1));
+        assert_eq!(layout.tabs[2], TabLayout::File { path: path.clone() });
+
+        let state_path = f.state_path.clone();
+        let (_, reopened) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| Workspace::new(Some(root.clone()), saved, Some(state_path), window, cx))
+            })
+            .unwrap()
+        });
+        let layout = reopened.read_with(cx, |w, cx| w.terminals().read(cx).layout(cx));
+        assert_eq!(shape(&layout), (vec![2, 1, 0], 1));
+
+        // Switching away and back keeps the tabs too.
+        let two = normalize(&f.dir.join("two"));
+        for target in [two, root.clone()] {
+            cx.update_window(f.window, |_, window, cx| {
+                f.workspace.update(cx, |w, cx| w.switch_to(target.clone(), window, cx));
+            })
+            .unwrap();
+        }
+        let layout = f.workspace.read_with(cx, |w, cx| w.terminals().read(cx).layout(cx));
+        assert_eq!(shape(&layout), (vec![2, 1, 0], 1));
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

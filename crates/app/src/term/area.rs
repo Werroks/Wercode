@@ -1,7 +1,7 @@
 //! The centre of the window: tabs. A tab holds terminals, split into panes,
 //! or one file open in the editor.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -12,6 +12,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use wercode_core::file_icons;
+use wercode_core::state::{Layout, PaneLayout, TabLayout};
 
 use super::view::{TerminalView, TerminalViewEvent};
 use super::{
@@ -92,6 +93,19 @@ impl Node {
                     (None, None) => None,
                 }
             }
+        }
+    }
+
+    /// What to write down so this part of the tab can be put back later.
+    fn layout(&self, cx: &App) -> PaneLayout {
+        match self {
+            Node::Leaf(pane) => PaneLayout::Terminal { cwd: pane.read(cx).cwd() },
+            Node::Split(split) => PaneLayout::Split {
+                stacked: split.axis == Axis::Vertical,
+                ratio: split.ratio,
+                first: Box::new(split.first.layout(cx)),
+                second: Box::new(split.second.layout(cx)),
+            },
         }
     }
 
@@ -187,7 +201,9 @@ impl Focusable for TerminalArea {
 }
 
 impl TerminalArea {
-    pub fn new(root_dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Opens the centre of the window with the tabs it had last time, or with
+    /// one terminal when there is nothing to put back.
+    pub fn new(root_dir: PathBuf, layout: Option<&Layout>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             root_dir,
             tabs: Vec::new(),
@@ -198,8 +214,124 @@ impl TerminalArea {
             confirm_focus: cx.focus_handle(),
             subscriptions: HashMap::new(),
         };
-        this.add_tab(window, cx);
+        if let Some(layout) = layout {
+            this.restore(layout, window, cx);
+        }
+        if this.tabs.is_empty() {
+            this.add_tab(window, cx);
+        } else {
+            this.active = layout.map_or(0, |l| l.active).min(this.tabs.len() - 1);
+            this.focus_active(window, cx);
+        }
         this
+    }
+
+    /// The open tabs, written down for the next launch.
+    pub fn layout(&self, cx: &App) -> Layout {
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|tab| match &tab.body {
+                Body::Terminals { root, .. } => TabLayout::Terminals { panes: root.layout(cx) },
+                Body::Editor(editor) => TabLayout::File { path: editor.read(cx).path().to_path_buf() },
+            })
+            .collect();
+        Layout { tabs, active: self.active }
+    }
+
+    fn restore(&mut self, layout: &Layout, window: &mut Window, cx: &mut Context<Self>) {
+        for tab in &layout.tabs {
+            match tab {
+                // A file that is gone is simply not reopened.
+                TabLayout::File { path } => {
+                    if path.is_file() {
+                        self.push_editor(path.clone(), window, cx);
+                    }
+                }
+                TabLayout::Terminals { panes } => {
+                    let mut room = MAX_PANES;
+                    let Some(root) = self.restore_node(panes, &mut room, window, cx) else { continue };
+                    let mut leaves = Vec::new();
+                    root.leaves(&mut leaves);
+                    let id = self.id();
+                    self.tabs.push(Tab { id, body: Body::Terminals { root, active: leaves[0].clone() } });
+                }
+            }
+        }
+    }
+
+    fn restore_node(
+        &mut self,
+        layout: &PaneLayout,
+        room: &mut usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Node> {
+        match layout {
+            PaneLayout::Terminal { cwd } => {
+                *room = room.checked_sub(1)?;
+                // The folder may have been deleted since; the project folder is still there.
+                let cwd = cwd.clone().filter(|dir| dir.is_dir()).unwrap_or_else(|| self.root_dir.clone());
+                Some(Node::Leaf(self.spawn_pane(cwd, window, cx)))
+            }
+            PaneLayout::Split { stacked, ratio, first, second } => {
+                let first = self.restore_node(first, room, window, cx);
+                let second = self.restore_node(second, room, window, cx);
+                match (first, second) {
+                    (Some(first), Some(second)) => Some(Node::Split(Box::new(Split {
+                        id: self.id(),
+                        axis: if *stacked { Axis::Vertical } else { Axis::Horizontal },
+                        ratio: if ratio.is_finite() { ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO) } else { 0.5 },
+                        first,
+                        second,
+                        bounds: Rc::default(),
+                    }))),
+                    (Some(only), None) | (None, Some(only)) => Some(only),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
+
+    /// Adds a tab with `path` open in the editor and returns its index.
+    fn push_editor(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let editor = cx.new(|cx| EditorView::new(path, window, cx));
+        let subscription = cx.subscribe(&editor, |_, _, _: &EditorEvent, cx| cx.notify());
+        self.subscriptions.insert(editor.entity_id(), subscription);
+        let id = self.id();
+        self.tabs.push(Tab { id, body: Body::Editor(editor) });
+        self.tabs.len() - 1
+    }
+
+    /// Saves every file that has unsaved edits. `then` runs once all of them
+    /// are on disk; if one cannot be written it does not run, and the tab of
+    /// that file says why.
+    pub fn save_all(
+        &mut self,
+        then: impl FnOnce(&mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let unsaved: Vec<_> =
+            self.tabs.iter().filter_map(|t| t.editor()).filter(|e| e.read(cx).is_dirty()).cloned().collect();
+        if unsaved.is_empty() {
+            then(window, cx);
+            return;
+        }
+        let left = Rc::new(Cell::new(unsaved.len()));
+        let then = Rc::new(RefCell::new(Some(then)));
+        for editor in unsaved {
+            let (left, then) = (left.clone(), then.clone());
+            let saved = move |window: &mut Window, cx: &mut App| {
+                left.set(left.get() - 1);
+                if left.get() == 0
+                    && let Some(then) = then.borrow_mut().take()
+                {
+                    then(window, cx);
+                }
+            };
+            editor.update(cx, |editor, cx| editor.save(saved, window, cx));
+        }
     }
 
     /// How many terminals, in all tabs, are running a program right now.
@@ -229,14 +361,7 @@ impl TerminalArea {
         let open = self.tabs.iter().position(|t| t.editor().is_some_and(|e| e.read(cx).path() == path));
         let index = match open {
             Some(index) => index,
-            None => {
-                let editor = cx.new(|cx| EditorView::new(path, window, cx));
-                let subscription = cx.subscribe(&editor, |_, _, _: &EditorEvent, cx| cx.notify());
-                self.subscriptions.insert(editor.entity_id(), subscription);
-                let id = self.id();
-                self.tabs.push(Tab { id, body: Body::Editor(editor) });
-                self.tabs.len() - 1
-            }
+            None => self.push_editor(path, window, cx),
         };
         if let (Some(line), Some(editor)) = (line, self.tabs[index].editor().cloned()) {
             editor.update(cx, |editor, cx| editor.go_to(line, col, window, cx));
@@ -833,7 +958,7 @@ mod tests {
             crate::editor::init(cx);
             let dir = std::env::temp_dir();
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| TerminalArea::new(dir, window, cx))
+                cx.new(|cx| TerminalArea::new(dir, None, window, cx))
             })
             .unwrap()
         })
@@ -1038,6 +1163,116 @@ two
         cx.run_until_parked();
         let editor = area.read_with(cx, |a, _| a.tabs[1].editor().unwrap().clone());
         assert!(editor.read_with(cx, |e, _| e.problem().is_some()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    async fn editor_undoes_redoes_finds_and_replaces(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, area) = open(cx);
+        let dir = std::env::temp_dir().join(format!("wercode-undo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "one two one\n").unwrap();
+        cx.update_window(window, |_, window, cx| {
+            area.update(cx, |a, cx| a.open_path(path.clone(), None, None, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let editor = area.read_with(cx, |a, _| a.tabs[1].editor().unwrap().clone());
+        let text = |cx: &mut TestAppContext| editor.read_with(cx, |e, cx| e.text(cx));
+
+        // Ctrl+Z takes the typing back, Ctrl+Y puts it in again.
+        cx.update_window(window, |_, window, cx| window.input("zero ", cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(text(cx), "zero one two one\n");
+        press(cx, window, &["ctrl-z"]);
+        assert_eq!(text(cx), "one two one\n");
+        press(cx, window, &["ctrl-y"]);
+        assert_eq!(text(cx), "zero one two one\n");
+
+        // Ctrl+F opens the find bar of the editor, Escape closes it.
+        assert!(!editor.read_with(cx, |e, cx| e.is_searching(cx)));
+        press(cx, window, &["ctrl-f"]);
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |e, cx| e.is_searching(cx)));
+        press(cx, window, &["escape"]);
+        cx.run_until_parked();
+        assert!(!editor.read_with(cx, |e, cx| e.is_searching(cx)));
+        press(cx, window, &["ctrl-h"]);
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |e, cx| e.is_searching(cx)));
+
+        // Replace All changes every match, and one Ctrl+Z brings them all back.
+        let replaced = cx
+            .update_window(window, |_, window, cx| editor.update(cx, |e, cx| e.replace_all("ONE", "1", window, cx)))
+            .unwrap();
+        assert_eq!(replaced, 2);
+        assert_eq!(text(cx), "zero 1 two 1\n");
+        assert!(editor.read_with(cx, |e, _| e.is_dirty()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    async fn tabs_are_written_down_and_put_back(cx: &mut TestAppContext) {
+        use wercode_core::state::{Layout, PaneLayout, TabLayout};
+        cx.executor().allow_parking();
+        let (window, area) = open(cx);
+        let dir = std::env::temp_dir().join(format!("wercode-layout-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "text\n").unwrap();
+
+        press(cx, window, &["ctrl-shift-d", "ctrl-shift-e", "ctrl-shift-t"]);
+        cx.update_window(window, |_, window, cx| {
+            area.update(cx, |a, cx| a.open_path(file.clone(), None, None, window, cx));
+        })
+        .unwrap();
+        let layout = area.read_with(cx, |a, cx| a.layout(cx));
+        assert_eq!(layout.active, 2);
+        assert_eq!(layout.tabs.len(), 3);
+        let TabLayout::Terminals { panes } = &layout.tabs[0] else { panic!("{layout:?}") };
+        assert_eq!(panes.terminals(), 3);
+        // Split right, then the right half split down.
+        let PaneLayout::Split { stacked: false, second, .. } = panes else { panic!("{panes:?}") };
+        assert!(matches!(**second, PaneLayout::Split { stacked: true, .. }));
+        assert_eq!(layout.tabs[2], TabLayout::File { path: file.clone() });
+
+        // A layout from the state file: a folder and a file that are gone are
+        // left out, a broken ratio is repaired, and no tab gets a fifth terminal.
+        let terminal = |cwd: Option<std::path::PathBuf>| Box::new(PaneLayout::Terminal { cwd });
+        let split = |stacked, ratio, first, second| Box::new(PaneLayout::Split { stacked, ratio, first, second });
+        let crowded = split(
+            false,
+            f32::NAN,
+            split(true, 0.25, terminal(Some(dir.join("sub"))), terminal(Some(dir.join("gone")))),
+            split(true, 5.0, terminal(None), split(false, 0.5, terminal(None), terminal(None))),
+        );
+        let saved = Layout {
+            tabs: vec![
+                TabLayout::File { path: dir.join("gone.txt") },
+                TabLayout::Terminals { panes: *crowded },
+                TabLayout::File { path: file.clone() },
+            ],
+            active: 7,
+        };
+        let root = dir.clone();
+        let (_, restored) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| TerminalArea::new(root, Some(&saved), window, cx))
+            })
+            .unwrap()
+        });
+        let layout = restored.read_with(cx, |a, cx| a.layout(cx));
+        assert_eq!(layout.tabs.len(), 2);
+        assert_eq!(layout.active, 1);
+        assert_eq!(layout.tabs[1], TabLayout::File { path: file.clone() });
+        let TabLayout::Terminals { panes } = &layout.tabs[0] else { panic!("{layout:?}") };
+        assert_eq!(panes.terminals(), 4);
+        let PaneLayout::Split { stacked: false, ratio, first, second } = panes else { panic!("{panes:?}") };
+        assert_eq!(*ratio, 0.5);
+        assert!(matches!(**first, PaneLayout::Split { stacked: true, ratio, .. } if ratio == 0.25));
+        assert!(matches!(**second, PaneLayout::Split { stacked: true, ratio, .. } if ratio == 0.9));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

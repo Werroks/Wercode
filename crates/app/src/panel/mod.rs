@@ -1,5 +1,7 @@
 pub mod files;
 pub mod git;
+pub mod search;
 
 pub use files::{FilesEvent, FilesPanel};
 pub use git::{GitPanel, GitPanelEvent};
+pub use search::{SearchEvent, SearchPanel};

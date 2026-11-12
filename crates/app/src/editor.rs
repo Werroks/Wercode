@@ -140,6 +140,11 @@ impl EditorView {
                     state.set_value(doc.text, window, cx);
                     if let Some((line, col)) = position {
                         state.set_cursor_position(Position::new(line, col), window, cx);
+                        // The editor can only scroll to a line it has laid out, and
+                        // the new text is laid out when the next frame is drawn.
+                        cx.on_next_frame(window, move |state, window, cx| {
+                            state.set_cursor_position(Position::new(line, col), window, cx);
+                        });
                     } else if !first {
                         let had_focus = state.focus_handle(cx).is_focused(window);
                         let before = window.focused(cx);
@@ -290,5 +295,18 @@ impl EditorView {
 
     pub fn problem(&self) -> Option<&str> {
         self.problem.as_deref()
+    }
+
+    /// Whether the find bar of the editor is showing.
+    pub fn is_searching(&self, cx: &App) -> bool {
+        self.state.read(cx).search_session().is_active()
+    }
+
+    /// Replaces every match of `query`, as the Replace All button does.
+    pub fn replace_all(&mut self, query: &str, with: &str, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        self.state.update(cx, |state, cx| {
+            state.set_search_query(query, true, cx);
+            state.replace_all_search_matches(with, window, cx)
+        })
     }
 }

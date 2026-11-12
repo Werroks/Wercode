@@ -7,22 +7,22 @@ Scrollback with mouse wheel,terminal,must,yes,partial,implemented; not hand-test
 Select copy paste in terminal,terminal,must,yes,partial,implemented; not hand-tested
 Multiple terminal tabs,terminal,must,yes,yes,Ctrl+Shift+T / Ctrl+Tab / middle click closes; covered by UI tests
 New terminal starts in workspace root,terminal,must,yes,yes,
-Choose shell (PowerShell cmd bash zsh WSL),terminal,must,yes,partial,auto-detect and settings.toml; no UI; cwd tracking only for PowerShell (and Linux via /proc)
+Choose shell (PowerShell cmd bash zsh WSL),terminal,must,yes,yes,auto-detect; the settings screen lists the shells found on the machine; applies to new terminals; cwd tracking only for PowerShell (and Linux via /proc)
 File tree in right sidebar,files,must,yes,yes,"left by default; panel_side = ""right"" in settings.toml moves it"
-Lazy expand and collapse folders,files,must,yes,partial,"expand/collapse works; tree is read eagerly, capped at 5000"
-Live update of tree on file changes,files,must,yes,partial,re-read when git status changes (2 s poll while the window is active) and by the Refresh button; no file watcher yet
+Lazy expand and collapse folders,files,must,yes,yes,a folder is read when it is opened; reading happens off the UI thread; at most 5000 rows are shown
+Live update of tree on file changes,files,must,yes,yes,file watcher (notify) that skips .git and ignored folders; one recursive watch on Windows and macOS; one watch per folder on Linux; the Linux mode is only exercised by the unit test
 Respect .gitignore (dim or hide),files,must,yes,yes,hidden
 Git status marks in tree,files,must,yes,yes,letters U M A D R ! on files; coloured dot on folders; parser unit-tested
-Three buttons above the sidebar switching panels,shell,must,partial,yes,files / search / git; the search body is a placeholder
+Three buttons above the sidebar switching panels,shell,must,partial,yes,files / search / git
 Resizable and collapsible sidebar,shell,must,yes,yes,Ctrl+Shift+B; width remembered
 Git panel: list of changed files,git,must,yes,yes,Staged Changes and Changes lists with status letters; covered by a UI test
 Git panel: stage and unstage files,git,must,yes,yes,per file and all at once; works before the first commit too
 Git panel: commit with message,git,must,yes,yes,Ctrl+Enter or the button; with nothing staged it stages everything first; git errors are shown under the field
 Current branch and ahead/behind,git,must,yes,yes,status bar: branch; commits to push and pull; change and conflict counts; colour follows the state
-Settings: font size theme shell,settings,must,yes,no,
-Restore last workspace and layout on launch,workspace,must,yes,partial,last project; panel; panel width; window size and position; not terminal tabs
+Settings: font size theme shell,settings,must,yes,yes,gear button in the title bar and Preferences: Settings in the palette; scheme; font and size; shell; panel side; three switches; applied at once and written to settings.toml keeping comments; font size is the terminal text only
+Restore last workspace and layout on launch,workspace,must,yes,yes,last project; panel; panel width; window size and position; tabs with their splits and each shell's folder; open files; kept per project; terminal output is not kept
 Terminal splits (side by side and stacked),terminal,must,yes,yes,user decision 2026-11-11; Ctrl+Shift+D / Ctrl+Shift+E; draggable divider; at most 4 terminals per tab; covered by UI tests
-Dark theme by default plus several built-in color schemes in settings,settings,must,yes,partial,user decision 2026-11-11; own palettes only; 5 schemes via settings.toml; no settings screen
+Dark theme by default plus several built-in color schemes in settings,settings,must,yes,yes,user decision 2026-11-11; own palettes only; 5 schemes chosen on the settings screen
 Clickable file paths and URLs in terminal output,terminal,should,yes,partial,Ctrl+click; detection unit-tested; pointer part not hand-tested; a path opens in the editor at its line
 Click file opens it in the built-in editor,files,must,yes,yes,from the file tree and from the git panel; a file that is not UTF-8 text or is over 20 MB gets a note and an Open in the Default App button
 Insert file path into terminal (click or drag),files,should,partial,no,key feature for CLI agents
@@ -46,10 +46,10 @@ Multiple windows,workspace,could,yes,yes,New window in the project menu and the 
 Image preview,files,could,yes,no,
 Built-in editor: open edit save with syntax highlight,editor,must,yes,yes,user decision 2026-11-11; the component library editor; Ctrl+S; keeps CRLF and BOM; 20 grammars compiled in
 Editor tabs alongside terminal tabs,editor,must,yes,yes,one tab bar; a file takes a whole tab and does not split
-Undo redo find and replace in file,editor,must,yes,partial,provided by the editor component; not checked by hand or by a test
-Unsaved changes marker and prompt on close,editor,must,yes,partial,dot on the tab; Save / Don't Save / Cancel when closing the tab; switching project warns; closing the window does not ask yet
+Undo redo find and replace in file,editor,must,yes,yes,provided by the editor component; Ctrl+Z / Ctrl+Y / Ctrl+F / Ctrl+H covered by a UI test; the find bar itself not clicked by hand
+Unsaved changes marker and prompt on close,editor,must,yes,yes,dot on the tab; Save / Don't Save / Cancel when closing the tab; switching project warns; closing the window asks Save All / Don't Save / Cancel and also warns about running programs
 Reload file changed on disk (agent edits it),editor,must,partial,yes,checked once a second; silent reload without edits; a bar with Reload from Disk / Keep My Changes with edits
-Search button: project-wide text search panel,search,must,yes,no,third button; user decision
+Search button: project-wide text search panel,search,must,yes,yes,Ctrl+Shift+F; match case / whole word / regex; results by file as they are found; a click opens the file at the line; skips ignored and binary files and files over 4 MB; stops at 5000 lines; no replace across files
 Recent projects switcher at the top of the window,workspace,must,yes,yes,covered by a UI test
 Editor splits,editor,could,yes,no,
 LSP (go to definition hover diagnostics),editor,could,yes,no,after MVP and opt-in; language servers use a lot of RAM

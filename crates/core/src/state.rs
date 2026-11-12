@@ -1,12 +1,57 @@
 //! What the app remembers between launches, stored as `state.json` next to
 //! the settings. Unlike settings, the user never edits this file by hand.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 /// How many recent projects are kept.
 const MAX_RECENT: usize = 15;
+
+/// The tabs of one project's window, put back when the project is opened again.
+/// What the terminals printed is not kept, only where each shell was.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Layout {
+    pub tabs: Vec<TabLayout>,
+    /// Index of the tab that was showing.
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum TabLayout {
+    Terminals { panes: PaneLayout },
+    File { path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum PaneLayout {
+    Terminal {
+        /// The shell's directory, when it was known.
+        cwd: Option<PathBuf>,
+    },
+    Split {
+        /// One above the other instead of side by side.
+        stacked: bool,
+        /// Share of the space taken by `first`.
+        ratio: f32,
+        first: Box<PaneLayout>,
+        second: Box<PaneLayout>,
+    },
+}
+
+impl PaneLayout {
+    /// How many terminals this part of the tab holds.
+    pub fn terminals(&self) -> usize {
+        match self {
+            PaneLayout::Terminal { .. } => 1,
+            PaneLayout::Split { first, second, .. } => first.terminals() + second.terminals(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -22,6 +67,8 @@ pub struct State {
     /// Window position and size when not maximized: x, y, width, height.
     pub window: Option<[f32; 4]>,
     pub maximized: bool,
+    /// Open tabs of each project, by its folder.
+    pub layouts: BTreeMap<PathBuf, Layout>,
 }
 
 impl Default for State {
@@ -33,6 +80,7 @@ impl Default for State {
             panel_width: None,
             window: None,
             maximized: false,
+            layouts: BTreeMap::new(),
         }
     }
 }
@@ -43,6 +91,9 @@ impl State {
         self.recent.retain(|p| p != path);
         self.recent.insert(0, path.to_path_buf());
         self.recent.truncate(MAX_RECENT);
+        // A project that fell off the list will not be reopened from it.
+        let recent = &self.recent;
+        self.layouts.retain(|project, _| recent.contains(project));
     }
 
     /// The most recent project that still exists on disk.
@@ -102,6 +153,12 @@ mod tests {
         s.touch_recent(Path::new("/p/10"));
         assert_eq!(s.recent[0], PathBuf::from("/p/10"));
         assert_eq!(s.recent.iter().filter(|p| **p == PathBuf::from("/p/10")).count(), 1);
+
+        // Tabs are remembered only for projects that are still on the list.
+        s.layouts.insert(PathBuf::from("/p/10"), Layout::default());
+        s.layouts.insert(PathBuf::from("/p/0"), Layout::default());
+        s.touch_recent(Path::new("/p/19"));
+        assert_eq!(s.layouts.keys().collect::<Vec<_>>(), [Path::new("/p/10")]);
     }
 
     #[test]
@@ -114,6 +171,15 @@ mod tests {
         s.panel = "git".into();
         s.panel_width = Some(412.0);
         s.window = Some([10.0, 20.0, 1200.0, 800.0]);
+        let split = PaneLayout::Split {
+            stacked: true,
+            ratio: 0.3,
+            first: Box::new(PaneLayout::Terminal { cwd: Some(dir.join("src")) }),
+            second: Box::new(PaneLayout::Terminal { cwd: None }),
+        };
+        assert_eq!(split.terminals(), 2);
+        let tabs = vec![TabLayout::Terminals { panes: split }, TabLayout::File { path: dir.join("a.rs") }];
+        s.layouts.insert(dir.clone(), Layout { tabs, active: 1 });
         save_to(&path, &s).unwrap();
         assert_eq!(load_from(&path), s);
         assert_eq!(s.last_project(), Some(dir.clone()));

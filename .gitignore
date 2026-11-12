@@ -4,3 +4,5 @@ target/
 .ruff_cache/
 # Screenshots of the running app show local paths; keep them off the public repo.
 screens/
+# Local working plan.
+PLAN.md

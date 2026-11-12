@@ -31,6 +31,44 @@ pub fn resolve(setting: &str, extra_args: &[String]) -> Shell {
     shell
 }
 
+/// A shell found on this machine: what to call it, and the value for the
+/// `shell` setting that selects it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub name: &'static str,
+    pub setting: String,
+}
+
+/// The shells the settings screen offers, in the order they are tried.
+pub fn available() -> Vec<Found> {
+    let mut found = Vec::new();
+    let mut add = |name: &'static str, program: Option<PathBuf>| {
+        if let Some(program) = program {
+            let setting = program.to_string_lossy().into_owned();
+            if !found.iter().any(|f: &Found| f.setting == setting) {
+                found.push(Found { name, setting });
+            }
+        }
+    };
+    if cfg!(windows) {
+        add("PowerShell 7", find_in_path("pwsh.exe"));
+        add("Windows PowerShell", find_in_path("powershell.exe"));
+        add("Command Prompt", find_in_path("cmd.exe"));
+        // Git for Windows keeps bash out of PATH unless asked to add it.
+        let git_bash = std::env::var_os("ProgramFiles")
+            .map(|dir| PathBuf::from(dir).join("Git").join("bin").join("bash.exe"))
+            .filter(|p| p.is_file());
+        add("Git Bash", git_bash.or_else(|| find_in_path("bash.exe")));
+        add("WSL", find_in_path("wsl.exe"));
+    } else {
+        add("bash", find_in_path("bash"));
+        add("zsh", find_in_path("zsh"));
+        add("fish", find_in_path("fish"));
+        add("sh", find_in_path("sh"));
+    }
+    found
+}
+
 /// Wraps the user's prompt so PowerShell announces its directory (OSC 9;9)
 /// every time it shows one. Runs after the profile, so a custom prompt is kept.
 /// No double quotes inside: the text travels as one command-line argument.
@@ -91,5 +129,15 @@ mod tests {
     fn auto_finds_something() {
         let s = resolve("auto", &[]);
         assert!(!s.program.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn every_offered_shell_exists_and_is_listed_once() {
+        let found = available();
+        assert!(!found.is_empty());
+        for (index, shell) in found.iter().enumerate() {
+            assert!(Path::new(&shell.setting).is_file(), "{shell:?}");
+            assert!(found[..index].iter().all(|f| f.setting != shell.setting));
+        }
     }
 }

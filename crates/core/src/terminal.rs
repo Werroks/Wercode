@@ -609,19 +609,37 @@ mod tests {
             },
         )
         .unwrap();
-        term.write(format!("cd '{}'\r", target.display()).as_bytes());
-
         let same = |a: &std::path::Path| {
             std::fs::canonicalize(a).map(|a| a == target).unwrap_or(false)
         };
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(90);
+
+        // The first report comes with the first prompt. Typing before it can
+        // lose the keys on a slow machine: the shell is still starting.
+        let mut ready = false;
+        while Instant::now() < deadline && !ready {
+            ready = matches!(rx.recv_timeout(Duration::from_millis(200)), Ok(TermEvent::Cwd(_)));
+        }
+        assert!(ready, "the shell never showed a prompt");
+
+        // Typed without the `\\?\` prefix `canonicalize` adds: nobody types it.
+        let typed = target.display().to_string();
+        let typed = typed.strip_prefix(r"\\?\").unwrap_or(&typed);
+        term.write(format!("cd '{typed}'\r").as_bytes());
+
         let mut seen = false;
         while Instant::now() < deadline && !seen {
             if let Ok(TermEvent::Cwd(dir)) = rx.recv_timeout(Duration::from_millis(200)) {
                 seen = same(&dir);
             }
         }
-        assert!(seen, "no directory report; last known: {:?}", term.cwd());
+        let palette = crate::theme::load("black").terminal;
+        assert!(
+            seen,
+            "no directory report; last known: {:?}; screen was:\n{}",
+            term.cwd(),
+            text(&term.frame(&palette))
+        );
         assert!(term.cwd().is_some_and(|d| same(&d)));
     }
 }

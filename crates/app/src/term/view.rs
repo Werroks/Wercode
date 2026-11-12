@@ -212,6 +212,13 @@ impl TerminalView {
         }
     }
 
+    /// Types a command into the shell and presses Enter.
+    pub fn run(&self, command: &str) {
+        if let Some(term) = &self.term {
+            term.write(format!("{command}\r").as_bytes());
+        }
+    }
+
     fn on_term_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         match event {
             TermEvent::Wakeup => {

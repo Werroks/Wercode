@@ -257,25 +257,27 @@ mod tests {
             }
             count.load(Ordering::SeqCst)
         };
-        // Let the system start delivering before the first change.
-        std::thread::sleep(Duration::from_millis(300));
+        // macOS also reports what happened shortly before the watch began (the
+        // project being created just now), so let that pass and count from there.
+        std::thread::sleep(Duration::from_millis(1500));
+        let quiet = count.load(Ordering::SeqCst);
 
         // Ignored places stay silent, however much is written there.
         std::fs::write(root.join("target").join("debug").join("out.bin"), "x").unwrap();
         std::fs::write(root.join(".git").join("index"), "x").unwrap();
         std::fs::write(root.join("build.log"), "x").unwrap();
         std::thread::sleep(QUIET * 4);
-        assert_eq!(count.load(Ordering::SeqCst), 0, "{mode:?}");
+        assert_eq!(count.load(Ordering::SeqCst), quiet, "{mode:?}");
 
         // A burst in a watched folder is reported once, not once per file. (A
         // folder's own change can arrive late through its parent's watch.)
         for name in ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"] {
             std::fs::write(root.join("src").join("inner").join(name), "x").unwrap();
         }
-        assert!(wait_for(1) >= 1, "{mode:?}");
+        assert!(wait_for(quiet + 1) > quiet, "{mode:?}");
         std::thread::sleep(QUIET * 3);
         let burst = count.load(Ordering::SeqCst);
-        assert!(burst <= 2, "{mode:?}: {burst} reports for one burst");
+        assert!(burst - quiet <= 2, "{mode:?}: {} reports for one burst", burst - quiet);
 
         // A folder made after the watch began is watched too.
         std::fs::create_dir(root.join("later")).unwrap();

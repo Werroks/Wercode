@@ -14,6 +14,7 @@ use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use wercode_core::fs_ops;
 use wercode_core::git::{self, RepoStatus};
 use wercode_core::state::{self, Layout, State};
 use wercode_core::watch::{self, Watch};
@@ -237,8 +238,23 @@ impl Workspace {
         let search = cx.new(|cx| SearchPanel::new(root.clone(), window, cx));
         let changes = cx.new(|cx| GitPanel::new(root.clone(), window, cx));
         let subscriptions = [
-            cx.subscribe_in(&files, window, |this, _, event, window, cx| match event {
-                FilesEvent::Open(path) => this.open_file(path.clone(), None, window, cx),
+            cx.subscribe_in(&files, window, |this, _, event, window, cx| {
+                let Some(project) = &this.project else { return };
+                let (terminals, root) = (project.terminals.clone(), project.root.clone());
+                match event {
+                    FilesEvent::Open(path) => this.open_file(path.clone(), None, window, cx),
+                    FilesEvent::Insert(path) => {
+                        terminals.update(cx, |area, cx| area.insert_path(path, window, cx));
+                    }
+                    FilesEvent::OpenInTerminal(path) => {
+                        let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_default();
+                        let command = format!("{} {}", editor.trim(), fs_ops::for_shell(path, Some(&root)));
+                        terminals.update(cx, |area, cx| area.run_in_new_tab(&command, window, cx));
+                    }
+                    FilesEvent::Renamed { from, to } => {
+                        terminals.update(cx, |area, cx| area.path_renamed(from, to, cx));
+                    }
+                }
             }),
             cx.subscribe_in(&search, window, |this, _, event, window, cx| match event {
                 SearchEvent::Open { path, line, column } => {
@@ -1534,6 +1550,56 @@ mod tests {
         std::fs::remove_file(root.join("top.txt")).unwrap();
         wait_until(cx, "the deleted file to go", |cx| !shows(cx, &root.join("top.txt")));
         assert!(shows(cx, &root.join("src").join("inner.rs")), "open folders stay open");
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn renaming_a_file_moves_its_tab_and_paths_go_to_the_terminal(cx: &mut TestAppContext) {
+        use wercode_core::state::TabLayout;
+        let root = project_dir("rename");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("old.rs"), "fn old() {}\n").unwrap();
+        std::fs::write(root.join("taken.txt"), "").unwrap();
+        let f = open(cx, "rename");
+        let files = f.workspace.read_with(cx, |w, _| w.files());
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let old = root.join("src").join("old.rs");
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(old.clone(), None, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        // Renaming the folder takes the open file's tab along.
+        let rename = |cx: &mut TestAppContext, path: &std::path::Path, name: &str| {
+            cx.update_window(f.window, |_, window, cx| {
+                files.update(cx, |p, cx| p.rename_to(path, name, window, cx));
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        rename(cx, &root.join("src"), "lib");
+        let moved = root.join("lib").join("old.rs");
+        assert!(moved.is_file() && !old.exists());
+        let tab = |cx: &mut TestAppContext| area.read_with(cx, |a, cx| a.layout(cx).tabs.last().cloned());
+        assert_eq!(tab(cx), Some(TabLayout::File { path: moved.clone() }));
+        rename(cx, &moved, "new.rs");
+        assert_eq!(tab(cx), Some(TabLayout::File { path: root.join("lib").join("new.rs") }));
+        wait_until(cx, "the renamed folder in the tree", |cx| files.read_with(cx, |p, cx| p.shows(&root.join("lib"), cx)));
+
+        // A name that is taken is refused and said so; nothing moves.
+        rename(cx, &root.join("lib"), "taken.txt");
+        assert!(files.read_with(cx, |p, _| p.error().is_some()));
+        assert!(root.join("lib").is_dir() && root.join("taken.txt").is_file());
+
+        // Inserting a path while a file is showing goes to the terminal tab and shows it.
+        assert_eq!(area.read_with(cx, |a, cx| a.layout(cx).active), 1);
+        cx.update_window(f.window, |_, _, cx| {
+            files.update(cx, |p, cx| p.insert(&root.join("taken.txt"), cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(area.read_with(cx, |a, cx| a.layout(cx).active), 0);
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

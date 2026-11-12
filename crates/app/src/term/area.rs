@@ -3,7 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -11,7 +11,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use wercode_core::file_icons;
+use wercode_core::{file_icons, fs_ops};
 use wercode_core::state::{Layout, PaneLayout, TabLayout};
 
 use super::view::{TerminalView, TerminalViewEvent};
@@ -367,6 +367,46 @@ impl TerminalArea {
             editor.update(cx, |editor, cx| editor.go_to(line, col, window, cx));
         }
         self.select_tab(index, window, cx);
+    }
+
+    /// Types a path into a terminal: the one showing, or else the terminal
+    /// tab nearest the end, which is then shown.
+    pub fn insert_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let showing = self.tabs.get(self.active).is_some_and(|t| t.active_pane().is_some());
+        let found = if showing { Some(self.active) } else { self.tabs.iter().rposition(|t| t.active_pane().is_some()) };
+        let index = match found {
+            Some(index) => index,
+            None => {
+                self.add_tab(window, cx);
+                self.tabs.len() - 1
+            }
+        };
+        let Some(pane) = self.tabs[index].active_pane().cloned() else { return };
+        // Relative to where the shell is, so the line stays short.
+        let text = fs_ops::for_shell(path, pane.read(cx).cwd().as_deref());
+        pane.read(cx).insert_text(&format!("{text} "));
+        self.select_tab(index, window, cx);
+    }
+
+    /// Opens a new terminal tab and runs `command` in it.
+    pub fn run_in_new_tab(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_tab(window, cx);
+        if let Some(pane) = self.tabs[self.active].active_pane() {
+            pane.read(cx).run(command);
+        }
+    }
+
+    /// A file or folder was renamed: tabs of files under the old name follow it.
+    pub fn path_renamed(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
+        for editor in self.tabs.iter().filter_map(|t| t.editor()) {
+            let moved = editor.read(cx).path().strip_prefix(from).ok().map(|rest| {
+                if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) }
+            });
+            if let Some(path) = moved {
+                editor.update(cx, |editor, cx| editor.set_path(path, cx));
+            }
+        }
+        cx.notify();
     }
 
     /// Terminals in all tabs.

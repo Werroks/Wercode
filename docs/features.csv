@@ -25,9 +25,9 @@ Terminal splits (side by side and stacked),terminal,must,yes,yes,user decision 2
 Dark theme by default plus several built-in color schemes in settings,settings,must,yes,yes,user decision 2026-11-11; own palettes only; 5 schemes chosen on the settings screen
 Clickable file paths and URLs in terminal output,terminal,should,yes,partial,Ctrl+click; detection unit-tested; pointer part not hand-tested; a path opens in the editor at its line
 Click file opens it in the built-in editor,files,must,yes,yes,from the file tree and from the git panel; a file that is not UTF-8 text or is over 20 MB gets a note and an Open in the Default App button
-Insert file path into terminal (click or drag),files,should,partial,no,key feature for CLI agents
-Open file in $EDITOR in a terminal tab,files,should,no,no,own feature
-Context menu: new rename delete reveal copy path,files,should,yes,partial,New file and New folder buttons above the tree; no context menu; no rename or delete
+Insert file path into terminal (click or drag),files,should,partial,partial,Alt+click on a file or Insert Path into Terminal in the menu; relative to the shell's folder; quoted when needed; no drag yet
+Open file in $EDITOR in a terminal tab,files,should,no,partial,menu item shown when VISUAL or EDITOR is set; runs it in a new terminal tab; not checked by hand
+Context menu: new rename delete reveal copy path,files,should,yes,yes,right click on a row; delete moves to the system trash after a question; an open file follows a rename; no menu on the empty space under the tree
 Diff view for a changed file,git,should,yes,no,
 Push pull fetch buttons,git,should,yes,no,shell out to git
 Switch and create branch,git,should,yes,no,

@@ -96,6 +96,13 @@ impl EditorView {
         &self.path
     }
 
+    /// The file was renamed or moved; this tab now belongs to its new path.
+    pub fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.path = path;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }

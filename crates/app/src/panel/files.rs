@@ -8,26 +8,55 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::tree::{TreeEvent, TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wercode_core::{file_icons, fs_tree};
+use wercode_core::{file_icons, fs_ops, fs_tree};
 use wercode_core::git::{FileStatus, RepoStatus};
 
 /// Upper bound on entries shown at once. Only open folders are read, so this
 /// is reached by opening very many of them, or one with thousands of files.
 const MAX_ENTRIES: usize = 5_000;
 
+/// What the name field is for. The path that goes with it is the folder to
+/// create in, or the entry being renamed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Creating {
+enum Naming {
     File,
     Folder,
+    Rename,
 }
 
 pub enum FilesEvent {
     /// A file was clicked.
     Open(PathBuf),
+    /// Type this path into the terminal.
+    Insert(PathBuf),
+    /// Open the file in the program named by `$EDITOR`, in a terminal tab.
+    OpenInTerminal(PathBuf),
+    /// A file or folder got a new name; files open from it should follow.
+    Renamed { from: PathBuf, to: PathBuf },
+}
+
+/// The program the user's shell tools open files with, if one is set.
+fn terminal_editor() -> Option<String> {
+    ["VISUAL", "EDITOR"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
+}
+
+fn reveal_label() -> &'static str {
+    if cfg!(windows) {
+        "Reveal in File Explorer"
+    } else if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else {
+        "Show in File Manager"
+    }
 }
 
 pub struct FilesPanel {
@@ -40,7 +69,7 @@ pub struct FilesPanel {
     folders: Arc<HashSet<SharedString>>,
     git: Option<Arc<RepoStatus>>,
     /// The name field for a new file or folder, while it is showing.
-    creating: Option<(Creating, PathBuf)>,
+    creating: Option<(Naming, PathBuf)>,
     name_input: Entity<InputState>,
     error: Option<String>,
     /// The entry to select once the folder has been read again.
@@ -194,14 +223,83 @@ impl FilesPanel {
         }
     }
 
-    fn start_create(&mut self, kind: Creating, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_create(&mut self, kind: Naming, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.target_dir(cx);
-        self.creating = Some((kind, dir));
+        self.start_naming(kind, dir, window, cx);
+    }
+
+    /// Shows the name field: empty for something new, or holding the present
+    /// name of the entry at `path` when renaming.
+    fn start_naming(&mut self, kind: Naming, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = match kind {
+            Naming::Rename => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            Naming::File | Naming::Folder => String::new(),
+        };
+        self.creating = Some((kind, path));
         self.error = None;
         self.name_input.update(cx, |input, cx| {
-            input.set_value("", window, cx);
+            input.set_value(name, window, cx);
             input.focus(window, cx);
+            input.select_all(window, cx);
         });
+        cx.notify();
+    }
+
+    /// Asks, then moves the file or folder to the system trash.
+    fn delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let title = format!("Move {name} to the trash?");
+        let detail = if path.is_dir() {
+            "The folder and everything in it will be moved. You can bring it back from the trash."
+        } else {
+            "You can bring it back from the trash."
+        };
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(detail), &["Move to Trash", "Cancel"], cx);
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let target = path.clone();
+            let result = cx.background_executor().spawn(async move { fs_ops::trash(&target) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.error = result.err();
+                this.refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn copy_path(&self, path: &Path, relative: bool, cx: &mut Context<Self>) {
+        let shown = match path.strip_prefix(&self.root) {
+            Ok(inside) if relative => inside.to_string_lossy().replace('\\', "/"),
+            _ => path.to_string_lossy().into_owned(),
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(shown));
+    }
+
+    fn finish_rename(&mut self, path: PathBuf, name: &str, cx: &mut Context<Self>) {
+        match fs_ops::rename(&path, name) {
+            Ok(to) => {
+                self.creating = None;
+                self.error = None;
+                // Folders open below a renamed folder stay open under its new name.
+                let moved: Vec<SharedString> =
+                    self.expanded.iter().filter(|id| Path::new(id.as_ref()).starts_with(&path)).cloned().collect();
+                for id in moved {
+                    self.expanded.remove(&id);
+                    if let Ok(rest) = Path::new(id.as_ref()).strip_prefix(&path) {
+                        self.expanded.insert(to.join(rest).to_string_lossy().into_owned().into());
+                    }
+                }
+                self.select_next = Some(to.to_string_lossy().into_owned().into());
+                self.refresh(cx);
+                if to != path {
+                    cx.emit(FilesEvent::Renamed { from: path, to });
+                }
+            }
+            Err(error) => self.error = Some(error),
+        }
         cx.notify();
     }
 
@@ -218,11 +316,15 @@ impl FilesPanel {
             self.cancel_create(cx);
             return;
         }
+        if kind == Naming::Rename {
+            self.finish_rename(dir, &name, cx);
+            return;
+        }
         let path = dir.join(&name);
         // `create_new` refuses to touch a file that is already there.
         let result = match kind {
-            Creating::Folder => std::fs::create_dir_all(&path),
-            Creating::File => path
+            Naming::Folder | Naming::Rename => std::fs::create_dir_all(&path),
+            Naming::File => path
                 .parent()
                 .map_or(Ok(()), std::fs::create_dir_all)
                 .and_then(|_| std::fs::File::create_new(&path).map(|_| ())),
@@ -271,7 +373,7 @@ impl FilesPanel {
                     .icon(Icon::new(Lucide::FilePlus))
                     .tooltip("New file")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.start_create(Creating::File, window, cx)
+                        this.start_create(Naming::File, window, cx)
                     })),
             )
             .child(
@@ -281,7 +383,7 @@ impl FilesPanel {
                     .icon(Icon::new(Lucide::FolderPlus))
                     .tooltip("New folder")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.start_create(Creating::Folder, window, cx)
+                        this.start_create(Naming::Folder, window, cx)
                     })),
             )
             .child(
@@ -302,13 +404,15 @@ impl FilesPanel {
             )
     }
 
-    fn render_name_field(&self, kind: Creating, dir: &Path, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_name_field(&self, kind: Naming, dir: &Path, cx: &mut Context<Self>) -> impl IntoElement {
         let place = dir.strip_prefix(&self.root).ok().filter(|p| !p.as_os_str().is_empty());
         let label = match (kind, place) {
-            (Creating::File, None) => "New file".to_string(),
-            (Creating::Folder, None) => "New folder".to_string(),
-            (Creating::File, Some(p)) => format!("New file in {}", p.display()),
-            (Creating::Folder, Some(p)) => format!("New folder in {}", p.display()),
+            (Naming::File, None) => "New file".to_string(),
+            (Naming::Folder, None) => "New folder".to_string(),
+            (Naming::File, Some(p)) => format!("New file in {}", p.display()),
+            (Naming::Folder, Some(p)) => format!("New folder in {}", p.display()),
+            (Naming::Rename, Some(p)) => format!("Rename {}", p.display()),
+            (Naming::Rename, None) => "Rename".to_string(),
         };
         v_flex()
             .px_2()
@@ -326,6 +430,8 @@ impl Render for FilesPanel {
         let git = self.git.clone();
         let folders = self.folders.clone();
         let this = cx.entity().downgrade();
+        let (menu_owner, menu_folders) = (this.clone(), folders.clone());
+        let editor = terminal_editor();
 
         v_flex()
             .size_full()
@@ -372,8 +478,14 @@ impl Render for FilesPanel {
                                 // The tree itself selects the row and opens folders.
                                 .when(!folder, |d| {
                                     let (this, path) = (this.clone(), path.to_path_buf());
-                                    d.on_click(move |_, _, cx| {
-                                        let _ = this.update(cx, |_, cx| cx.emit(FilesEvent::Open(path.clone())));
+                                    d.on_click(move |event, _, cx| {
+                                        // With Alt held the path goes to the terminal instead.
+                                        let event = if event.modifiers().alt {
+                                            FilesEvent::Insert(path.clone())
+                                        } else {
+                                            FilesEvent::Open(path.clone())
+                                        };
+                                        let _ = this.update(cx, |_, cx| cx.emit(event));
                                     })
                                 })
                                 // A file keeps the width of the chevron, so names line up.
@@ -387,6 +499,41 @@ impl Render for FilesPanel {
                                 .child(div().flex_1().min_w_0().truncate().child(entry.item().label.clone()))
                                 .child(div().flex_none().w(px(12.)).flex().justify_center().child(mark)),
                         )
+                    })
+                    .context_menu(move |_, entry, menu, _, _| {
+                        let path = PathBuf::from(entry.item().id.as_ref());
+                        let folder = menu_folders.contains(&entry.item().id);
+                        // Each line of the menu acts on the panel with the row's path.
+                        let item = |label: &'static str, act: fn(&mut Self, PathBuf, &mut Window, &mut Context<Self>)| {
+                            let (owner, path) = (menu_owner.clone(), path.clone());
+                            PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                                let _ = owner.update(cx, |this, cx| act(this, path.clone(), window, cx));
+                            })
+                        };
+                        menu.when(folder, |menu| {
+                            menu.item(item("New File\u{2026}", |this, path, window, cx| {
+                                this.start_naming(Naming::File, path, window, cx)
+                            }))
+                            .item(item("New Folder\u{2026}", |this, path, window, cx| {
+                                this.start_naming(Naming::Folder, path, window, cx)
+                            }))
+                            .separator()
+                        })
+                        .item(item("Insert Path into Terminal", |_, path, _, cx| cx.emit(FilesEvent::Insert(path))))
+                        .when(!folder && editor.is_some(), |menu| {
+                            menu.item(item("Open in Terminal Editor", |_, path, _, cx| {
+                                cx.emit(FilesEvent::OpenInTerminal(path))
+                            }))
+                        })
+                        .separator()
+                        .item(item("Copy Path", |this, path, _, cx| this.copy_path(&path, false, cx)))
+                        .item(item("Copy Relative Path", |this, path, _, cx| this.copy_path(&path, true, cx)))
+                        .item(item(reveal_label(), |_, path, _, cx| cx.reveal_path(&path)))
+                        .separator()
+                        .item(item("Rename\u{2026}", |this, path, window, cx| {
+                            this.start_naming(Naming::Rename, path, window, cx)
+                        }))
+                        .item(item("Move to Trash", |this, path, window, cx| this.delete(path, window, cx)))
                     })
                     .size_full(),
                 ),
@@ -410,6 +557,21 @@ impl FilesPanel {
     pub fn shows(&self, path: &Path, cx: &App) -> bool {
         let id: SharedString = path.to_string_lossy().into_owned().into();
         self.tree.read(cx).index_of(&id).is_some()
+    }
+
+    /// Renames the way the menu does: show the field, type a name, press Enter.
+    pub fn rename_to(&mut self, path: &Path, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_naming(Naming::Rename, path.to_path_buf(), window, cx);
+        self.name_input.update(cx, |input, cx| input.set_value(name.to_string(), window, cx));
+        self.finish_create(window, cx);
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub fn insert(&mut self, path: &Path, cx: &mut Context<Self>) {
+        cx.emit(FilesEvent::Insert(path.to_path_buf()));
     }
 
     /// Opens a folder the way a click on it does.

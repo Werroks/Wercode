@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
+mod diff;
 mod editor;
 mod panel;
 mod settings;

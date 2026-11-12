@@ -24,6 +24,7 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
   `panel/` (file tree, search, git panel), `editor.rs` (a file in a tab),
+  `diff.rs` (the changes to a file in a tab),
   `settings.rs` (the settings screen), `assets.rs` (bundled icons), `theme.rs`.
 - `assets/themes/*.toml` — built-in colour schemes, compiled in.
 - `docs/` — planning notes: `features.csv`, `build-log.md`, `architecture.md`.

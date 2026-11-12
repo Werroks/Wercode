@@ -253,6 +253,79 @@ pub fn commit(dir: &Path, message: &str) -> Result<(), String> {
     run(dir, &["commit", "--quiet", "-m", message], &[])
 }
 
+/// The changes to one file as a patch. `staged` compares the index with the
+/// last commit; otherwise the working tree with the index. A file git does
+/// not track yet is shown as all new.
+pub fn diff(dir: &Path, path: &Path, staged: bool, untracked: bool) -> Result<String, String> {
+    let mut cmd = git(dir);
+    cmd.args(["-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff"]);
+    if untracked {
+        // Comparing with nothing; git reports "different" through its exit code.
+        cmd.arg("--no-index").arg("--").arg(if cfg!(windows) { "NUL" } else { "/dev/null" }).arg(path);
+    } else {
+        if staged {
+            cmd.arg("--cached");
+        }
+        cmd.arg("--").arg(path);
+    }
+    let out = cmd.stdout(Stdio::piped()).output().map_err(|e| format!("Could not run git: {e}"))?;
+    if out.status.success() || (untracked && out.status.code() == Some(1)) {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err("git could not compare this file.".into())
+    }
+}
+
+/// Throws away the changes to tracked files in the working tree. What is
+/// staged stays staged. This cannot be undone.
+pub fn discard(dir: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    run(dir, &["checkout", "--quiet"], paths)
+}
+
+/// Sends the branch to its remote. A branch that was never pushed goes to
+/// `origin` under its own name and starts following it.
+pub fn push(dir: &Path, has_upstream: bool) -> Result<(), String> {
+    if has_upstream {
+        run(dir, &["push", "--quiet"], &[])
+    } else {
+        run(dir, &["push", "--quiet", "--set-upstream", "origin", "HEAD"], &[])
+    }
+}
+
+/// Brings in the remote's commits the way the user's git is set up to.
+pub fn pull(dir: &Path) -> Result<(), String> {
+    run(dir, &["pull", "--quiet"], &[])
+}
+
+pub fn fetch(dir: &Path) -> Result<(), String> {
+    run(dir, &["fetch", "--quiet", "--all", "--prune"], &[])
+}
+
+/// Local branches, by name.
+pub fn branches(dir: &Path) -> Vec<String> {
+    output(git(dir).args(["for-each-ref", "--format=%(refname:short)", "refs/heads"]))
+        .map(|out| String::from_utf8_lossy(&out).lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Checks out an existing local branch. Git refuses when that would
+/// overwrite changes, and says which files.
+pub fn switch(dir: &Path, branch: &str) -> Result<(), String> {
+    run(dir, &["switch", "--quiet", branch], &[])
+}
+
+/// Makes a branch at the current commit and switches to it.
+pub fn create_branch(dir: &Path, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Write a name for the branch first.".into());
+    }
+    run(dir, &["switch", "--quiet", "-c", name], &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +429,55 @@ mod tests {
         }
         // Nothing staged: git refuses, and its words come back.
         assert!(!commit(&dir, "Empty").unwrap_err().is_empty());
+
+        // Patches for a changed, a staged and a new file.
+        std::fs::write(&file, "again\nand more\n").unwrap();
+        let new = dir.join("new file.txt");
+        std::fs::write(&new, "brand new\n").unwrap();
+        let patch = diff(&dir, &file, false, false).unwrap();
+        assert!(patch.contains("+and more") && patch.contains("a.txt"), "{patch}");
+        assert_eq!(diff(&dir, &file, true, false).unwrap(), "");
+        let patch = diff(&dir, &new, false, true).unwrap();
+        assert!(patch.contains("+brand new"), "{patch}");
+        stage(&dir, &[file.clone()]).unwrap();
+        assert!(diff(&dir, &file, true, false).unwrap().contains("+and more"));
+        assert_eq!(diff(&dir, &file, false, false).unwrap(), "");
+        unstage(&dir, &[file.clone()]).unwrap();
+
+        // Discarding puts the committed text back and leaves other files alone.
+        discard(&dir, &[file.clone()]).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "again");
+        assert!(new.is_file());
+
+        // Branches: list, create, switch; a missing one is an error with git's words.
+        assert_eq!(branches(&dir), ["trunk"]);
+        create_branch(&dir, " feature/one ").unwrap();
+        assert_eq!(status(&dir).unwrap().branch.as_deref(), Some("feature/one"));
+        assert_eq!(branches(&dir), ["feature/one", "trunk"]);
+        switch(&dir, "trunk").unwrap();
+        assert_eq!(status(&dir).unwrap().branch.as_deref(), Some("trunk"));
+        assert!(!switch(&dir, "nope").unwrap_err().is_empty());
+        assert!(create_branch(&dir, "  ").is_err());
+        assert!(!create_branch(&dir, "trunk").unwrap_err().is_empty());
+
+        // Push and fetch against a remote that is a folder next door.
+        let remote = dir.with_extension("remote");
+        let _ = std::fs::remove_dir_all(&remote);
+        assert!(Command::new("git").args(["init", "-q", "--bare"]).arg(&remote).status().unwrap().success());
+        assert!(git(&dir).args(["remote", "add", "origin"]).arg(&remote).status().unwrap().success());
+        assert!(!status(&dir).unwrap().has_upstream);
+        push(&dir, false).unwrap();
+        let s = status(&dir).unwrap();
+        assert!(s.has_upstream);
+        assert_eq!((s.ahead, s.behind), (0, 0));
+        stage(&dir, &[]).unwrap();
+        commit(&dir, "One more").unwrap();
+        assert_eq!(status(&dir).unwrap().ahead, 1);
+        push(&dir, true).unwrap();
+        assert_eq!(status(&dir).unwrap().ahead, 0);
+        fetch(&dir).unwrap();
+        pull(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&remote);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

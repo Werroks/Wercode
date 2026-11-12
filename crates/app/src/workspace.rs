@@ -10,6 +10,7 @@ use futures::channel::mpsc;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -39,7 +40,8 @@ actions!(
         SwitchProject,
         CommandPalette,
         NewWindow,
-        OpenSettings
+        OpenSettings,
+        SwitchBranch
     ]
 );
 
@@ -150,6 +152,7 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Project: Open Folder\u{2026}", Box::new(OpenFolder)),
         ("Project: Switch to Recent\u{2026}", Box::new(SwitchProject)),
         ("Preferences: Settings", Box::new(OpenSettings)),
+        ("Git: Switch or Create Branch\u{2026}", Box::new(SwitchBranch)),
     ]
 }
 
@@ -170,6 +173,18 @@ struct Project {
     _watch_task: Task<()>,
 }
 
+/// The list of branches over the status bar.
+struct BranchMenu {
+    /// Local branches; empty until git has listed them.
+    names: Vec<String>,
+    /// The name for a new branch.
+    input: Entity<InputState>,
+    error: Option<String>,
+    /// Git is switching; the list waits.
+    busy: bool,
+    _subscription: Subscription,
+}
+
 pub struct Workspace {
     /// `None` shows the welcome screen.
     project: Option<Project>,
@@ -178,6 +193,7 @@ pub struct Workspace {
     /// The list of recent projects under the title is showing.
     switcher_open: bool,
     palette: Option<Entity<CommandState>>,
+    branches: Option<BranchMenu>,
     /// The settings screen, while it is showing.
     settings: Option<(Entity<SettingsView>, Subscription)>,
     /// The user has agreed to close the window; do not ask again.
@@ -219,6 +235,7 @@ impl Workspace {
             panel_open: state.panel_open,
             switcher_open: false,
             palette: None,
+            branches: None,
             settings: None,
             closing: false,
             forwarding: false,
@@ -265,6 +282,13 @@ impl Workspace {
                 // Staging or committing shows at once, without waiting for the next poll.
                 GitPanelEvent::Changed => this.refresh_git(cx),
                 GitPanelEvent::Open(path) => this.open_file(path.clone(), None, window, cx),
+                GitPanelEvent::OpenDiff { path, staged, untracked } => {
+                    let Some(project) = &this.project else { return };
+                    let (root, path, staged, untracked) = (project.root.clone(), path.clone(), *staged, *untracked);
+                    project
+                        .terminals
+                        .update(cx, |area, cx| area.open_diff(root, path, staged, untracked, window, cx));
+                }
             }),
             // Tabs opened, closed or split are written down for the next launch.
             cx.observe(&terminals, |this, _, cx| this.remember_layout(cx)),
@@ -321,7 +345,143 @@ impl Workspace {
     fn disk_changed(&mut self, root: &Path, cx: &mut Context<Self>) {
         let Some(project) = self.project.as_ref().filter(|p| p.root == root) else { return };
         project.files.update(cx, |files, cx| files.refresh(cx));
+        project.terminals.update(cx, |area, cx| area.refresh_diffs(cx));
         self.refresh_git(cx);
+    }
+
+    /// Shows the branches of the repository, to switch to one or start a new one.
+    fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switcher_open = false;
+        self.palette = None;
+        let Some(project) = self.project.as_ref().filter(|p| p.git.is_some()) else { return };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("New branch name, then Enter"));
+        let subscription = cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                let name = input.read(cx).value().to_string();
+                this.change_branch(name, true, window, cx);
+            }
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.branches =
+            Some(BranchMenu { names: Vec::new(), input, error: None, busy: false, _subscription: subscription });
+        let root = project.root.clone();
+        cx.spawn(async move |this, cx| {
+            let names = cx.background_executor().spawn(async move { git::branches(&root) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(menu) = &mut this.branches {
+                    menu.names = names;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn close_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.branches.take().is_some() {
+            self.focus_terminals(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Switches to a branch, or makes it first. When git refuses (the switch
+    /// would overwrite changes), what it said stays in the list.
+    fn change_branch(&mut self, name: String, create: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
+        let Some(menu) = &mut self.branches else { return };
+        if menu.busy {
+            return;
+        }
+        menu.busy = true;
+        menu.error = None;
+        let root = project.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let dir = root.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { if create { git::create_branch(&dir, &name) } else { git::switch(&dir, &name) } })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {
+                        this.close_branches(window, cx);
+                        // Another branch has other files.
+                        this.disk_changed(&root, cx);
+                    }
+                    Err(error) => {
+                        if let Some(menu) = &mut this.branches {
+                            menu.busy = false;
+                            menu.error = Some(error);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_branches(&self, menu: &BranchMenu, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, border, hover, danger) = (theme.muted_foreground, theme.border, theme.list_hover, theme.danger);
+        let (popover, popover_text) = (theme.popover, theme.popover_foreground);
+        let current = self.project.as_ref().and_then(|p| p.git.as_ref()).and_then(|git| git.branch.clone());
+        let rows = menu.names.iter().enumerate().map(|(index, name)| {
+            let is_current = current.as_deref() == Some(name.as_str());
+            let target = name.clone();
+            h_flex()
+                .id(("branch", index))
+                .test_support()
+                .w_full()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .text_sm()
+                .hover(|s| s.bg(hover))
+                .when(!is_current, |d| {
+                    d.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.change_branch(target.clone(), false, window, cx);
+                    }))
+                })
+                .child(Icon::new(Lucide::GitBranch).xsmall().text_color(muted))
+                .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                .when(is_current, |d| d.child(Icon::new(IconName::Check).xsmall().text_color(muted)))
+        });
+        let rows: Vec<_> = rows.collect();
+        self.backdrop("branches-backdrop", cx).child(
+            v_flex()
+                .id("branches")
+                .absolute()
+                .bottom(px(28.))
+                .left(px(8.))
+                .w(px(340.))
+                .max_h(px(420.))
+                .p_1()
+                .gap_1()
+                .rounded_lg()
+                .border_1()
+                .border_color(border)
+                .bg(popover)
+                .text_color(popover_text)
+                .shadow_lg()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.close_branches(window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(div().px_3().py_1().text_xs().text_color(muted).child("BRANCHES"))
+                .child(v_flex().id("branch-list").flex_1().min_h_0().overflow_y_scroll().children(rows))
+                .child(div().h(px(1.)).bg(border))
+                .child(div().p_1().child(Input::new(&menu.input).small()))
+                .when_some(menu.error.clone(), |d, error| {
+                    d.child(div().id("branch-error").px_3().pb_1().text_xs().text_color(danger).child(error))
+                }),
+        )
     }
 
     /// Notes which tabs are open, and saves that a moment later.
@@ -517,6 +677,8 @@ impl Workspace {
                 files.refresh(cx);
             }
         });
+        // Staging and committing move changes from one side to the other.
+        project.terminals.update(cx, |area, cx| area.refresh_diffs(cx));
         cx.notify();
     }
 
@@ -888,6 +1050,7 @@ impl Workspace {
                 this.switcher_open = false;
                 this.close_palette(window, cx);
                 this.close_settings(window, cx);
+                this.close_branches(window, cx);
                 cx.notify();
             }),
         )
@@ -1081,6 +1244,12 @@ impl Workspace {
                     .gap_3()
                     .child(
                         item()
+                            .id("status-branch")
+                            .test_support()
+                            .px_1()
+                            .rounded_sm()
+                            .hover(|s| s.bg(theme.secondary_hover))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_branches(window, cx)))
                             .text_color(color)
                             .child(Icon::new(Lucide::GitBranch).xsmall())
                             .child(if changed > 0 { format!("{branch}*") } else { branch }),
@@ -1194,6 +1363,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ShowGit, window, cx| this.show_panel(PanelKind::Git, window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+            .on_action(cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)))
             .on_action(cx.listener(|this, _: &NewWindow, _, cx| this.new_window(cx)))
             .on_action(cx.listener(|this, _: &SwitchProject, _, cx| {
                 this.palette = None;
@@ -1218,6 +1388,7 @@ impl Render for Workspace {
             .children(status)
             .when(self.switcher_open, |d| d.child(self.render_switcher(cx)))
             .when_some(self.palette.clone(), |d, palette| d.child(self.render_palette(&palette, cx)))
+            .when_some(self.branches.as_ref(), |d, menu| d.child(self.render_branches(menu, cx)))
             .when_some(self.settings.as_ref().map(|(view, _)| view.clone()), |d, view| {
                 d.child(self.render_settings(&view, cx))
             })
@@ -1436,6 +1607,101 @@ mod tests {
         assert_eq!(counts(cx), (0, 0));
         let log = Command::new("git").arg("-C").arg(&repo).args(["log", "--format=%s"]).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).lines().collect::<Vec<_>>(), ["Second", "First"]);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn git_panel_shows_changes_discards_pushes_and_switches_branch(cx: &mut TestAppContext) {
+        use std::process::Command;
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = project_dir("gitmore");
+        let remote = repo.parent().unwrap().join("remote.git");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "trunk"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "First"]);
+        assert!(Command::new("git").args(["init", "-q", "--bare"]).arg(&remote).status().unwrap().success());
+        git(&["remote", "add", "origin", &remote.to_string_lossy()]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "fresh\n").unwrap();
+
+        let f = open(cx, "gitmore");
+        press(cx, f.window, &["ctrl-shift-g"]);
+        let status = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            f.workspace.read_with(cx, |w, _| w.git().expect("a repository"))
+        };
+        assert_eq!(status(cx).unstaged().count(), 2);
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+            cx.update_window(f.window, |_, window, cx| window.click(id, cx)).unwrap();
+            cx.run_until_parked();
+        };
+
+        // A click on a changed file shows what changed: one line added.
+        click(cx, ("git-change", 0usize).into());
+        let diff = area.read_with(cx, |a, _| a.active_diff()).expect("a tab of changes");
+        assert_eq!(diff.read_with(cx, |d, cx| d.counts(cx)), Some((1, 0)));
+        // The same file again is the same tab; a new file is all additions.
+        click(cx, ("git-change", 0usize).into());
+        assert_eq!(area.read_with(cx, |a, _| a.tab_count()), 2);
+        click(cx, ("git-change", 1usize).into());
+        let fresh = area.read_with(cx, |a, _| a.active_diff()).unwrap();
+        assert_eq!(fresh.read_with(cx, |d, cx| d.counts(cx)), Some((1, 0)));
+        // Tabs of changes are not written down for the next launch.
+        assert_eq!(area.read_with(cx, |a, cx| a.layout(cx).tabs.len()), 1);
+
+        // Discard asks first; Cancel keeps the edit, Discard puts the file back.
+        click(cx, ("git-discard", 0usize).into());
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        assert_eq!(status(cx).unstaged().count(), 2);
+        click(cx, ("git-discard", 0usize).into());
+        cx.simulate_prompt_answer("Discard");
+        assert_eq!(status(cx).unstaged().count(), 1);
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap().replace("\r\n", "\n"), "one\ntwo\n");
+        // The tab that showed those changes has nothing left to show.
+        assert_eq!(diff.read_with(cx, |d, _| d.note().map(str::to_string)), Some("No changes in this file.".into()));
+
+        // The first push publishes the branch.
+        assert!(!status(cx).has_upstream);
+        click(cx, "git-push".into());
+        assert!(status(cx).has_upstream);
+        let panel = f.workspace.read_with(cx, |w, _| w.changes()).unwrap();
+        assert_eq!(panel.read_with(cx, |p, _| p.error().map(str::to_string)), None);
+        click(cx, "git-fetch".into());
+        click(cx, "git-pull".into());
+        assert_eq!(panel.read_with(cx, |p, _| p.error().map(str::to_string)), None);
+
+        // The branch in the status bar opens the list; a typed name makes a branch.
+        click(cx, "status-branch".into());
+        assert!(f.workspace.read_with(cx, |w, _| w.branches.is_some()));
+        cx.update_window(f.window, |_, window, cx| window.input("feature/one", cx)).unwrap();
+        press(cx, f.window, &["enter"]);
+        assert_eq!(status(cx).branch.as_deref(), Some("feature/one"));
+        assert!(f.workspace.read_with(cx, |w, _| w.branches.is_none()));
+        // Clicking a branch in the list switches to it.
+        click(cx, "status-branch".into());
+        let names = f.workspace.read_with(cx, |w, _| w.branches.as_ref().unwrap().names.clone());
+        assert_eq!(names, ["feature/one", "trunk"]);
+        click(cx, ("branch", 1usize).into());
+        assert_eq!(status(cx).branch.as_deref(), Some("trunk"));
+        // A name git will not take is reported in the list, which stays open.
+        click(cx, "status-branch".into());
+        cx.update_window(f.window, |_, window, cx| window.input("trunk", cx)).unwrap();
+        press(cx, f.window, &["enter"]);
+        cx.run_until_parked();
+        assert!(f.workspace.read_with(cx, |w, _| w.branches.as_ref().is_some_and(|m| m.error.is_some())));
+        press(cx, f.window, &["escape"]);
+        assert!(f.workspace.read_with(cx, |w, _| w.branches.is_none()));
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

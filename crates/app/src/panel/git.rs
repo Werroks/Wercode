@@ -3,21 +3,32 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wercode_core::file_icons;
 use wercode_core::git::{self, Change, FileStatus, RepoStatus};
+use wercode_core::{file_icons, fs_ops};
 
 use super::files::status_color;
 
 pub enum GitPanelEvent {
     /// A command changed the repository; its status should be read again.
     Changed,
-    /// A file in one of the lists was clicked.
+    /// The file itself was asked for.
     Open(PathBuf),
+    /// A file in one of the lists was clicked: show what changed in it.
+    OpenDiff { path: PathBuf, staged: bool, untracked: bool },
+}
+
+/// The commands that talk to the remote.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Remote {
+    Fetch,
+    Pull,
+    Push,
 }
 
 /// Which of the two lists a row belongs to.
@@ -113,6 +124,48 @@ impl GitPanel {
         );
     }
 
+    /// Fetches, pulls or pushes. Git's own words are shown when it fails
+    /// (no remote, rejected push, no way to ask for a password).
+    fn remote(&mut self, command: Remote, window: &mut Window, cx: &mut Context<Self>) {
+        let has_upstream = self.git.as_ref().is_some_and(|git| git.has_upstream);
+        self.run(
+            move |root| match command {
+                Remote::Fetch => git::fetch(root),
+                Remote::Pull => git::pull(root),
+                Remote::Push => git::push(root, has_upstream),
+            },
+            |_, _, _| {},
+            window,
+            cx,
+        );
+    }
+
+    /// Asks, then throws away the changes to a file: a tracked file goes back
+    /// to what is in the index, a new one goes to the trash.
+    fn discard(&mut self, path: PathBuf, untracked: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let (title, detail, button) = if untracked {
+            (format!("Move {name} to the trash?"), "Git does not know this file yet. You can bring it back from the trash.", "Move to Trash")
+        } else {
+            (format!("Discard changes in {name}?"), "The file goes back to its last staged or committed text. This cannot be undone.", "Discard")
+        };
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(detail), &[button, "Cancel"], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.run(
+                    move |root| if untracked { fs_ops::trash(&path) } else { git::discard(root, &[path]) },
+                    |_, _, _| {},
+                    window,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
     /// Commits the staged files; with nothing staged, everything that changed.
     fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let message = self.message.read(cx).value().trim().to_string();
@@ -179,14 +232,16 @@ impl GitPanel {
             let picture = file_icons::for_file(&name).and_then(crate::assets::file_icon);
             let path = change.path.clone();
             let clicked = change.path.clone();
+            let (opened, discarded) = (change.path.clone(), change.path.clone());
             let exists = status != FileStatus::Deleted;
+            let untracked = status == FileStatus::Untracked;
+            let staged = list == List::Staged;
             h_flex()
                 .id((prefix, ix))
-                .when(exists, |d| {
-                    d.on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                        cx.emit(GitPanelEvent::Open(clicked.clone()))
-                    }))
-                })
+                .test_support()
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    cx.emit(GitPanelEvent::OpenDiff { path: clicked.clone(), staged, untracked })
+                }))
                 .w_full()
                 .gap_1p5()
                 .pl_3()
@@ -208,6 +263,33 @@ impl GitPanel {
                         .child(name),
                 )
                 .child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(folder))
+                .when(exists, |d| {
+                    d.child(
+                        Button::new((if staged { "git-open-staged" } else { "git-open" }, ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::File)
+                            .tooltip("Open the file")
+                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(GitPanelEvent::Open(opened.clone()));
+                            })),
+                    )
+                })
+                .when(!staged, |d| {
+                    d.child(
+                        Button::new(("git-discard", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(Lucide::Undo2))
+                            .tooltip("Discard changes")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.discard(discarded.clone(), untracked, window, cx);
+                            })),
+                    )
+                })
                 .child(
                     Button::new((button, ix))
                         .ghost()
@@ -280,6 +362,30 @@ impl Render for GitPanel {
         let label = if nothing_staged && !clean { "Stage All and Commit" } else { "Commit" };
         let staged = self.render_section(List::Staged, cx);
         let changes = self.render_section(List::Changes, cx);
+        let busy = self.busy;
+        let remote = |id: &'static str, icon: Lucide, label: String, tooltip: &'static str, command: Remote| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(icon))
+                .label(label)
+                .tooltip(tooltip)
+                .disabled(busy)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.remote(command, window, cx)))
+        };
+        let count = |word: &str, n: u32| if n > 0 { format!("{word} {n}") } else { word.to_string() };
+        let push_label = if git.has_upstream { count("Push", git.ahead) } else { "Publish".to_string() };
+        let remotes = h_flex()
+            .gap_1()
+            .child(remote("git-fetch", Lucide::RefreshCw, "Fetch".into(), "Fetch from all remotes", Remote::Fetch))
+            .child(remote("git-pull", Lucide::ArrowDownToLine, count("Pull", git.behind), "Pull", Remote::Pull))
+            .child(remote(
+                "git-push",
+                Lucide::ArrowUpFromLine,
+                push_label,
+                if git.has_upstream { "Push" } else { "Push this branch to origin for the first time" },
+                Remote::Push,
+            ));
 
         v_flex()
             .id("git-panel")
@@ -289,6 +395,7 @@ impl Render for GitPanel {
                     .flex_none()
                     .p_2()
                     .gap_2()
+                    .child(remotes)
                     .child(Textarea::new(&self.message))
                     .child(
                         Button::new("git-commit")

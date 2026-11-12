@@ -18,6 +18,7 @@ use super::view::{TerminalView, TerminalViewEvent};
 use super::{
     ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
 };
+use crate::diff::DiffView;
 use crate::editor::{EditorEvent, EditorView};
 use crate::theme::AppState;
 
@@ -132,6 +133,8 @@ enum Body {
         active: Pane,
     },
     Editor(Entity<EditorView>),
+    /// The changes to a file, read-only.
+    Diff(Entity<DiffView>),
 }
 
 struct Tab {
@@ -152,13 +155,13 @@ impl Tab {
     fn active_pane(&self) -> Option<&Pane> {
         match &self.body {
             Body::Terminals { active, .. } => Some(active),
-            Body::Editor(_) => None,
+            Body::Editor(_) | Body::Diff(_) => None,
         }
     }
 
     fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.body {
-            Body::Terminals { .. } => None,
+            Body::Terminals { .. } | Body::Diff(_) => None,
             Body::Editor(editor) => Some(editor),
         }
     }
@@ -167,6 +170,7 @@ impl Tab {
         match &self.body {
             Body::Terminals { active, .. } => active.focus_handle(cx),
             Body::Editor(editor) => editor.focus_handle(cx),
+            Body::Diff(diff) => diff.focus_handle(cx),
         }
     }
 }
@@ -228,15 +232,62 @@ impl TerminalArea {
 
     /// The open tabs, written down for the next launch.
     pub fn layout(&self, cx: &App) -> Layout {
-        let tabs = self
+        // A tab of changes is not kept: by the next launch they are different.
+        let kept = |tab: &Tab| !matches!(tab.body, Body::Diff(_));
+        let tabs: Vec<TabLayout> = self
             .tabs
             .iter()
-            .map(|tab| match &tab.body {
-                Body::Terminals { root, .. } => TabLayout::Terminals { panes: root.layout(cx) },
-                Body::Editor(editor) => TabLayout::File { path: editor.read(cx).path().to_path_buf() },
+            .filter_map(|tab| match &tab.body {
+                Body::Terminals { root, .. } => Some(TabLayout::Terminals { panes: root.layout(cx) }),
+                Body::Editor(editor) => Some(TabLayout::File { path: editor.read(cx).path().to_path_buf() }),
+                Body::Diff(_) => None,
             })
             .collect();
-        Layout { tabs, active: self.active }
+        let before = self.tabs.iter().take(self.active).filter(|tab| kept(tab)).count();
+        Layout { active: before.min(tabs.len().saturating_sub(1)), tabs }
+    }
+
+    /// Shows the changes to a file in a tab, or the tab that already shows them.
+    pub fn open_diff(
+        &mut self,
+        root: PathBuf,
+        path: PathBuf,
+        staged: bool,
+        untracked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.tabs.iter().position(|t| match &t.body {
+            Body::Diff(diff) => diff.read(cx).shows(&path, staged),
+            _ => false,
+        });
+        let index = match open {
+            Some(index) => {
+                if let Body::Diff(diff) = &self.tabs[index].body {
+                    diff.update(cx, |diff, cx| {
+                        diff.set_untracked(untracked);
+                        diff.reload(cx);
+                    });
+                }
+                index
+            }
+            None => {
+                let diff = cx.new(|cx| DiffView::new(root, path, staged, untracked, cx));
+                let id = self.id();
+                self.tabs.push(Tab { id, body: Body::Diff(diff) });
+                self.tabs.len() - 1
+            }
+        };
+        self.select_tab(index, window, cx);
+    }
+
+    /// The repository or the files changed: tabs of changes read them again.
+    pub fn refresh_diffs(&mut self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            if let Body::Diff(diff) = &tab.body {
+                diff.update(cx, |diff, cx| diff.reload(cx));
+            }
+        }
     }
 
     fn restore(&mut self, layout: &Layout, window: &mut Window, cx: &mut Context<Self>) {
@@ -409,6 +460,20 @@ impl TerminalArea {
         cx.notify();
     }
 
+    /// The tab of changes that is showing, if one is.
+    #[cfg(test)]
+    pub fn active_diff(&self) -> Option<Entity<DiffView>> {
+        match &self.tabs.get(self.active)?.body {
+            Body::Diff(diff) => Some(diff.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
     /// Terminals in all tabs.
     #[cfg(test)]
     pub fn pane_count(&self) -> usize {
@@ -503,6 +568,13 @@ impl TerminalArea {
             && let Some(editor) = self.tabs.iter().find(|t| t.id == id).and_then(|t| t.editor().cloned())
         {
             self.close_editor(id, editor, window, cx);
+            return;
+        }
+        // Nothing to lose in a tab of changes.
+        if let CloseTarget::Tab(id) = target
+            && self.tabs.iter().any(|t| t.id == id && matches!(t.body, Body::Diff(_)))
+        {
+            self.remove_tab(id, window, cx);
             return;
         }
         let panes = match target {
@@ -752,6 +824,11 @@ impl TerminalArea {
                     let picture = file_icons::for_file(&name).and_then(crate::assets::file_icon);
                     (SharedString::from(name), picture, editor.is_dirty())
                 }
+                Body::Diff(diff) => {
+                    let diff = diff.read(cx);
+                    let picture = file_icons::for_file(&diff.file_name()).and_then(crate::assets::file_icon);
+                    (SharedString::from(diff.label()), picture, false)
+                }
             };
             let panes = tab.panes().len();
             h_flex()
@@ -801,7 +878,7 @@ impl TerminalArea {
         let button = |id: &'static str, icon: IconName, tooltip: &'static str| {
             Button::new(id).ghost().xsmall().icon(icon).tooltip(tooltip)
         };
-        let on_file = self.tabs.get(self.active).is_some_and(|t| t.editor().is_some());
+        let on_file = self.tabs.get(self.active).is_some_and(|t| t.active_pane().is_none());
         let close_tip =
             if on_file { "Close this file (Ctrl+Shift+W)" } else { "Close this terminal (Ctrl+Shift+W)" };
         h_flex()
@@ -914,6 +991,7 @@ impl Render for TerminalArea {
         let body = match self.tabs.get(self.active).map(|t| &t.body) {
             Some(Body::Terminals { root, .. }) => self.render_node(root, cx),
             Some(Body::Editor(editor)) => editor.clone().into_any_element(),
+            Some(Body::Diff(diff)) => diff.clone().into_any_element(),
             None => div().into_any_element(),
         };
         // While a question is on screen the shortcuts below must not act behind it.

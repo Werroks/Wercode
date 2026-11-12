@@ -28,10 +28,10 @@ Click file opens it in the built-in editor,files,must,yes,yes,from the file tree
 Insert file path into terminal (click or drag),files,should,partial,partial,Alt+click on a file or Insert Path into Terminal in the menu; relative to the shell's folder; quoted when needed; no drag yet
 Open file in $EDITOR in a terminal tab,files,should,no,partial,menu item shown when VISUAL or EDITOR is set; runs it in a new terminal tab; not checked by hand
 Context menu: new rename delete reveal copy path,files,should,yes,yes,right click on a row; delete moves to the system trash after a question; an open file follows a rename; no menu on the empty space under the tree
-Diff view for a changed file,git,should,yes,no,
-Push pull fetch buttons,git,should,yes,no,shell out to git
-Switch and create branch,git,should,yes,no,
-Discard changes,git,should,yes,no,confirm first
+Diff view for a changed file,git,should,yes,yes,a click on a file in the git panel opens its changes in a tab; unified view with syntax colours; staged and unstaged separately; follows the disk; read-only
+Push pull fetch buttons,git,should,yes,yes,above the commit field; the first push publishes the branch to origin; git's own error is shown; no password prompt (credentials must already work in the terminal)
+Switch and create branch,git,should,yes,yes,click the branch in the status bar or Git: Switch or Create Branch in the palette; local branches only
+Discard changes,git,should,yes,yes,button on each row of Changes; asks first; a new file goes to the trash instead
 Command palette,shell,should,yes,yes,Ctrl+Shift+P; 15 commands; covered by a UI test
 Quick open file by fuzzy name,shell,should,yes,no,
 Configurable keybindings,settings,should,yes,no,

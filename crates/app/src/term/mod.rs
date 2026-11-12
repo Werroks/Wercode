@@ -5,7 +5,7 @@ pub mod view;
 
 use gpui_kit::{App, KeyBinding, actions};
 
-pub use area::{AreaEvent, TerminalArea};
+pub use area::TerminalArea;
 
 actions!(
     terminal,

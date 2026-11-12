@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
+mod editor;
 mod panel;
 mod term;
 mod theme;
@@ -9,11 +10,8 @@ mod workspace;
 
 use std::path::PathBuf;
 
-use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 use wercode_core::state::State;
-
-use crate::workspace::Workspace;
 
 /// The folder to open: the first argument; without one, the project that was
 /// open last time. With neither, the welcome screen.
@@ -44,6 +42,7 @@ fn main() {
         gpui_kit::init(cx);
         theme::apply(settings, cx);
         term::init(cx);
+        editor::init(cx);
         workspace::init(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -52,16 +51,8 @@ fn main() {
         })
         .detach();
 
-        let options = WindowOptions {
-            window_min_size: Some(size(px(640.), px(400.))),
-            window_bounds: window_bounds(&state, cx),
-            ..TitleBar::window_options()
-        };
-        let state_path = wercode_core::state::state_path();
-        gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| Workspace::new(root, state, state_path, window, cx))
-        })
-        .expect("failed to open window");
+        let bounds = window_bounds(&state, cx);
+        workspace::open_window(root, state, wercode_core::state::state_path(), bounds, cx);
         cx.activate(true);
     });
 }

@@ -16,6 +16,8 @@ use super::files::status_color;
 pub enum GitPanelEvent {
     /// A command changed the repository; its status should be read again.
     Changed,
+    /// A file in one of the lists was clicked.
+    Open(PathBuf),
 }
 
 /// Which of the two lists a row belongs to.
@@ -176,8 +178,15 @@ impl GitPanel {
                 .unwrap_or_default();
             let picture = file_icons::for_file(&name).and_then(crate::assets::file_icon);
             let path = change.path.clone();
+            let clicked = change.path.clone();
+            let exists = status != FileStatus::Deleted;
             h_flex()
                 .id((prefix, ix))
+                .when(exists, |d| {
+                    d.on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.emit(GitPanelEvent::Open(clicked.clone()))
+                    }))
+                })
                 .w_full()
                 .gap_1p5()
                 .pl_3()
@@ -207,6 +216,8 @@ impl GitPanel {
                         .tooltip(row_tip)
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            // The button is inside the row; the press is not for the row.
+                            cx.stop_propagation();
                             this.move_files(list, vec![path.clone()], window, cx);
                         })),
                 )

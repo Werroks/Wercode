@@ -19,10 +19,11 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 ## Layout
 
 - `crates/core` — no window, tested without a GPU: settings, state, themes,
-  shell lookup, PTY terminal, links, git status, file listing.
+  shell lookup, PTY terminal, links, git status, file listing, reading and
+  writing documents.
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
-  `panel/` (file tree, git panel), `assets.rs` (bundled icons), `theme.rs`.
+  `panel/` (file tree, git panel), `editor.rs` (a file in a tab), `assets.rs` (bundled icons), `theme.rs`.
 - `assets/themes/*.toml` — built-in colour schemes, compiled in.
 - `docs/` — planning notes: `features.csv`, `build-log.md`, `architecture.md`.
 - `tools/drive.ps1` — Windows-only helper for checking the running window. Not shipped.
@@ -49,5 +50,8 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   thread and keep `GIT_OPTIONAL_LOCKS=0`.
 - The Windows icon is resource 1 of the executable (`crates/app/build.rs`);
   the window takes it from there, so keep that number.
+- A test must never use `state::state_path()`: that is the user's real saved
+  state. Windows get the path passed in; tests pass one in a temp folder.
+- Plain Ctrl+S is bound only inside the editor (`EditorView` context).
 - After finishing a feature, update `docs/features.csv` and
   `docs/build-log.md`.

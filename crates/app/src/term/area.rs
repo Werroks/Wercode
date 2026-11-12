@@ -1,4 +1,5 @@
-//! The centre of the window: terminal tabs, each split into panes.
+//! The centre of the window: tabs. A tab holds terminals, split into panes,
+//! or one file open in the editor.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -10,10 +11,13 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use wercode_core::file_icons;
+
 use super::view::{TerminalView, TerminalViewEvent};
 use super::{
     ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
 };
+use crate::editor::{EditorEvent, EditorView};
 use crate::theme::AppState;
 
 const TAB_BAR_HEIGHT: f32 = 36.0;
@@ -21,13 +25,6 @@ const TAB_BAR_HEIGHT: f32 = 36.0;
 const DIVIDER: f32 = 5.0;
 /// Neither side of a split may shrink below this share.
 const MIN_RATIO: f32 = 0.1;
-
-pub enum AreaEvent {
-    /// The user clicked a file path in terminal output. The position is for
-    /// the built-in editor, which does not exist yet.
-    #[allow(dead_code)]
-    OpenPath { path: PathBuf, line: Option<u32>, col: Option<u32> },
-}
 
 type Pane = Entity<TerminalView>;
 
@@ -114,18 +111,49 @@ impl Node {
     }
 }
 
+enum Body {
+    Terminals {
+        root: Node,
+        /// The pane that has (or last had) the keyboard.
+        active: Pane,
+    },
+    Editor(Entity<EditorView>),
+}
+
 struct Tab {
     id: usize,
-    root: Node,
-    /// The pane that has (or last had) the keyboard.
-    active: Pane,
+    body: Body,
 }
 
 impl Tab {
+    /// The terminals in this tab; none in an editor tab.
     fn panes(&self) -> Vec<Pane> {
         let mut out = Vec::new();
-        self.root.leaves(&mut out);
+        if let Body::Terminals { root, .. } = &self.body {
+            root.leaves(&mut out);
+        }
         out
+    }
+
+    fn active_pane(&self) -> Option<&Pane> {
+        match &self.body {
+            Body::Terminals { active, .. } => Some(active),
+            Body::Editor(_) => None,
+        }
+    }
+
+    fn editor(&self) -> Option<&Entity<EditorView>> {
+        match &self.body {
+            Body::Terminals { .. } => None,
+            Body::Editor(editor) => Some(editor),
+        }
+    }
+
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match &self.body {
+            Body::Terminals { active, .. } => active.focus_handle(cx),
+            Body::Editor(editor) => editor.focus_handle(cx),
+        }
     }
 }
 
@@ -152,11 +180,9 @@ pub struct TerminalArea {
     subscriptions: HashMap<EntityId, Subscription>,
 }
 
-impl EventEmitter<AreaEvent> for TerminalArea {}
-
 impl Focusable for TerminalArea {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.tabs[self.active].active.focus_handle(cx)
+        self.tabs[self.active].focus_handle(cx)
     }
 }
 
@@ -181,6 +207,43 @@ impl TerminalArea {
         self.tabs.iter().flat_map(|t| t.panes()).filter(|p| p.read(cx).is_busy()).count()
     }
 
+    /// How many open files have edits that are not saved.
+    pub fn unsaved_count(&self, cx: &App) -> usize {
+        self.tabs.iter().filter_map(|t| t.editor()).filter(|e| e.read(cx).is_dirty()).count()
+    }
+
+    /// Opens a file in an editor tab, or shows the tab it is already in. The
+    /// line and column are 1-based, as compilers print them.
+    pub fn open_path(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        col: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if path.is_dir() {
+            cx.open_with_system(&path);
+            return;
+        }
+        let open = self.tabs.iter().position(|t| t.editor().is_some_and(|e| e.read(cx).path() == path));
+        let index = match open {
+            Some(index) => index,
+            None => {
+                let editor = cx.new(|cx| EditorView::new(path, window, cx));
+                let subscription = cx.subscribe(&editor, |_, _, _: &EditorEvent, cx| cx.notify());
+                self.subscriptions.insert(editor.entity_id(), subscription);
+                let id = self.id();
+                self.tabs.push(Tab { id, body: Body::Editor(editor) });
+                self.tabs.len() - 1
+            }
+        };
+        if let (Some(line), Some(editor)) = (line, self.tabs[index].editor().cloned()) {
+            editor.update(cx, |editor, cx| editor.go_to(line, col, window, cx));
+        }
+        self.select_tab(index, window, cx);
+    }
+
     /// Terminals in all tabs.
     #[cfg(test)]
     pub fn pane_count(&self) -> usize {
@@ -201,7 +264,7 @@ impl TerminalArea {
             TerminalViewEvent::Exited(Some(0)) => this.remove_pane(pane.entity_id(), window, cx),
             TerminalViewEvent::Exited(_) => cx.notify(),
             TerminalViewEvent::OpenPath { path, line, col } => {
-                cx.emit(AreaEvent::OpenPath { path: path.clone(), line: *line, col: *col })
+                this.open_path(path.clone(), *line, *col, window, cx)
             }
         });
         self.subscriptions.insert(pane.entity_id(), subscription);
@@ -212,7 +275,7 @@ impl TerminalArea {
         // New tabs start in the project folder; splits follow the pane they came from.
         let pane = self.spawn_pane(self.root_dir.clone(), window, cx);
         let id = self.id();
-        self.tabs.push(Tab { id, root: Node::Leaf(pane.clone()), active: pane });
+        self.tabs.push(Tab { id, body: Body::Terminals { root: Node::Leaf(pane.clone()), active: pane } });
         self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
         cx.notify();
@@ -220,7 +283,7 @@ impl TerminalArea {
 
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active) {
-            let handle = tab.active.focus_handle(cx);
+            let handle = tab.focus_handle(cx);
             window.focus(&handle, cx);
         }
     }
@@ -238,13 +301,15 @@ impl TerminalArea {
         if tab.panes().len() >= MAX_PANES {
             return;
         }
-        let source = tab.active.clone();
+        // Only terminals split; a file takes its whole tab.
+        let Some(source) = tab.active_pane().cloned() else { return };
         let cwd = source.read(cx).cwd().unwrap_or_else(|| self.root_dir.clone());
         let pane = self.spawn_pane(cwd, window, cx);
         let id = self.id();
-        let tab = &mut self.tabs[self.active];
-        if tab.root.split(source.entity_id(), axis, &pane, id) {
-            tab.active = pane;
+        if let Body::Terminals { root, active } = &mut self.tabs[self.active].body
+            && root.split(source.entity_id(), axis, &pane, id)
+        {
+            *active = pane;
         }
         self.focus_active(window, cx);
         cx.notify();
@@ -259,15 +324,22 @@ impl TerminalArea {
     fn cycle_pane(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let panes = tab.panes();
-        let current = panes.iter().position(|p| *p == tab.active).unwrap_or(0) as isize;
+        let Body::Terminals { active, .. } = &mut tab.body else { return };
+        let current = panes.iter().position(|p| p == active).unwrap_or(0) as isize;
         let next = (current + step).rem_euclid(panes.len() as isize) as usize;
-        tab.active = panes[next].clone();
+        *active = panes[next].clone();
         self.focus_active(window, cx);
         cx.notify();
     }
 
     /// Closes a pane or a tab, asking first if that would kill a running program.
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if let CloseTarget::Tab(id) = target
+            && let Some(editor) = self.tabs.iter().find(|t| t.id == id).and_then(|t| t.editor().cloned())
+        {
+            self.close_editor(id, editor, window, cx);
+            return;
+        }
         let panes = match target {
             CloseTarget::Pane(id) => self
                 .tabs
@@ -302,6 +374,54 @@ impl TerminalArea {
         }
     }
 
+    /// Closes a file's tab; with unsaved edits it asks what to do with them.
+    fn close_editor(&mut self, id: usize, editor: Entity<EditorView>, window: &mut Window, cx: &mut Context<Self>) {
+        if !editor.read(cx).is_dirty() {
+            self.remove_tab(id, window, cx);
+            return;
+        }
+        let title = format!("Save changes to {}?", editor.read(cx).file_name());
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some("Your changes will be lost if you do not save them."),
+            &["Save", "Don't Save", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| match answer.await {
+            Ok(0) => {
+                let _ = editor.update_in(cx, |editor, window, cx| {
+                    let saved = move |window: &mut Window, cx: &mut App| {
+                        let _ = this.update(cx, |this, cx| this.remove_tab(id, window, cx));
+                    };
+                    editor.save(saved, window, cx);
+                });
+            }
+            Ok(1) => {
+                let _ = this.update_in(cx, |this, window, cx| this.remove_tab(id, window, cx));
+            }
+            _ => {}
+        })
+        .detach();
+    }
+
+    fn remove_tab(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|t| t.id == id) else { return };
+        let tab = self.tabs.remove(index);
+        if let Some(editor) = tab.editor() {
+            self.subscriptions.remove(&editor.entity_id());
+        }
+        if self.active > index || self.active >= self.tabs.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        if self.tabs.is_empty() {
+            self.add_tab(window, cx);
+            return;
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     fn remove_pane(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.tabs.iter().position(|t| t.panes().iter().any(|p| p.entity_id() == id))
         else {
@@ -309,13 +429,14 @@ impl TerminalArea {
         };
         self.subscriptions.remove(&id);
         let tab = self.tabs.remove(index);
-        let was_active = tab.active.entity_id() == id;
-        match tab.root.without(id) {
+        let Body::Terminals { root, active } = tab.body else { return };
+        let was_active = active.entity_id() == id;
+        match root.without(id) {
             Some(root) => {
                 let mut panes = Vec::new();
                 root.leaves(&mut panes);
-                let active = if was_active { panes[0].clone() } else { tab.active };
-                self.tabs.insert(index, Tab { id: tab.id, root, active });
+                let active = if was_active { panes[0].clone() } else { active };
+                self.tabs.insert(index, Tab { id: tab.id, body: Body::Terminals { root, active } });
             }
             None => {
                 if self.active > index || self.active >= self.tabs.len() {
@@ -340,6 +461,16 @@ impl TerminalArea {
         cx.notify();
     }
 
+    /// Closes the terminal that has the keyboard, or the file in an editor tab.
+    fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let target = match tab.active_pane() {
+            Some(pane) => CloseTarget::Pane(pane.entity_id()),
+            None => CloseTarget::Tab(tab.id),
+        };
+        self.request_close(target, window, cx);
+    }
+
     fn answer_confirm(&mut self, close: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some((target, _)) = self.confirm.take() else { return };
         if close {
@@ -355,8 +486,10 @@ impl TerminalArea {
             self.dragging = None;
             return;
         }
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        let Some(split) = tab.root.find_split(id) else { return };
+        let Some(Body::Terminals { root, .. }) = self.tabs.get_mut(self.active).map(|t| &mut t.body) else {
+            return;
+        };
+        let Some(split) = root.find_split(id) else { return };
         let bounds = split.bounds.get();
         let ratio = match split.axis {
             Axis::Horizontal if bounds.size.width > px(0.) => {
@@ -446,7 +579,15 @@ impl TerminalArea {
         let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
             let tab_id = tab.id;
             let selected = index == self.active;
-            let label = tab.active.read(cx).label();
+            let (label, picture, unsaved) = match &tab.body {
+                Body::Terminals { active, .. } => (active.read(cx).label(), None, false),
+                Body::Editor(editor) => {
+                    let editor = editor.read(cx);
+                    let name = editor.file_name();
+                    let picture = file_icons::for_file(&name).and_then(crate::assets::file_icon);
+                    (SharedString::from(name), picture, editor.is_dirty())
+                }
+            };
             let panes = tab.panes().len();
             h_flex()
                 .id(("tab", tab_id))
@@ -472,7 +613,10 @@ impl TerminalArea {
                         this.request_close(CloseTarget::Tab(tab_id), window, cx);
                     }),
                 )
+                .when_some(picture, |d, picture| d.child(img(picture).flex_none().size(px(14.))))
                 .child(div().flex_1().min_w_0().truncate().child(label))
+                // A dot marks edits that are not on disk yet.
+                .when(unsaved, |d| d.child(div().flex_none().size(px(7.)).rounded_full().bg(foreground)))
                 .when(panes > 1, |d| d.child(div().flex_none().text_xs().text_color(muted).child(format!("{panes}"))))
                 .child(
                     div()
@@ -492,6 +636,9 @@ impl TerminalArea {
         let button = |id: &'static str, icon: IconName, tooltip: &'static str| {
             Button::new(id).ghost().xsmall().icon(icon).tooltip(tooltip)
         };
+        let on_file = self.tabs.get(self.active).is_some_and(|t| t.editor().is_some());
+        let close_tip =
+            if on_file { "Close this file (Ctrl+Shift+W)" } else { "Close this terminal (Ctrl+Shift+W)" };
         h_flex()
             .h(px(TAB_BAR_HEIGHT))
             .flex_none()
@@ -510,24 +657,25 @@ impl TerminalArea {
                     .flex_none()
                     .gap_1()
                     .px_2()
-                    .child(button("close-pane", IconName::Close, "Close this terminal (Ctrl+Shift+W)").on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            if let Some(tab) = this.tabs.get(this.active) {
-                                let target = CloseTarget::Pane(tab.active.entity_id());
-                                this.request_close(target, window, cx);
-                            }
-                        }),
-                    ))
-                    .child(button("split-right", IconName::PanelRight, "Split right (Ctrl+Shift+D)").on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.split_active(Axis::Horizontal, window, cx)
-                        }),
-                    ))
-                    .child(button("split-down", IconName::PanelBottom, "Split down (Ctrl+Shift+E)").on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.split_active(Axis::Vertical, window, cx)
-                        }),
-                    )),
+                    .child(button("close-pane", IconName::Close, close_tip).on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| this.close_active(window, cx),
+                    )))
+                    .when(!on_file, |d| {
+                        d.child(
+                            button("split-right", IconName::PanelRight, "Split right (Ctrl+Shift+D)").on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.split_active(Axis::Horizontal, window, cx)
+                                }),
+                            ),
+                        )
+                        .child(
+                            button("split-down", IconName::PanelBottom, "Split down (Ctrl+Shift+E)").on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.split_active(Axis::Vertical, window, cx)
+                                }),
+                            ),
+                        )
+                    }),
             )
     }
 
@@ -593,12 +741,14 @@ impl Render for TerminalArea {
         if let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(focused) =
                 tab.panes().into_iter().find(|p| p.focus_handle(cx).is_focused(window))
+            && let Body::Terminals { active, .. } = &mut tab.body
         {
-            tab.active = focused;
+            *active = focused;
         }
 
-        let body = match self.tabs.get(self.active) {
-            Some(tab) => self.render_node(&tab.root, cx),
+        let body = match self.tabs.get(self.active).map(|t| &t.body) {
+            Some(Body::Terminals { root, .. }) => self.render_node(root, cx),
+            Some(Body::Editor(editor)) => editor.clone().into_any_element(),
             None => div().into_any_element(),
         };
         // While a question is on screen the shortcuts below must not act behind it.
@@ -631,9 +781,8 @@ impl Render for TerminalArea {
                 }
             }))
             .on_action(cx.listener(move |this, _: &ClosePane, window, cx| {
-                if idle && let Some(tab) = this.tabs.get(this.active) {
-                    let target = CloseTarget::Pane(tab.active.entity_id());
-                    this.request_close(target, window, cx);
+                if idle {
+                    this.close_active(window, cx);
                 }
             }))
             .on_action(cx.listener(move |this, _: &CloseTab, window, cx| {
@@ -681,6 +830,7 @@ mod tests {
             gpui_kit::init(cx);
             crate::theme::apply(Settings::default(), cx);
             crate::term::init(cx);
+            crate::editor::init(cx);
             let dir = std::env::temp_dir();
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
                 cx.new(|cx| TerminalArea::new(dir, window, cx))
@@ -723,9 +873,9 @@ mod tests {
         assert_eq!(shape(cx, &area), (1, 0, 3));
 
         // Moving between panes changes which one a close removes.
-        let before = area.read_with(cx, |a, _| a.tabs[0].active.entity_id());
+        let before = area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().entity_id());
         press(cx, window, &["ctrl-alt-left"]);
-        let after = area.read_with(cx, |a, _| a.tabs[0].active.entity_id());
+        let after = area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().entity_id());
         assert_ne!(before, after);
         press(cx, window, &["ctrl-shift-w"]);
         assert_eq!(shape(cx, &area), (1, 0, 2));
@@ -759,9 +909,9 @@ mod tests {
         assert!(side[0].0 + side[1].0 <= whole.0 && side[0].0 + side[1].0 + 6 > whole.0, "{side:?}");
 
         // Drag the divider a quarter of the way to the left.
-        let bounds = area.read_with(cx, |a, _| match &a.tabs[0].root {
-            super::Node::Split(split) => split.bounds.get(),
-            super::Node::Leaf(_) => panic!("expected a split"),
+        let bounds = area.read_with(cx, |a, _| match &a.tabs[0].body {
+            super::Body::Terminals { root: super::Node::Split(split), .. } => split.bounds.get(),
+            _ => panic!("expected a split"),
         });
         let from = gpui_kit::point(bounds.center().x, bounds.center().y);
         let to = gpui_kit::point(bounds.origin.x + bounds.size.width * 0.25, bounds.center().y);
@@ -782,7 +932,7 @@ mod tests {
     async fn closing_a_busy_terminal_asks_first(cx: &mut TestAppContext) {
         let (window, area) = open(cx);
         press(cx, window, &["ctrl-shift-d"]);
-        let pane = area.read_with(cx, |a, _| a.tabs[0].active.clone());
+        let pane = area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().clone());
         // Something that keeps running for a while on any Windows or Unix shell.
         let command = if cfg!(windows) { "ping -n 60 127.0.0.1\r" } else { "sleep 60\r" };
         pane.read_with(cx, |p, _| p.insert_text(command));
@@ -807,9 +957,94 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn a_file_opens_in_a_tab_is_edited_and_saved(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, area) = open(cx);
+        let dir = std::env::temp_dir().join(format!("wercode-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "one
+two
+").unwrap();
+
+        let open_it = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                area.update(cx, |a, cx| a.open_path(path.clone(), None, None, window, cx));
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        open_it(cx);
+        assert_eq!(shape(cx, &area), (2, 1, 0));
+        // Asking for the same file again shows the tab it is in.
+        press(cx, window, &["ctrl-tab"]);
+        open_it(cx);
+        assert_eq!(shape(cx, &area), (2, 1, 0));
+        let editor = area.read_with(cx, |a, _| a.tabs[1].editor().unwrap().clone());
+        assert_eq!(editor.read_with(cx, |e, cx| (e.text(cx), e.is_dirty())), ("one
+two
+".to_string(), false));
+
+        // Typing marks the file unsaved; Ctrl+S writes it with its own line endings.
+        cx.update_window(window, |_, window, cx| window.input("zero ", cx)).unwrap();
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |e, _| e.is_dirty()));
+        assert_eq!(area.read_with(cx, |a, cx| a.unsaved_count(cx)), 1);
+        press(cx, window, &["ctrl-s"]);
+        cx.run_until_parked();
+        assert!(!editor.read_with(cx, |e, _| e.is_dirty()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "zero one
+two
+");
+
+        // Another program rewrites the file: without edits here it is simply read again.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&path, "from outside
+").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, cx| (e.text(cx), e.is_dirty())), ("from outside
+".to_string(), false));
+
+        // With edits here the text is kept and the change is only announced.
+        cx.update_window(window, |_, window, cx| window.input("mine ", cx)).unwrap();
+        cx.run_until_parked();
+        std::fs::write(&path, "theirs
+").unwrap();
+        let later = later + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |e, cx| e.changed_on_disk() && e.text(cx).contains("mine")));
+
+        // Closing asks about the edits; "Don't Save" closes and leaves the disk alone.
+        press(cx, window, &["ctrl-shift-w"]);
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Don't Save");
+        cx.run_until_parked();
+        assert_eq!(shape(cx, &area), (1, 0, 1));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs
+");
+
+        // Something that is not text gets an explanation instead of an editor.
+        let image = dir.join("picture.bin");
+        std::fs::write(&image, [0u8, 159, 146, 150]).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            area.update(cx, |a, cx| a.open_path(image.clone(), None, None, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let editor = area.read_with(cx, |a, _| a.tabs[1].editor().unwrap().clone());
+        assert!(editor.read_with(cx, |e, _| e.problem().is_some()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
     async fn tab_key_goes_to_the_shell_not_to_focus_navigation(cx: &mut TestAppContext) {
         let (window, area) = open(cx);
-        let pane = area.read_with(cx, |a, _| a.tabs[0].active.clone());
+        let pane = area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().clone());
         press(cx, window, &["tab", "shift-tab"]);
         cx.update_window(window, |_, window, cx| {
             use gpui_kit::Focusable as _;

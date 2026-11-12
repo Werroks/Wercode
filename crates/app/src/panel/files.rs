@@ -24,6 +24,11 @@ enum Creating {
     Folder,
 }
 
+pub enum FilesEvent {
+    /// A file was clicked.
+    Open(PathBuf),
+}
+
 pub struct FilesPanel {
     root: PathBuf,
     tree: Entity<TreeState>,
@@ -72,6 +77,8 @@ pub(crate) fn status_color(status: FileStatus, cx: &App) -> Hsla {
         FileStatus::Deleted | FileStatus::Conflict => theme.danger,
     }
 }
+
+impl EventEmitter<FilesEvent> for FilesPanel {}
 
 impl FilesPanel {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -282,6 +289,7 @@ impl Render for FilesPanel {
         let muted = cx.theme().muted_foreground;
         let git = self.git.clone();
         let folders = self.folders.clone();
+        let this = cx.entity().downgrade();
 
         v_flex()
             .size_full()
@@ -320,10 +328,18 @@ impl Render for FilesPanel {
                         };
                         ListItem::new(ix).py_0p5().pl(px(4.) + px(12.) * entry.depth() as f32).pr_3().child(
                             h_flex()
+                                .id(("file-row", ix))
                                 .w_full()
                                 .gap_1p5()
                                 .text_sm()
                                 .when_some(color, |d, c| d.text_color(c))
+                                // The tree itself selects the row and opens folders.
+                                .when(!folder, |d| {
+                                    let (this, path) = (this.clone(), path.to_path_buf());
+                                    d.on_click(move |_, _, cx| {
+                                        let _ = this.update(cx, |_, cx| cx.emit(FilesEvent::Open(path.clone())));
+                                    })
+                                })
                                 // A file keeps the width of the chevron, so names line up.
                                 .child(div().flex_none().w(px(14.)).when(folder, |d| {
                                     d.child(Icon::new(chevron).xsmall().text_color(muted))

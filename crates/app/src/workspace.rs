@@ -15,16 +15,17 @@ use gpui_kit::*;
 use wercode_core::git::{self, RepoStatus};
 use wercode_core::state::{self, State};
 
-use crate::panel::{FilesPanel, GitPanel, GitPanelEvent};
+use crate::editor::Save;
+use crate::panel::{FilesEvent, FilesPanel, GitPanel, GitPanelEvent};
 use crate::term::{
-    AreaEvent, ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
+    ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
     TerminalArea,
 };
 use crate::theme::AppState;
 
 actions!(
     workspace,
-    [TogglePanel, OpenFolder, ShowFiles, ShowSearch, ShowGit, SwitchProject, CommandPalette]
+    [TogglePanel, OpenFolder, ShowFiles, ShowSearch, ShowGit, SwitchProject, CommandPalette, NewWindow]
 );
 
 /// How often the repository status is read again while the window is active.
@@ -42,7 +43,28 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-f", ShowSearch, context),
         KeyBinding::new("ctrl-shift-g", ShowGit, context),
         KeyBinding::new("ctrl-shift-p", CommandPalette, context),
+        KeyBinding::new("ctrl-shift-n", NewWindow, context),
     ]);
+}
+
+/// Opens a window on `root`, or on the welcome screen without one. Every
+/// window keeps its own project, terminals and files.
+pub fn open_window(
+    root: Option<PathBuf>,
+    state: State,
+    state_path: Option<PathBuf>,
+    bounds: Option<WindowBounds>,
+    cx: &mut App,
+) {
+    let options = WindowOptions {
+        window_min_size: Some(size(px(640.), px(400.))),
+        window_bounds: bounds,
+        ..TitleBar::window_options()
+    };
+    gpui_kit::open_window(options, cx, |window, cx| {
+        cx.new(|cx| Workspace::new(root, state, state_path, window, cx))
+    })
+    .expect("failed to open window");
 }
 
 /// Makes a path absolute and drops the Windows `\\?\` prefix, which shells
@@ -104,10 +126,12 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Terminal: Previous Tab", Box::new(PrevTab)),
         ("Terminal: Next Pane", Box::new(NextPane)),
         ("Terminal: Previous Pane", Box::new(PrevPane)),
+        ("File: Save", Box::new(Save)),
         ("View: Toggle Side Panel", Box::new(TogglePanel)),
         ("View: Show Files", Box::new(ShowFiles)),
         ("View: Show Search", Box::new(ShowSearch)),
         ("View: Show Git", Box::new(ShowGit)),
+        ("Window: New Window", Box::new(NewWindow)),
         ("Project: Open Folder\u{2026}", Box::new(OpenFolder)),
         ("Project: Switch to Recent\u{2026}", Box::new(SwitchProject)),
     ]
@@ -155,7 +179,8 @@ impl Workspace {
             Self::open(root, window, cx)
         });
         if project.is_none() {
-            window.set_window_title("Wercode");
+            // Deferred: a title set while the window is being created is lost.
+            window.defer(cx, |window, _| window.set_window_title("Wercode"));
         }
         let bounds = cx.observe_window_bounds(window, |this, window, cx| this.remember_window(window, cx));
         let this = Self {
@@ -170,7 +195,7 @@ impl Workspace {
             save_task: None,
             _bounds: bounds,
         };
-        this.save();
+        this.save_recent();
         this
     }
 
@@ -179,14 +204,13 @@ impl Workspace {
         let files = cx.new(|cx| FilesPanel::new(root.clone(), window, cx));
         let changes = cx.new(|cx| GitPanel::new(root.clone(), window, cx));
         let subscriptions = [
-            cx.subscribe(&terminals, |_, _, event, cx| match event {
-                // Until the built-in editor exists, a clicked path opens in
-                // whatever the system uses for that file type.
-                AreaEvent::OpenPath { path, .. } => cx.open_with_system(path),
+            cx.subscribe_in(&files, window, |this, _, event, window, cx| match event {
+                FilesEvent::Open(path) => this.open_file(path.clone(), window, cx),
             }),
-            // Staging or committing shows at once, without waiting for the next poll.
-            cx.subscribe(&changes, |this, _, event, cx| match event {
+            cx.subscribe_in(&changes, window, |this, _, event, window, cx| match event {
+                // Staging or committing shows at once, without waiting for the next poll.
                 GitPanelEvent::Changed => this.refresh_git(cx),
+                GitPanelEvent::Open(path) => this.open_file(path.clone(), window, cx),
             }),
         ];
         window.set_window_title(&format!("{} - Wercode", folder_name(&root)));
@@ -220,6 +244,13 @@ impl Workspace {
     #[cfg(test)]
     fn root(&self) -> Option<PathBuf> {
         self.project.as_ref().map(|p| p.root.clone())
+    }
+
+    /// Shows a file in an editor tab.
+    fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(project) = &self.project {
+            project.terminals.update(cx, |area, cx| area.open_path(path, None, None, window, cx));
+        }
     }
 
     /// Reads the repository status now instead of at the next poll.
@@ -266,9 +297,20 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Saves this window's layout. The list of recent projects is taken from
+    /// disk, so a window never drops a project another window has opened.
     fn save(&self) {
+        self.write(&self.fresh_state());
+    }
+
+    /// Saves everything, the list of recent projects included.
+    fn save_recent(&self) {
+        self.write(&self.state);
+    }
+
+    fn write(&self, state: &State) {
         if let Some(path) = &self.state_path
-            && let Err(e) = state::save_to(path, &self.state)
+            && let Err(e) = state::save_to(path, state)
         {
             eprintln!("could not save {}: {e}", path.display());
         }
@@ -378,15 +420,22 @@ impl Workspace {
         if current == Some(path.as_path()) || !path.is_dir() {
             return;
         }
-        let busy = self.project.as_ref().map_or(0, |p| p.terminals.read(cx).busy_count(cx));
-        if busy == 0 || !cx.global::<AppState>().settings.confirm_close {
+        let (busy, unsaved) = self.project.as_ref().map_or((0, 0), |p| {
+            let area = p.terminals.read(cx);
+            (area.busy_count(cx), area.unsaved_count(cx))
+        });
+        let ask_busy = busy > 0 && cx.global::<AppState>().settings.confirm_close;
+        if !ask_busy && unsaved == 0 {
             self.open_folder(path, window, cx);
             return;
         }
-        let detail = format!(
-            "{busy} terminal(s) in {} are still running a program. Switching closes them.",
-            current.map(folder_name).unwrap_or_default()
-        );
+        let name = current.map(folder_name).unwrap_or_default();
+        // Losing edits is the worse of the two, so it is the one that gets said.
+        let detail = if unsaved > 0 {
+            format!("{unsaved} file(s) in {name} have unsaved changes. Switching discards them.")
+        } else {
+            format!("{busy} terminal(s) in {name} are still running a program. Switching closes them.")
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
             "Switch project?",
@@ -402,12 +451,35 @@ impl Workspace {
         .detach();
     }
 
+    /// A second window for another project. It starts on the welcome screen,
+    /// a little smaller than the screen so it does not hide this one.
+    fn new_window(&mut self, cx: &mut Context<Self>) {
+        self.switcher_open = false;
+        self.palette = None;
+        cx.notify();
+        let state = self.fresh_state();
+        // The new window saves where this one does (tests keep that off the real file).
+        let state_path = self.state_path.clone();
+        cx.defer(move |cx| open_window(None, state, state_path, None, cx));
+    }
+
+    /// The saved state with the list of recent projects as it is on disk now:
+    /// another window may have added to it since this one started.
+    fn fresh_state(&self) -> State {
+        let mut state = self.state.clone();
+        if let Some(path) = &self.state_path {
+            state.recent = state::load_from(path).recent;
+        }
+        state
+    }
+
     fn open_folder(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.state = self.fresh_state();
         self.state.touch_recent(&path);
         let project = Self::open(path, window, cx);
         project.terminals.focus_handle(cx).focus(window, cx);
         self.project = Some(project);
-        self.save();
+        self.save_recent();
         cx.notify();
     }
 
@@ -536,6 +608,26 @@ impl Workspace {
             .child(div().text_xs().text_color(muted).child("Ctrl+Shift+O"))
     }
 
+    fn new_window_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, hover) = (theme.muted_foreground, theme.list_hover);
+        h_flex()
+            .id("new-window")
+            .test_support()
+            .w_full()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .rounded_md()
+            .text_sm()
+            .hover(|s| s.bg(hover))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_window(cx)))
+            .child(Icon::new(IconName::Plus).small().text_color(muted))
+            .child("New window")
+            .child(div().flex_1())
+            .child(div().text_xs().text_color(muted).child("Ctrl+Shift+N"))
+    }
+
     /// A dimmed layer over the window that closes whatever floats on it.
     fn backdrop(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
         div().id(id).absolute().inset_0().occlude().on_mouse_down(
@@ -574,7 +666,8 @@ impl Workspace {
                 .child(div().px_3().py_1().text_xs().text_color(muted).child("RECENT PROJECTS"))
                 .children(rows)
                 .child(div().my_1().h(px(1.)).bg(border))
-                .child(self.open_folder_row(cx)),
+                .child(self.open_folder_row(cx))
+                .child(self.new_window_row(cx)),
         )
     }
 
@@ -838,6 +931,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ShowSearch, _, cx| this.show_panel(PanelKind::Search, cx)))
             .on_action(cx.listener(|this, _: &ShowGit, _, cx| this.show_panel(PanelKind::Git, cx)))
+            .on_action(cx.listener(|this, _: &NewWindow, _, cx| this.new_window(cx)))
             .on_action(cx.listener(|this, _: &SwitchProject, _, cx| {
                 this.palette = None;
                 this.switcher_open = true;
@@ -846,6 +940,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| {
                 if this.palette.is_some() { this.close_palette(window, cx) } else { this.open_palette(window, cx) }
             }))
+            .on_action(cx.listener(|this, a: &Save, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &NewTab, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &SplitRight, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &SplitDown, window, cx| this.forward(a, window, cx)))
@@ -893,6 +988,7 @@ mod tests {
             gpui_kit::init(cx);
             crate::theme::apply(Settings::default(), cx);
             crate::term::init(cx);
+            crate::editor::init(cx);
             super::init(cx);
             let path = state_path.clone();
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
@@ -1074,6 +1170,19 @@ mod tests {
         assert_eq!(counts(cx), (0, 0));
         let log = Command::new("git").arg("-C").arg(&repo).args(["log", "--format=%s"]).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).lines().collect::<Vec<_>>(), ["Second", "First"]);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn a_second_window_opens_on_the_welcome_screen(cx: &mut TestAppContext) {
+        let f = open(cx, "windows");
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        press(cx, f.window, &["ctrl-shift-n"]);
+        cx.run_until_parked();
+        let windows = cx.update(|cx| cx.windows());
+        assert_eq!(windows.len(), 2);
+        // The first window keeps its project.
+        assert!(f.workspace.read_with(cx, |w, _| w.root()).is_some());
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

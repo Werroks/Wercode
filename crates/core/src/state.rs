@@ -17,6 +17,11 @@ pub struct Layout {
     pub tabs: Vec<TabLayout>,
     /// Index of the tab that was showing.
     pub active: usize,
+    /// With the terminal below the files: the share of the height the files
+    /// take, once the line between them has been dragged.
+    pub dock_ratio: Option<f32>,
+    /// With the terminal below the files: the terminal is put away.
+    pub terminal_hidden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,7 +184,7 @@ mod tests {
         };
         assert_eq!(split.terminals(), 2);
         let tabs = vec![TabLayout::Terminals { panes: split }, TabLayout::File { path: dir.join("a.rs") }];
-        s.layouts.insert(dir.clone(), Layout { tabs, active: 1 });
+        s.layouts.insert(dir.clone(), Layout { tabs, active: 1, ..Layout::default() });
         save_to(&path, &s).unwrap();
         assert_eq!(load_from(&path), s);
         assert_eq!(s.last_project(), Some(dir.clone()));

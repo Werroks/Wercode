@@ -32,7 +32,7 @@ Diff view for a changed file,git,should,yes,yes,a click on a file in the git pan
 Push pull fetch buttons,git,should,yes,yes,above the commit field; the first push publishes the branch to origin; git's own error is shown; no password prompt (credentials must already work in the terminal)
 Switch and create branch,git,should,yes,yes,click the branch in the status bar or Git: Switch or Create Branch in the palette; local branches only
 Discard changes,git,should,yes,yes,button on each row of Changes; asks first; a new file goes to the trash instead
-Command palette,shell,should,yes,yes,Ctrl+Shift+P; 20 commands; covered by a UI test
+Command palette,shell,should,yes,yes,Ctrl+Shift+P; 21 commands; covered by a UI test
 Quick open file by fuzzy name,shell,should,yes,yes,Ctrl+Shift+K (plain Ctrl+P belongs to the shell) or File: Go to File in the palette; letters in order; the file name counts for more than the folders; ignored files are left out; at most 100000 files are listed
 Configurable keybindings,settings,should,yes,partial,the [keys] table of settings.toml: command name = shortcut or a list of them; an empty value removes the shortcut; the settings screen lists the names with their current shortcuts and says what could not be read; no editing on the screen itself; a hand-edited file is read when the settings screen opens
 Recent workspaces list,workspace,should,yes,yes,in the title switcher and on the welcome screen
@@ -51,6 +51,7 @@ Unsaved changes marker and prompt on close,editor,must,yes,yes,dot on the tab; S
 Reload file changed on disk (agent edits it),editor,must,partial,yes,checked once a second; silent reload without edits; a bar with Reload from Disk / Keep My Changes with edits
 Search button: project-wide text search panel,search,must,yes,yes,Ctrl+Shift+F; match case / whole word / regex; results by file as they are found; a click opens the file at the line; skips ignored and binary files and files over 4 MB; stops at 5000 lines; no replace across files
 Recent projects switcher at the top of the window,workspace,must,yes,yes,covered by a UI test
+Terminal as a panel below the files (as in the reference),shell,should,yes,yes,user request 2026-11-13; Layout on the settings screen: one row of tabs (default) or terminal below files; files above with their own tabs and terminals below with theirs; the line between them drags; Ctrl+Shift+J shows or hides the terminal; with no file open the terminals take the whole space; applied at once; height and hidden state kept per project
 Editor splits,editor,could,yes,no,
 LSP (go to definition hover diagnostics),editor,could,yes,no,after MVP and opt-in; language servers use a lot of RAM
 AI chat and agent panel,ai,skip,yes,skip,user runs a CLI agent in the terminal

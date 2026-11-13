@@ -6,7 +6,9 @@ use std::rc::Rc;
 use gpui_kit::*;
 
 use crate::editor::Save;
-use crate::term::{ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight};
+use crate::term::{
+    ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
+};
 use crate::theme::AppState;
 use crate::workspace::{
     CommandPalette, NewWindow, OpenFolder, OpenSettings, QuickOpen, ShowFiles, ShowGit, ShowSearch, SwitchBranch,
@@ -44,6 +46,7 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("workspace.switch_branch", "Workspace", SwitchBranch, []),
         shortcut!("workspace.new_window", "Workspace", NewWindow, ["ctrl-shift-n"]),
         shortcut!("workspace.settings", "Workspace", OpenSettings, []),
+        shortcut!("terminal.toggle", "TerminalArea", ToggleTerminal, ["ctrl-shift-j"]),
         shortcut!("terminal.new_tab", "TerminalArea", NewTab, ["ctrl-shift-t"]),
         shortcut!("terminal.close_tab", "TerminalArea", CloseTab, ["ctrl-shift-q"]),
         shortcut!("terminal.close_pane", "TerminalArea", ClosePane, ["ctrl-shift-w"]),

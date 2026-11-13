@@ -27,7 +27,7 @@ use crate::panel::{FilesEvent, FilesPanel, GitPanel, GitPanelEvent, SearchEvent,
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::term::{
     ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
-    TerminalArea,
+    TerminalArea, ToggleTerminal,
 };
 use crate::theme::AppState;
 
@@ -129,6 +129,7 @@ impl PanelKind {
 /// next to each one comes from the key bindings.
 fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
     vec![
+        ("Terminal: Show or Hide", Box::new(ToggleTerminal)),
         ("Terminal: New Tab", Box::new(NewTab)),
         ("Terminal: Split Right", Box::new(SplitRight)),
         ("Terminal: Split Down", Box::new(SplitDown)),
@@ -1527,6 +1528,7 @@ impl Render for Workspace {
                 if this.palette.is_some() { this.close_palette(window, cx) } else { this.open_palette(window, cx) }
             }))
             .on_action(cx.listener(|this, a: &Save, window, cx| this.forward(a, window, cx)))
+            .on_action(cx.listener(|this, a: &ToggleTerminal, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &NewTab, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &SplitRight, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &SplitDown, window, cx| this.forward(a, window, cx)))

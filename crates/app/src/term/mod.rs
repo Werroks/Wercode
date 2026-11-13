@@ -22,6 +22,8 @@ actions!(
         PrevTab,
         NextPane,
         PrevPane,
+        /// Shows the terminal and puts the keyboard in it, or puts it away.
+        ToggleTerminal,
     ]
 );
 

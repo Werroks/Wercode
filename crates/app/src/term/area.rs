@@ -1,5 +1,6 @@
 //! The centre of the window: tabs. A tab holds terminals, split into panes,
-//! or one file open in the editor.
+//! or one file open in the editor. The tabs sit in one row, or, when the
+//! settings ask for it, files sit above and the terminals in a panel below.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -17,6 +18,7 @@ use wercode_core::state::{Layout, PaneLayout, TabLayout};
 use super::view::{TerminalView, TerminalViewEvent};
 use super::{
     ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
+    ToggleTerminal,
 };
 use crate::diff::DiffView;
 use crate::editor::{EditorEvent, EditorView};
@@ -28,6 +30,19 @@ const TAB_BAR_HEIGHT: f32 = 36.0;
 const DIVIDER: f32 = 5.0;
 /// Neither side of a split may shrink below this share.
 const MIN_RATIO: f32 = 0.1;
+/// Share of the height the files take over a terminal panel, to begin with.
+const DOCK_RATIO: f32 = 0.62;
+/// Neither the files nor the terminal panel may shrink below this share.
+const MIN_DOCK: f32 = 0.15;
+
+/// Which tabs a tab bar shows.
+#[derive(Clone, Copy, PartialEq)]
+enum Group {
+    /// One row for everything.
+    All,
+    Files,
+    Terminals,
+}
 
 type Pane = Entity<TerminalView>;
 
@@ -153,6 +168,19 @@ impl Tab {
         out
     }
 
+    /// A tab of terminals, as opposed to a file or the changes to one.
+    fn is_terminal(&self) -> bool {
+        matches!(self.body, Body::Terminals { .. })
+    }
+
+    /// The keyboard is somewhere in this tab.
+    fn has_focus(&self, window: &Window, cx: &App) -> bool {
+        match &self.body {
+            Body::Terminals { .. } => self.panes().iter().any(|p| p.focus_handle(cx).is_focused(window)),
+            _ => self.focus_handle(cx).contains_focused(window, cx),
+        }
+    }
+
     fn active_pane(&self) -> Option<&Pane> {
         match &self.body {
             Body::Terminals { active, .. } => Some(active),
@@ -197,6 +225,18 @@ pub struct TerminalArea {
     confirm: Option<(CloseTarget, usize)>,
     confirm_focus: FocusHandle,
     subscriptions: HashMap<EntityId, Subscription>,
+    /// The file tab and the terminal tab that were showing last, by tab id.
+    /// With the terminal below the files, one of each is on screen.
+    last_file: Option<usize>,
+    last_terminal: Option<usize>,
+    /// Share of the height the files take when the terminal sits below them.
+    dock_ratio: f32,
+    /// The terminal below the files is put away.
+    terminal_hidden: bool,
+    /// The line between the files and the terminal is being dragged.
+    dock_dragging: bool,
+    /// Where the files and the terminal were last laid out together.
+    dock_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl Focusable for TerminalArea {
@@ -218,6 +258,15 @@ impl TerminalArea {
             confirm: None,
             confirm_focus: cx.focus_handle(),
             subscriptions: HashMap::new(),
+            last_file: None,
+            last_terminal: None,
+            dock_ratio: layout
+                .and_then(|l| l.dock_ratio)
+                .filter(|ratio| ratio.is_finite())
+                .map_or(DOCK_RATIO, |ratio| ratio.clamp(MIN_DOCK, 1.0 - MIN_DOCK)),
+            terminal_hidden: layout.is_some_and(|l| l.terminal_hidden),
+            dock_dragging: false,
+            dock_bounds: Rc::default(),
         };
         if let Some(layout) = layout {
             this.restore(layout, window, cx);
@@ -226,9 +275,96 @@ impl TerminalArea {
             this.add_tab(window, cx);
         } else {
             this.active = layout.map_or(0, |l| l.active).min(this.tabs.len() - 1);
+            this.note_active();
             this.focus_active(window, cx);
         }
         this
+    }
+
+    /// Files above, terminals in a panel below; otherwise one row of tabs.
+    fn docked(cx: &App) -> bool {
+        cx.global::<AppState>().settings.terminal_below()
+    }
+
+    /// Index of the file tab (or the terminal tab) to show: the one with the
+    /// keyboard if it is of that kind, else the one of that kind shown last.
+    fn shown(&self, terminals: bool) -> Option<usize> {
+        let of_kind = |tab: &Tab| tab.is_terminal() == terminals;
+        if self.tabs.get(self.active).is_some_and(of_kind) {
+            return Some(self.active);
+        }
+        let last = if terminals { self.last_terminal } else { self.last_file };
+        self.tabs
+            .iter()
+            .position(|tab| Some(tab.id) == last && of_kind(tab))
+            .or_else(|| self.tabs.iter().rposition(of_kind))
+    }
+
+    /// Remembers the tab that is showing as the last one of its kind.
+    fn note_active(&mut self) {
+        if let Some(tab) = self.tabs.get(self.active) {
+            if tab.is_terminal() {
+                self.last_terminal = Some(tab.id);
+                self.terminal_hidden = false;
+            } else {
+                self.last_file = Some(tab.id);
+            }
+        }
+    }
+
+    /// With the terminal below the files, a command for terminals given while
+    /// the keyboard is in a file goes to the terminal that is showing.
+    fn turn_to_terminal(&mut self, cx: &App) {
+        if Self::docked(cx)
+            && !self.tabs.get(self.active).is_some_and(Tab::is_terminal)
+            && let Some(index) = self.shown(true)
+        {
+            self.active = index;
+            self.note_active();
+        }
+    }
+
+    /// Picks the tab to show after the tab at `index` was taken out.
+    fn settle(&mut self, index: usize, terminal: bool, cx: &App) {
+        let was_active = self.active == index;
+        if self.active > index || self.active >= self.tabs.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        // Below the files a closed terminal gives way to another terminal,
+        // and a closed file to another file, while there is one.
+        if was_active && Self::docked(cx) {
+            let same = |tab: &Tab| tab.is_terminal() == terminal;
+            let before = self.tabs.iter().take(index).rposition(same);
+            if let Some(found) = before.or_else(|| self.tabs.iter().position(same)) {
+                self.active = found;
+            }
+        }
+        self.note_active();
+    }
+
+    /// Shows the terminal panel and puts the keyboard in it; from inside it,
+    /// puts it away and goes back to the file.
+    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let on_terminal = self.tabs.get(self.active).is_some_and(Tab::is_terminal);
+        match (self.shown(true), self.shown(false)) {
+            (None, _) => self.add_tab(window, cx),
+            (Some(_), Some(file)) if on_terminal && Self::docked(cx) => {
+                self.select_tab(file, window, cx);
+                self.terminal_hidden = true;
+            }
+            (Some(terminal), _) => self.select_tab(terminal, window, cx),
+        }
+    }
+
+    /// Puts the terminal panel away, wherever the keyboard is.
+    fn hide_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(file) = self.shown(false) {
+            if self.tabs.get(self.active).is_some_and(Tab::is_terminal) {
+                self.select_tab(file, window, cx);
+            }
+            self.terminal_hidden = true;
+            cx.notify();
+        }
     }
 
     /// The open tabs, written down for the next launch.
@@ -245,7 +381,12 @@ impl TerminalArea {
             })
             .collect();
         let before = self.tabs.iter().take(self.active).filter(|tab| kept(tab)).count();
-        Layout { active: before.min(tabs.len().saturating_sub(1)), tabs }
+        Layout {
+            active: before.min(tabs.len().saturating_sub(1)),
+            tabs,
+            dock_ratio: (self.dock_ratio != DOCK_RATIO).then_some(self.dock_ratio),
+            terminal_hidden: self.terminal_hidden,
+        }
     }
 
     /// Shows the changes to a file in a tab, or the tab that already shows them.
@@ -424,9 +565,7 @@ impl TerminalArea {
     /// Types a path into a terminal: the one showing, or else the terminal
     /// tab nearest the end, which is then shown.
     pub fn insert_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let showing = self.tabs.get(self.active).is_some_and(|t| t.active_pane().is_some());
-        let found = if showing { Some(self.active) } else { self.tabs.iter().rposition(|t| t.active_pane().is_some()) };
-        let index = match found {
+        let index = match self.shown(true) {
             Some(index) => index,
             None => {
                 self.add_tab(window, cx);
@@ -508,6 +647,7 @@ impl TerminalArea {
         let id = self.id();
         self.tabs.push(Tab { id, body: Body::Terminals { root: Node::Leaf(pane.clone()), active: pane } });
         self.active = self.tabs.len() - 1;
+        self.note_active();
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -522,12 +662,14 @@ impl TerminalArea {
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.active = index;
+            self.note_active();
             self.focus_active(window, cx);
             cx.notify();
         }
     }
 
     fn split_active(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        self.turn_to_terminal(cx);
         let Some(tab) = self.tabs.get(self.active) else { return };
         if tab.panes().len() >= MAX_PANES {
             return;
@@ -547,12 +689,18 @@ impl TerminalArea {
     }
 
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let count = self.tabs.len() as isize;
-        let next = (self.active as isize + step).rem_euclid(count) as usize;
+        // Below the files each kind has its own row, and the keys stay in it.
+        let terminal = self.tabs.get(self.active).is_some_and(Tab::is_terminal);
+        let docked = Self::docked(cx);
+        let row: Vec<usize> =
+            (0..self.tabs.len()).filter(|&i| !docked || self.tabs[i].is_terminal() == terminal).collect();
+        let Some(current) = row.iter().position(|&i| i == self.active) else { return };
+        let next = row[(current as isize + step).rem_euclid(row.len() as isize) as usize];
         self.select_tab(next, window, cx);
     }
 
     fn cycle_pane(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        self.turn_to_terminal(cx);
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let panes = tab.panes();
         let Body::Terminals { active, .. } = &mut tab.body else { return };
@@ -649,9 +797,7 @@ impl TerminalArea {
         if let Some(editor) = tab.editor() {
             self.subscriptions.remove(&editor.entity_id());
         }
-        if self.active > index || self.active >= self.tabs.len() {
-            self.active = self.active.saturating_sub(1);
-        }
+        self.settle(index, tab.is_terminal(), cx);
         if self.tabs.is_empty() {
             self.add_tab(window, cx);
             return;
@@ -676,11 +822,7 @@ impl TerminalArea {
                 let active = if was_active { panes[0].clone() } else { active };
                 self.tabs.insert(index, Tab { id: tab.id, body: Body::Terminals { root, active } });
             }
-            None => {
-                if self.active > index || self.active >= self.tabs.len() {
-                    self.active = self.active.saturating_sub(1);
-                }
-            }
+            None => self.settle(index, true, cx),
         }
         if self.tabs.is_empty() {
             // The centre is never empty: closing the last terminal starts a new one.
@@ -719,6 +861,17 @@ impl TerminalArea {
     }
 
     fn on_drag(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.dock_dragging {
+            let bounds = self.dock_bounds.get();
+            if event.pressed_button != Some(MouseButton::Left) {
+                self.dock_dragging = false;
+            } else if bounds.size.height > px(0.) {
+                let ratio = (event.position.y - bounds.origin.y) / bounds.size.height;
+                self.dock_ratio = ratio.clamp(MIN_DOCK, 1.0 - MIN_DOCK);
+                cx.notify();
+            }
+            return;
+        }
         let Some(id) = self.dragging else { return };
         if event.pressed_button != Some(MouseButton::Left) {
             self.dragging = None;
@@ -804,7 +957,14 @@ impl TerminalArea {
             .into_any_element()
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tab_bar(&self, group: Group, cx: &mut Context<Self>) -> impl IntoElement {
+        let shown = match group {
+            Group::All => Some(self.active),
+            Group::Files => self.shown(false),
+            Group::Terminals => self.shown(true),
+        };
+        let shown_id = shown.and_then(|index| self.tabs.get(index)).map(|tab| tab.id);
+        let has_files = self.shown(false).is_some();
         let theme = cx.theme();
         let (border, muted, foreground, active_bg, hover_bg) = (
             theme.border,
@@ -814,9 +974,14 @@ impl TerminalArea {
             theme.secondary_hover,
         );
 
-        let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
+        let in_group = |tab: &Tab| match group {
+            Group::All => true,
+            Group::Files => !tab.is_terminal(),
+            Group::Terminals => tab.is_terminal(),
+        };
+        let tabs = self.tabs.iter().enumerate().filter(|(_, tab)| in_group(tab)).map(|(index, tab)| {
             let tab_id = tab.id;
-            let selected = index == self.active;
+            let selected = Some(index) == shown;
             let (label, picture, unsaved) = match &tab.body {
                 Body::Terminals { active, .. } => (active.read(cx).label(), None, false),
                 Body::Editor(editor) => {
@@ -879,30 +1044,54 @@ impl TerminalArea {
         let button = |id: &'static str, icon: IconName, tooltip: &'static str| {
             Button::new(id).ghost().xsmall().icon(icon).tooltip(tooltip)
         };
-        let on_file = self.tabs.get(self.active).is_some_and(|t| t.active_pane().is_none());
-        let close_tip =
-            if on_file { "Close this file (Ctrl+Shift+W)" } else { "Close this terminal (Ctrl+Shift+W)" };
+        let on_file = match group {
+            Group::All => self.tabs.get(self.active).is_some_and(|t| t.active_pane().is_none()),
+            Group::Files => true,
+            Group::Terminals => false,
+        };
+        let close = if on_file {
+            button("close-file", IconName::Close, "Close this file (Ctrl+Shift+W)")
+        } else {
+            button("close-pane", IconName::Close, "Close this terminal (Ctrl+Shift+W)")
+        };
+        let close = close.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| match group {
+            Group::All => this.close_active(window, cx),
+            // The row's own tab, wherever the keyboard is.
+            Group::Files => {
+                if let Some(id) = shown_id {
+                    this.request_close(CloseTarget::Tab(id), window, cx);
+                }
+            }
+            Group::Terminals => {
+                this.turn_to_terminal(cx);
+                this.close_active(window, cx);
+            }
+        }));
+        let new_tab = div().px_2().flex_none().child(
+            button("new-tab", IconName::Plus, "New terminal (Ctrl+Shift+T)")
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_tab(window, cx))),
+        );
         h_flex()
             .h(px(TAB_BAR_HEIGHT))
             .flex_none()
             .w_full()
             .border_b_1()
             .border_color(border)
-            .child(h_flex().h_full().flex_1().min_w_0().overflow_hidden().children(tabs).child(
-                div().px_2().flex_none().child(
-                    button("new-tab", IconName::Plus, "New terminal (Ctrl+Shift+T)").on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.add_tab(window, cx)),
-                    ),
-                ),
-            ))
+            .child(
+                h_flex()
+                    .h_full()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .children(tabs)
+                    .when(group != Group::Files, |d| d.child(new_tab)),
+            )
             .child(
                 h_flex()
                     .flex_none()
                     .gap_1()
                     .px_2()
-                    .child(button("close-pane", IconName::Close, close_tip).on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| this.close_active(window, cx),
-                    )))
+                    .child(close)
                     .when(!on_file, |d| {
                         d.child(
                             button("split-right", IconName::PanelRight, "Split right (Ctrl+Shift+D)").on_click(
@@ -918,8 +1107,99 @@ impl TerminalArea {
                                 }),
                             ),
                         )
+                    })
+                    .when(group == Group::Files, |d| {
+                        d.child(
+                            button("toggle-terminal", IconName::PanelBottom, "Show or hide the terminal (Ctrl+Shift+J)")
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    if this.terminal_hidden || this.shown(true).is_none() {
+                                        this.toggle_terminal(window, cx);
+                                    } else {
+                                        this.hide_terminal(window, cx);
+                                    }
+                                })),
+                        )
+                    })
+                    .when(group == Group::Terminals && has_files, |d| {
+                        d.child(
+                            button("hide-terminal", IconName::ChevronDown, "Hide the terminal (Ctrl+Shift+J)").on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| this.hide_terminal(window, cx)),
+                            ),
+                        )
                     }),
             )
+    }
+
+    /// What the tab at `index` shows under its tab bar.
+    fn render_body(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        match self.tabs.get(index).map(|t| &t.body) {
+            Some(Body::Terminals { root, .. }) => self.render_node(root, cx),
+            Some(Body::Editor(editor)) => editor.clone().into_any_element(),
+            Some(Body::Diff(diff)) => diff.clone().into_any_element(),
+            None => div().into_any_element(),
+        }
+    }
+
+    /// Files above, the terminal panel below, a line to drag between them.
+    /// With no file open the terminals have the whole space.
+    fn render_docked(&self, cx: &mut Context<Self>) -> AnyElement {
+        let file = self.shown(false);
+        let terminal = self.shown(true).filter(|_| file.is_none() || !self.terminal_hidden);
+        let both = file.is_some() && terminal.is_some();
+        let (ratio, bounds) = (self.dock_ratio, self.dock_bounds.clone());
+        let (line, background) = (cx.theme().border, cx.theme().background);
+
+        let files = file.map(|index| {
+            v_flex()
+                .id("file-dock")
+                .test_support()
+                .w_full()
+                .min_h_0()
+                .map(|d| if both { d.flex_none().h(relative(ratio)) } else { d.flex_1() })
+                .child(self.render_tab_bar(Group::Files, cx))
+                .child(div().flex_1().min_h_0().w_full().child(self.render_body(index, cx)))
+        });
+        let divider = both.then(|| {
+            div()
+                .id("dock-divider")
+                .test_support()
+                .flex_none()
+                .w_full()
+                .h(px(DIVIDER))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .cursor_row_resize()
+                .bg(background)
+                .child(div().w_full().h(px(1.)).bg(line))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.dock_dragging = true;
+                        cx.stop_propagation();
+                    }),
+                )
+        });
+        let terminals = terminal.map(|index| {
+            v_flex()
+                .id("terminal-dock")
+                .test_support()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(self.render_tab_bar(Group::Terminals, cx))
+                .child(div().flex_1().min_h_0().w_full().child(self.render_body(index, cx)))
+        });
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .child(canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {}).absolute().size_full())
+            .children(files)
+            .children(divider)
+            .children(terminals)
+            .into_any_element()
     }
 
     fn render_confirm(&self, busy: usize, cx: &mut Context<Self>) -> impl IntoElement {
@@ -989,11 +1269,30 @@ impl Render for TerminalArea {
             *active = focused;
         }
 
-        let body = match self.tabs.get(self.active).map(|t| &t.body) {
-            Some(Body::Terminals { root, .. }) => self.render_node(root, cx),
-            Some(Body::Editor(editor)) => editor.clone().into_any_element(),
-            Some(Body::Diff(diff)) => diff.clone().into_any_element(),
-            None => div().into_any_element(),
+        // With two tabs on screen, the one that was clicked into is the active one.
+        let docked = Self::docked(cx);
+        if docked {
+            for terminals in [false, true] {
+                if let Some(index) = self.shown(terminals)
+                    && index != self.active
+                    && self.tabs[index].has_focus(window, cx)
+                {
+                    self.active = index;
+                }
+            }
+        }
+        self.note_active();
+
+        let content = if docked {
+            self.render_docked(cx)
+        } else {
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(self.render_tab_bar(Group::All, cx))
+                .child(div().flex_1().min_h_0().w_full().child(self.render_body(self.active, cx)))
+                .into_any_element()
         };
         // While a question is on screen the shortcuts below must not act behind it.
         let idle = self.confirm.is_none();
@@ -1018,7 +1317,10 @@ impl Render for TerminalArea {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| this.dragging = None),
+                cx.listener(|this, _: &MouseUpEvent, _, _| {
+                    this.dragging = None;
+                    this.dock_dragging = false;
+                }),
             )
             .on_action(cx.listener(move |this, _: &NewTab, window, cx| {
                 if idle {
@@ -1066,8 +1368,12 @@ impl Render for TerminalArea {
                     this.cycle_pane(-1, window, cx);
                 }
             }))
-            .child(self.render_tab_bar(cx))
-            .child(div().flex_1().min_h_0().w_full().child(body))
+            .on_action(cx.listener(move |this, _: &ToggleTerminal, window, cx| {
+                if idle {
+                    this.toggle_terminal(window, cx);
+                }
+            }))
+            .child(content)
             .when_some(self.confirm, |d, (_, busy)| d.child(self.render_confirm(busy, cx)))
     }
 }
@@ -1379,6 +1685,8 @@ two
             split(true, 5.0, terminal(None), split(false, 0.5, terminal(None), terminal(None))),
         );
         let saved = Layout {
+            dock_ratio: None,
+            terminal_hidden: false,
             tabs: vec![
                 TabLayout::File { path: dir.join("gone.txt") },
                 TabLayout::Terminals { panes: *crowded },
@@ -1416,5 +1724,69 @@ two
             assert!(pane.focus_handle(cx).is_focused(window));
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn files_sit_above_the_terminal_when_the_settings_say_so(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, area) = open(cx);
+        cx.update(|cx| crate::theme::change_settings(cx, |s| s.layout = "terminal_below".into()).unwrap());
+        let dir = std::env::temp_dir().join(format!("wercode-dock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(dir.join(name), "text\n").unwrap();
+        }
+        let on_screen = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                (window.try_find("file-dock").is_some(), window.try_find("terminal-dock").is_some())
+            })
+            .unwrap()
+        };
+        let open_file = |cx: &mut TestAppContext, name: &str| {
+            cx.update_window(window, |_, window, cx| {
+                area.update(cx, |a, cx| a.open_path(dir.join(name), None, None, window, cx));
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        // No file open: the terminals have the whole space.
+        assert_eq!(on_screen(cx), (false, true));
+
+        open_file(cx, "a.txt");
+        open_file(cx, "b.txt");
+        assert_eq!(on_screen(cx), (true, true));
+        assert_eq!(shape(cx, &area), (3, 2, 0));
+        // The keys move along the row the keyboard is in, not into the other one.
+        press(cx, window, &["ctrl-tab"]);
+        assert_eq!(area.read_with(cx, |a, _| a.active), 1);
+        press(cx, window, &["ctrl-tab"]);
+        assert_eq!(area.read_with(cx, |a, _| a.active), 2);
+
+        // A split asked for from a file happens in the terminal below.
+        press(cx, window, &["ctrl-shift-d"]);
+        assert_eq!(shape(cx, &area), (3, 0, 2));
+        // From the terminal the panel is put away, and comes back with the keyboard in it.
+        press(cx, window, &["ctrl-shift-j"]);
+        assert_eq!(on_screen(cx), (true, false));
+        assert_eq!(area.read_with(cx, |a, _| a.active), 2);
+        press(cx, window, &["ctrl-shift-j"]);
+        assert_eq!(on_screen(cx), (true, true));
+        assert_eq!(area.read_with(cx, |a, _| a.active), 0);
+
+        // A closed file gives way to the other file; with none left the terminal is alone again.
+        cx.update_window(window, |_, window, cx| window.click("close-file", cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(on_screen(cx), (true, true));
+        assert_eq!(area.read_with(cx, |a, _| a.tabs.len()), 2);
+        cx.update_window(window, |_, window, cx| window.click("close-file", cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(on_screen(cx), (false, true));
+
+        // Back to one row of tabs, at once.
+        open_file(cx, "a.txt");
+        cx.update(|cx| crate::theme::change_settings(cx, |s| s.layout = "tabs".into()).unwrap());
+        assert_eq!(on_screen(cx), (false, false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

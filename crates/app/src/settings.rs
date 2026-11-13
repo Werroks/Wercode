@@ -173,6 +173,16 @@ impl Render for SettingsView {
             .child(side("settings-side-left", "Left", "left", !on_right))
             .child(side("settings-side-right", "Right", "right", on_right));
 
+        let below = settings.terminal_below();
+        let layout = |id: &'static str, label: &'static str, value: &'static str, chosen: bool| {
+            Self::choice(id, label, chosen)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.change(cx, |s| s.layout = value.into())))
+        };
+        let layouts = h_flex()
+            .gap_1()
+            .child(layout("settings-layout-tabs", "One row of tabs", "tabs", !below))
+            .child(layout("settings-layout-below", "Terminal below files", "terminal_below", below));
+
         let this = cx.entity().downgrade();
         let switch = |id: &'static str, on: bool, set: fn(&mut Settings, bool)| {
             let this = this.clone();
@@ -252,6 +262,12 @@ impl Render for SettingsView {
                     ))
                     .child(Self::row("Shell", "Used by terminals opened from now on.", shells, cx))
                     .child(Self::row("Side panel", "Where files, search and git sit.", sides, cx))
+                    .child(Self::row(
+                        "Layout",
+                        "Files and terminals as tabs of one row, or files above a terminal panel.",
+                        layouts,
+                        cx,
+                    ))
                     .child(Self::row(
                         "Blinking cursor",
                         "",

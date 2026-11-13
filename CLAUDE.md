@@ -61,6 +61,9 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 - An element a UI test clicks by id needs `.test_support()`, unless it is a
   library button.
 - Plain Ctrl+S is bound only inside the editor (`EditorView` context).
+- The centre has two layouts (`layout` in the settings): one row of tabs, or
+  files above a terminal panel. Both use the same list of tabs in
+  `term/area.rs`; anything that picks a tab must work in both.
 - Shortcuts are bound in `keymap.rs` only, so the user can change them; a new
   command gets a line there, not a `KeyBinding` of its own.
 - In a test module `use super::*` next to `use gpui_kit::*` makes `#[test]`

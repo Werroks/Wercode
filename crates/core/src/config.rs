@@ -50,6 +50,9 @@ pub struct Settings {
     pub panel_width: f32,
     /// Which side the files/search/git panel sits on: "left" or "right".
     pub panel_side: String,
+    /// How files and terminals share the window: "tabs" puts them in one row
+    /// of tabs, "terminal_below" puts files above a terminal panel.
+    pub layout: String,
     /// Shortcuts that replace the built-in ones, by command name:
     /// `"terminal.new_tab" = "ctrl-shift-y"`. Written by hand in the `[keys]`
     /// table; the settings screen lists the names.
@@ -57,6 +60,11 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Anything other than "terminal_below" means one row of tabs.
+    pub fn terminal_below(&self) -> bool {
+        self.layout.eq_ignore_ascii_case("terminal_below")
+    }
+
     /// Anything other than "right" means left, so a typo cannot hide the panel.
     pub fn panel_on_right(&self) -> bool {
         self.panel_side.eq_ignore_ascii_case("right")
@@ -80,6 +88,7 @@ impl Default for Settings {
             copy_on_select: false,
             panel_width: 300.0,
             panel_side: "left".into(),
+            layout: "tabs".into(),
             keys: BTreeMap::new(),
         }
     }

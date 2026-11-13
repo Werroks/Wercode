@@ -895,9 +895,40 @@ impl TerminalArea {
         cx.notify();
     }
 
-    fn render_node(&self, node: &Node, cx: &mut Context<Self>) -> AnyElement {
+    /// `alone` is a terminal that has its tab to itself: the cross on the tab
+    /// closes it. Terminals that share a tab each get a cross of their own.
+    fn render_node(&self, node: &Node, alone: bool, cx: &mut Context<Self>) -> AnyElement {
         let split = match node {
-            Node::Leaf(pane) => return div().size_full().child(pane.clone()).into_any_element(),
+            Node::Leaf(pane) => {
+                let id = pane.entity_id();
+                return div()
+                    .size_full()
+                    .relative()
+                    .child(pane.clone())
+                    .when(!alone, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(4.))
+                                .right(px(16.))
+                                .rounded_sm()
+                                .bg(cx.theme().background.opacity(0.8))
+                                // The press must not start a selection in the terminal underneath.
+                                .occlude()
+                                .child(
+                                    Button::new(("close-terminal", id.as_u64() as usize))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Close)
+                                        .tooltip("Close this terminal")
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                            this.request_close(CloseTarget::Pane(id), window, cx);
+                                        })),
+                                ),
+                        )
+                    })
+                    .into_any_element();
+            }
             Node::Split(split) => split,
         };
         let id = split.id;
@@ -911,13 +942,13 @@ impl TerminalArea {
             .flex_none()
             .overflow_hidden()
             .map(|d| if horizontal { d.h_full().w(relative(ratio)) } else { d.w_full().h(relative(ratio)) })
-            .child(self.render_node(&split.first, cx));
+            .child(self.render_node(&split.first, false, cx));
         let second = div()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .child(self.render_node(&split.second, cx));
+            .child(self.render_node(&split.second, false, cx));
         let divider = div()
             .id(("divider", id))
             .flex_none()
@@ -1133,7 +1164,7 @@ impl TerminalArea {
     /// What the tab at `index` shows under its tab bar.
     fn render_body(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match self.tabs.get(index).map(|t| &t.body) {
-            Some(Body::Terminals { root, .. }) => self.render_node(root, cx),
+            Some(Body::Terminals { root, .. }) => self.render_node(root, true, cx),
             Some(Body::Editor(editor)) => editor.clone().into_any_element(),
             Some(Body::Diff(diff)) => diff.clone().into_any_element(),
             None => div().into_any_element(),
@@ -1416,6 +1447,7 @@ mod tests {
 
     #[gpui_kit::test]
     async fn shortcuts_split_switch_and_close(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
         let (window, area) = open(cx);
         assert_eq!(shape(cx, &area), (1, 0, 1));
 
@@ -1442,6 +1474,17 @@ mod tests {
         assert_eq!(shape(cx, &area), (1, 0, 2));
         let panes = area.read_with(cx, |a, _| a.tabs[0].panes());
         assert!(panes.iter().all(|p| p.entity_id() != after));
+
+        // Each of several terminals has a cross of its own, whichever has the keyboard.
+        press(cx, window, &["ctrl-shift-d"]);
+        assert_eq!(shape(cx, &area), (1, 0, 3));
+        let panes = area.read_with(cx, |a, _| a.tabs[0].panes());
+        let (first, active) = (panes[0].entity_id(), area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().entity_id()));
+        assert_ne!(first, active);
+        cx.update_window(window, |_, window, cx| window.click(("close-terminal", first.as_u64() as usize), cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(shape(cx, &area), (1, 0, 2));
+        assert!(area.read_with(cx, |a, _| a.tabs[0].panes()).iter().all(|p| p.entity_id() != first));
 
         // The centre is never left empty.
         press(cx, window, &["ctrl-shift-q"]);

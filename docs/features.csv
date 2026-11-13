@@ -21,7 +21,7 @@ Git panel: commit with message,git,must,yes,yes,Ctrl+Enter or the button; with n
 Current branch and ahead/behind,git,must,yes,yes,status bar: branch; commits to push and pull; change and conflict counts; colour follows the state
 Settings: font size theme shell,settings,must,yes,yes,gear button in the title bar and Preferences: Settings in the palette; scheme; font and size; shell; panel side; three switches; applied at once and written to settings.toml keeping comments; font size is the terminal text only
 Restore last workspace and layout on launch,workspace,must,yes,yes,last project; panel; panel width; window size and position; tabs with their splits and each shell's folder; open files; kept per project; terminal output is not kept
-Terminal splits (side by side and stacked),terminal,must,yes,yes,user decision 2026-11-11; Ctrl+Shift+D / Ctrl+Shift+E; draggable divider; at most 4 terminals per tab; covered by UI tests
+Terminal splits (side by side and stacked),terminal,must,yes,yes,user decision 2026-11-11; Ctrl+Shift+D / Ctrl+Shift+E; draggable divider; at most 4 terminals per tab; each terminal of a split has its own close cross; covered by UI tests
 Dark theme by default plus several built-in color schemes in settings,settings,must,yes,yes,user decision 2026-11-11; own palettes only; 5 schemes chosen on the settings screen
 Clickable file paths and URLs in terminal output,terminal,should,yes,partial,Ctrl+click; detection unit-tested; pointer part not hand-tested; a path opens in the editor at its line
 Click file opens it in the built-in editor,files,must,yes,yes,from the file tree and from the git panel; a file that is not UTF-8 text or is over 20 MB gets a note and an Open in the Default App button

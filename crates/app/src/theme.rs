@@ -82,6 +82,7 @@ pub fn apply(settings: Settings, cx: &mut App) {
 
     let settings_path = cx.try_global::<AppState>().and_then(|state| state.settings_path.clone());
     cx.set_global(AppState { scheme, settings, settings_path });
+    crate::keymap::apply(cx);
     cx.refresh_windows();
 }
 

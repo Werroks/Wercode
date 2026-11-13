@@ -1,8 +1,29 @@
 //! User settings, stored as `settings.toml` in the platform config directory.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+/// The shortcuts of one command: a single one, or several that do the same.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Keys {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Keys {
+    /// The shortcuts as written, without empty ones. An empty list means the
+    /// command has no shortcut at all.
+    pub fn list(&self) -> Vec<&str> {
+        let all: Vec<&str> = match self {
+            Keys::One(key) => vec![key.as_str()],
+            Keys::Many(keys) => keys.iter().map(String::as_str).collect(),
+        };
+        all.into_iter().map(str::trim).filter(|key| !key.is_empty()).collect()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,6 +50,10 @@ pub struct Settings {
     pub panel_width: f32,
     /// Which side the files/search/git panel sits on: "left" or "right".
     pub panel_side: String,
+    /// Shortcuts that replace the built-in ones, by command name:
+    /// `"terminal.new_tab" = "ctrl-shift-y"`. Written by hand in the `[keys]`
+    /// table; the settings screen lists the names.
+    pub keys: BTreeMap<String, Keys>,
 }
 
 impl Settings {
@@ -55,6 +80,7 @@ impl Default for Settings {
             copy_on_select: false,
             panel_width: 300.0,
             panel_side: "left".into(),
+            keys: BTreeMap::new(),
         }
     }
 }
@@ -197,6 +223,27 @@ theme = \"paper\"
         assert_eq!((again.font_size, again.shell.as_str(), again.cursor_blink), (18.0, "cmd.exe", false));
         assert_eq!(again.shell_args, ["/K"]);
         assert!(!text.contains("scrollback"), "defaults are not written: {text}");
+
+        // Shortcuts are written by hand; saving other settings leaves them alone.
+        std::fs::write(&path, "theme = \"paper\"
+
+[keys]
+\"terminal.new_tab\" = \"ctrl-shift-y\" # mine
+\"terminal.next_tab\" = [\"ctrl-tab\", \"\"]
+\"workspace.new_window\" = \"\"
+").unwrap();
+        let (mut with_keys, error) = load_from(&path);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(with_keys.keys["terminal.new_tab"].list(), ["ctrl-shift-y"]);
+        assert_eq!(with_keys.keys["terminal.next_tab"].list(), ["ctrl-tab"]);
+        assert!(with_keys.keys["workspace.new_window"].list().is_empty());
+        with_keys.font_size = 20.0;
+        save_to(&path, &with_keys).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"terminal.new_tab\" = \"ctrl-shift-y\" # mine"), "{text}");
+        let (again, error) = load_from(&path);
+        assert!(error.is_none(), "{error:?}: {text}");
+        assert_eq!((again.font_size, again.keys.len()), (20.0, 3));
 
         // A broken file is reported and left exactly as it was.
         std::fs::write(&path, "theme = ").unwrap();

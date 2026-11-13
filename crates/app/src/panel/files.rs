@@ -40,6 +40,26 @@ pub enum FilesEvent {
     Renamed { from: PathBuf, to: PathBuf },
 }
 
+/// A file or folder of the tree on its way to a terminal under the pointer.
+#[derive(Clone)]
+pub struct DraggedPath(pub PathBuf);
+
+impl Render for DraggedPath {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let name = self.0.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        div()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .text_sm()
+            .child(name)
+    }
+}
+
 /// The program the user's shell tools open files with, if one is set.
 fn terminal_editor() -> Option<String> {
     ["VISUAL", "EDITOR"]
@@ -471,10 +491,15 @@ impl Render for FilesPanel {
                         ListItem::new(ix).py_0p5().pl(px(4.) + px(12.) * entry.depth() as f32).pr_3().child(
                             h_flex()
                                 .id(("file-row", ix))
+                                .test_support()
                                 .w_full()
                                 .gap_1p5()
                                 .text_sm()
                                 .when_some(color, |d, c| d.text_color(c))
+                                // Dropped on a terminal, the path is typed into it.
+                                .on_drag(DraggedPath(path.to_path_buf()), |dragged, _, _, cx| {
+                                    cx.new(|_| dragged.clone())
+                                })
                                 // The tree itself selects the row and opens folders.
                                 .when(!folder, |d| {
                                     let (this, path) = (this.clone(), path.to_path_buf());

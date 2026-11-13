@@ -182,6 +182,19 @@ impl Render for SettingsView {
             })
         };
 
+        // Shortcuts are changed in the file; here they are listed with their names.
+        let mono = theme.mono_font_family.clone();
+        let keys = v_flex().id("settings-keys").gap_0p5().children(crate::keymap::listing(cx).into_iter().map(
+            |(command, keys)| {
+                h_flex()
+                    .gap_3()
+                    .text_xs()
+                    .child(div().flex_1().min_w_0().truncate().font_family(mono.clone()).child(command))
+                    .child(div().flex_none().text_color(muted).child(keys.join(",  ")))
+            },
+        ));
+        let key_problems = crate::keymap::problems(cx);
+
         let file = path.clone();
         v_flex()
             .id("settings")
@@ -259,7 +272,22 @@ impl Render for SettingsView {
                     ))
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().id("settings-error").text_xs().text_color(danger).child(error))
-                    }),
+                    })
+                    .child(div().flex_none().h(px(1.)).bg(border))
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_sm().child("Keyboard shortcuts"))
+                            .child(div().text_xs().text_color(muted).child(
+                                "To change one, add its name to the [keys] table of settings.toml, for example \"terminal.new_tab\" = \"ctrl-shift-y\". An empty value removes the shortcut.",
+                            )),
+                    )
+                    .children(
+                        key_problems
+                            .into_iter()
+                            .map(|problem| div().text_xs().text_color(danger).child(problem)),
+                    )
+                    .child(keys),
             )
             .when_some(file, |d, file| {
                 d.child(

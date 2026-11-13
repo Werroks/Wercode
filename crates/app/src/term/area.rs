@@ -20,6 +20,7 @@ use super::{
 };
 use crate::diff::DiffView;
 use crate::editor::{EditorEvent, EditorView};
+use crate::panel::DraggedPath;
 use crate::theme::AppState;
 
 const TAB_BAR_HEIGHT: f32 = 36.0;
@@ -999,11 +1000,22 @@ impl Render for TerminalArea {
 
         v_flex()
             .id("terminal-area")
+            .test_support()
             .key_context("TerminalArea")
             .size_full()
             .relative()
             .bg(cx.theme().background)
             .on_mouse_move(cx.listener(Self::on_drag))
+            // A file dragged here from the tree, or from another program, is
+            // typed into the terminal as a path.
+            .on_drop(cx.listener(|this, dragged: &DraggedPath, window, cx| {
+                this.insert_path(&dragged.0, window, cx);
+            }))
+            .on_drop(cx.listener(|this, dragged: &ExternalPaths, window, cx| {
+                for path in dragged.paths() {
+                    this.insert_path(path, window, cx);
+                }
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| this.dragging = None),

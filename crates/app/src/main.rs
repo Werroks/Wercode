@@ -4,6 +4,7 @@
 mod assets;
 mod diff;
 mod editor;
+mod keymap;
 mod panel;
 mod settings;
 mod term;

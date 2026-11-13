@@ -3,6 +3,7 @@
 pub mod config;
 pub mod document;
 pub mod file_icons;
+pub mod finder;
 pub mod fs_ops;
 pub mod fs_tree;
 pub mod git;

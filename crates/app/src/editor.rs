@@ -14,10 +14,8 @@ actions!(editor, [Save]);
 /// How often an open file is checked for changes made by other programs.
 const DISK_POLL: Duration = Duration::from_secs(1);
 
-/// Plain Ctrl+S is safe here: the keyboard is in a text editor, not in a shell.
-pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-s", Save, Some("EditorView"))]);
-}
+/// The shortcut for saving is bound with the others, in `keymap`.
+pub fn init(_: &mut App) {}
 
 pub enum EditorEvent {
     /// The name or the unsaved mark may have changed.

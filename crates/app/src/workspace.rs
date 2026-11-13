@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -15,6 +16,7 @@ use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use wercode_core::finder;
 use wercode_core::fs_ops;
 use wercode_core::git::{self, RepoStatus};
 use wercode_core::state::{self, Layout, State};
@@ -41,7 +43,8 @@ actions!(
         CommandPalette,
         NewWindow,
         OpenSettings,
-        SwitchBranch
+        SwitchBranch,
+        QuickOpen
     ]
 );
 
@@ -50,19 +53,11 @@ const GIT_POLL: Duration = Duration::from_secs(2);
 /// Resizing produces a burst of changes; the state file is written once after it.
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 
-/// Workspace shortcuts sit on Ctrl+Shift: plain Ctrl keys belong to the shell
-/// and to the programs running in it.
-pub fn init(cx: &mut App) {
-    let context = Some("Workspace");
-    cx.bind_keys([
-        KeyBinding::new("ctrl-shift-b", TogglePanel, context),
-        KeyBinding::new("ctrl-shift-o", OpenFolder, context),
-        KeyBinding::new("ctrl-shift-f", ShowSearch, context),
-        KeyBinding::new("ctrl-shift-g", ShowGit, context),
-        KeyBinding::new("ctrl-shift-p", CommandPalette, context),
-        KeyBinding::new("ctrl-shift-n", NewWindow, context),
-    ]);
-}
+/// How many files the list for opening a file by name shows at once.
+const FINDER_ROWS: usize = 50;
+
+/// The workspace shortcuts are bound with the others, in `keymap`.
+pub fn init(_: &mut App) {}
 
 /// Opens a window on `root`, or on the welcome screen without one. Every
 /// window keeps its own project, terminals and files.
@@ -143,6 +138,7 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Terminal: Previous Tab", Box::new(PrevTab)),
         ("Terminal: Next Pane", Box::new(NextPane)),
         ("Terminal: Previous Pane", Box::new(PrevPane)),
+        ("File: Go to File\u{2026}", Box::new(QuickOpen)),
         ("File: Save", Box::new(Save)),
         ("View: Toggle Side Panel", Box::new(TogglePanel)),
         ("View: Show Files", Box::new(ShowFiles)),
@@ -185,6 +181,18 @@ struct BranchMenu {
     _subscription: Subscription,
 }
 
+/// The list for opening a file by a few letters of its name.
+struct FileFinder {
+    state: Entity<CommandState>,
+    /// Paths inside the project, with forward slashes. `None` until the
+    /// folder has been read.
+    files: Option<Arc<Vec<String>>>,
+    /// The files that match what is typed, best first, as indexes into `files`.
+    shown: Vec<usize>,
+    /// Stops the reading of the folder when the list is closed early.
+    cancel: Arc<AtomicBool>,
+}
+
 pub struct Workspace {
     /// `None` shows the welcome screen.
     project: Option<Project>,
@@ -193,6 +201,7 @@ pub struct Workspace {
     /// The list of recent projects under the title is showing.
     switcher_open: bool,
     palette: Option<Entity<CommandState>>,
+    finder: Option<FileFinder>,
     branches: Option<BranchMenu>,
     /// The settings screen, while it is showing.
     settings: Option<(Entity<SettingsView>, Subscription)>,
@@ -235,6 +244,7 @@ impl Workspace {
             panel_open: state.panel_open,
             switcher_open: false,
             palette: None,
+            finder: None,
             branches: None,
             settings: None,
             closing: false,
@@ -767,6 +777,7 @@ impl Workspace {
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switcher_open = false;
+        self.close_finder_quietly();
         let palette = cx.new(|cx| CommandState::new(window, cx));
         palette.update(cx, |palette, cx| palette.focus(window, cx));
         self.palette = Some(palette);
@@ -777,6 +788,79 @@ impl Workspace {
         if self.palette.take().is_some() {
             self.focus_terminals(window, cx);
             cx.notify();
+        }
+    }
+
+    /// Shows the list of the project's files. The folder is read in the
+    /// background; what is typed meanwhile is applied when it arrives.
+    fn open_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
+        let root = project.root.clone();
+        self.switcher_open = false;
+        self.palette = None;
+        self.close_finder_quietly();
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        state.update(cx, |state, cx| {
+            state.set_loading(true, window, cx);
+            state.focus(window, cx);
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (flag, mine) = (cancel.clone(), cancel.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let files = cx.background_executor().spawn(async move { finder::list_files(&root, &flag) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                // The list may have been closed, or closed and opened again.
+                let Some(finder) = this.finder.as_mut().filter(|f| Arc::ptr_eq(&f.cancel, &mine)) else { return };
+                let query = finder.state.read(cx).query(cx);
+                finder.shown = finder::matches(&files, &query, FINDER_ROWS);
+                finder.files = Some(Arc::new(files));
+                finder.state.clone().update(cx, |state, cx| state.set_loading(false, window, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+        self.finder = Some(FileFinder { state, files: None, shown: Vec::new(), cancel });
+        cx.notify();
+    }
+
+    fn close_finder_quietly(&mut self) -> bool {
+        match self.finder.take() {
+            Some(finder) => {
+                finder.cancel.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn close_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_finder_quietly() {
+            self.focus_terminals(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn finder_query(&mut self, query: &str, cx: &mut Context<Self>) {
+        let Some(finder) = &mut self.finder else { return };
+        if let Some(files) = &finder.files {
+            finder.shown = finder::matches(files, query, FINDER_ROWS);
+            cx.notify();
+        }
+    }
+
+    /// Opens the file in row `row` of the list and closes the list.
+    fn finder_confirm(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(finder), Some(project)) = (&self.finder, &self.project) else { return };
+        let path = finder
+            .files
+            .as_ref()
+            .and_then(|files| files.get(*finder.shown.get(row)?))
+            .map(|relative| project.root.join(relative));
+        self.close_finder_quietly();
+        cx.notify();
+        match path {
+            Some(path) => self.open_file(path, None, window, cx),
+            None => self.focus_terminals(window, cx),
         }
     }
 
@@ -1039,7 +1123,10 @@ impl Workspace {
             .child(Icon::new(IconName::Plus).small().text_color(muted))
             .child("New window")
             .child(div().flex_1())
-            .child(div().text_xs().text_color(muted).child("Ctrl+Shift+N"))
+            .children(
+                crate::keymap::label_for("workspace.new_window", cx)
+                    .map(|keys| div().text_xs().text_color(muted).child(keys)),
+            )
     }
 
     /// A dimmed layer over the window that closes whatever floats on it.
@@ -1049,6 +1136,7 @@ impl Workspace {
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.switcher_open = false;
                 this.close_palette(window, cx);
+                this.close_finder(window, cx);
                 this.close_settings(window, cx);
                 this.close_branches(window, cx);
                 cx.notify();
@@ -1120,6 +1208,68 @@ impl Workspace {
                         })
                         .on_cancel(move |window, cx| {
                             let _ = this.update(cx, |this, cx| this.close_palette(window, cx));
+                        }),
+                ),
+        )
+    }
+
+    fn render_finder(&self, finder: &FileFinder, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (border, popover, foreground, muted) =
+            (theme.border, theme.popover, theme.popover_foreground, theme.muted_foreground);
+        let this = cx.entity().downgrade();
+        let (on_query, on_confirm) = (this.clone(), this.clone());
+        let files = finder.files.clone().unwrap_or_default();
+        let items: Vec<CommandItem> = finder
+            .shown
+            .iter()
+            .filter_map(|&index| files.get(index))
+            .map(|path| {
+                // The name first, then the folder it is in, quieter.
+                let (folder, name) = match path.rsplit_once('/') {
+                    Some((folder, name)) => (SharedString::from(folder.to_string()), SharedString::from(name.to_string())),
+                    None => (SharedString::default(), SharedString::from(path.clone())),
+                };
+                CommandItem::new().label(path.clone()).child(move |_, _| {
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(div().flex_none().text_sm().child(name.clone()))
+                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(folder.clone()))
+                })
+            })
+            .collect();
+        self.backdrop("finder-backdrop", cx).flex().justify_center().items_start().child(
+            div()
+                .id("finder")
+                .mt(px(72.))
+                .w(px(640.))
+                .max_w(relative(0.9))
+                .h_auto()
+                .rounded_lg()
+                .border_1()
+                .border_color(border)
+                .bg(popover)
+                .text_color(foreground)
+                .shadow_lg()
+                .overflow_hidden()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Command::new(&finder.state)
+                        .items(items)
+                        // The list is already the answer to what was typed.
+                        .filterable(false)
+                        .placeholder("Type a file name\u{2026}")
+                        .bordered(false)
+                        .empty(|_, _, _| div().px_3().py_2().text_sm().child("No file matches"))
+                        .on_query(move |query, _, cx| {
+                            let _ = on_query.update(cx, |this, cx| this.finder_query(query, cx));
+                        })
+                        .on_confirm(move |index, window, cx| {
+                            let _ = on_confirm.update(cx, |this, cx| this.finder_confirm(index.row, window, cx));
+                        })
+                        .on_cancel(move |window, cx| {
+                            let _ = this.update(cx, |this, cx| this.close_finder(window, cx));
                         }),
                 ),
         )
@@ -1370,6 +1520,9 @@ impl Render for Workspace {
                 this.switcher_open = true;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &QuickOpen, window, cx| {
+                if this.finder.is_some() { this.close_finder(window, cx) } else { this.open_finder(window, cx) }
+            }))
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| {
                 if this.palette.is_some() { this.close_palette(window, cx) } else { this.open_palette(window, cx) }
             }))
@@ -1388,6 +1541,7 @@ impl Render for Workspace {
             .children(status)
             .when(self.switcher_open, |d| d.child(self.render_switcher(cx)))
             .when_some(self.palette.clone(), |d, palette| d.child(self.render_palette(&palette, cx)))
+            .when_some(self.finder.as_ref(), |d, finder| d.child(self.render_finder(finder, cx)))
             .when_some(self.branches.as_ref(), |d, menu| d.child(self.render_branches(menu, cx)))
             .when_some(self.settings.as_ref().map(|(view, _)| view.clone()), |d, view| {
                 d.child(self.render_settings(&view, cx))
@@ -2052,6 +2206,115 @@ mod tests {
         .unwrap();
         assert_eq!(f.workspace.read_with(cx, |w, _| w.root()), Some(two.clone()));
         assert_eq!(state::load_from(&f.state_path).recent, vec![two]);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn a_file_is_opened_by_a_few_letters_of_its_name(cx: &mut TestAppContext) {
+        use wercode_core::state::TabLayout;
+        let root = project_dir("finder");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(root.join("src").join("alpha.rs"), "fn alpha() {}\n").unwrap();
+        std::fs::write(root.join("src").join("beta.rs"), "fn beta() {}\n").unwrap();
+        std::fs::write(root.join("target").join("alpha.o"), "").unwrap();
+        let f = open(cx, "finder");
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let listed = |cx: &mut TestAppContext| {
+            f.workspace.read_with(cx, |w, _| {
+                let finder = w.finder.as_ref()?;
+                let files = finder.files.as_ref()?;
+                Some(finder.shown.iter().map(|&i| files[i].clone()).collect::<Vec<_>>())
+            })
+        };
+
+        press(cx, f.window, &["ctrl-shift-k"]);
+        wait_until(cx, "the list of files", |cx| listed(cx).is_some());
+        // Ignored files are not offered.
+        assert_eq!(listed(cx).unwrap(), [".gitignore", "src/alpha.rs", "src/beta.rs"]);
+        press(cx, f.window, &["escape"]);
+        assert!(f.workspace.read_with(cx, |w, _| w.finder.is_none()));
+
+        press(cx, f.window, &["ctrl-shift-k"]);
+        wait_until(cx, "the list of files", |cx| listed(cx).is_some());
+        cx.update_window(f.window, |_, window, cx| window.input("bet", cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(listed(cx).unwrap(), ["src/beta.rs"]);
+        press(cx, f.window, &["enter"]);
+        cx.run_until_parked();
+        assert!(f.workspace.read_with(cx, |w, _| w.finder.is_none()));
+        let last = area.read_with(cx, |a, cx| a.layout(cx).tabs.last().cloned());
+        assert_eq!(last, Some(TabLayout::File { path: root.join("src").join("beta.rs") }));
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn shortcuts_follow_the_settings(cx: &mut TestAppContext) {
+        use wercode_core::config::Keys;
+        let f = open(cx, "keys");
+        let open_now = |cx: &mut TestAppContext| f.workspace.read_with(cx, |w, _| w.panel_open);
+        let set = |cx: &mut TestAppContext, name: &str, keys: Option<&str>| {
+            cx.update(|cx| {
+                crate::theme::change_settings(cx, |s| match keys {
+                    Some(keys) => drop(s.keys.insert(name.into(), Keys::One(keys.into()))),
+                    None => drop(s.keys.remove(name)),
+                })
+                .unwrap()
+            });
+        };
+        assert!(open_now(cx));
+
+        // The new shortcut works and the built-in one no longer does.
+        set(cx, "workspace.toggle_panel", Some("Ctrl+Shift+Y"));
+        press(cx, f.window, &["ctrl-shift-b"]);
+        assert!(open_now(cx));
+        press(cx, f.window, &["ctrl-shift-y"]);
+        assert!(!open_now(cx));
+        assert_eq!(cx.update(|cx| crate::keymap::label_for("workspace.toggle_panel", cx)).as_deref(), Some("Ctrl+Shift+Y"));
+
+        // An empty value leaves the command without a shortcut.
+        set(cx, "workspace.toggle_panel", Some(""));
+        press(cx, f.window, &["ctrl-shift-y", "ctrl-shift-b"]);
+        assert!(!open_now(cx));
+
+        // What cannot be used is said, and the rest still works.
+        set(cx, "workspace.toggle_panel", Some("y-ctrl"));
+        set(cx, "workspace.no_such_thing", Some("ctrl-shift-y"));
+        assert_eq!(cx.update(|cx| crate::keymap::problems(cx)).len(), 2);
+        press(cx, f.window, &["ctrl-shift-g"]);
+        assert!(open_now(cx));
+
+        // Without the setting the built-in shortcut is back.
+        set(cx, "workspace.toggle_panel", None);
+        set(cx, "workspace.no_such_thing", None);
+        assert!(cx.update(|cx| crate::keymap::problems(cx)).is_empty());
+        press(cx, f.window, &["ctrl-shift-y"]);
+        assert!(open_now(cx));
+        press(cx, f.window, &["ctrl-shift-b"]);
+        assert!(!open_now(cx));
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn a_file_dragged_onto_the_terminal_is_typed_as_a_path(cx: &mut TestAppContext) {
+        let root = project_dir("drag");
+        std::fs::write(root.join("only.txt"), "text\n").unwrap();
+        let f = open(cx, "drag");
+        let files = f.workspace.read_with(cx, |w, _| w.files());
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        wait_until(cx, "the file in the tree", |cx| files.read_with(cx, |p, cx| p.shows(&root.join("only.txt"), cx)));
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(root.join("only.txt"), None, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(area.read_with(cx, |a, cx| a.layout(cx).active), 1);
+
+        // The file is showing; the drop goes to the terminal tab and shows it.
+        cx.update_window(f.window, |_, window, cx| window.drag_to(("file-row", 0usize), "terminal-area", cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(area.read_with(cx, |a, cx| a.layout(cx).active), 0);
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 }

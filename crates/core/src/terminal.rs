@@ -184,6 +184,8 @@ impl Terminal {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "wercode");
+        // Replaces the version of an editor whose terminal started Wercode.
+        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 
         let mut child = pair
             .slave

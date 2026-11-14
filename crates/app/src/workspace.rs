@@ -23,7 +23,10 @@ use wercode_core::state::{self, Layout, State};
 use wercode_core::watch::{self, Watch};
 
 use crate::editor::Save;
-use crate::panel::{FilesEvent, FilesPanel, GitPanel, GitPanelEvent, SearchEvent, SearchPanel};
+use crate::panel::git as git_panel;
+use crate::panel::{
+    FilesEvent, FilesPanel, GitPanel, GitPanelEvent, Remote, RemoteActivity, SearchEvent, SearchPanel,
+};
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::term::{
     ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
@@ -150,6 +153,11 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Project: Switch to Recent\u{2026}", Box::new(SwitchProject)),
         ("Preferences: Settings", Box::new(OpenSettings)),
         ("Git: Switch or Create Branch\u{2026}", Box::new(SwitchBranch)),
+        ("Git: Pull", Box::new(git_panel::Pull)),
+        ("Git: Push", Box::new(git_panel::Push)),
+        ("Git: Fetch", Box::new(git_panel::Fetch)),
+        ("Git: Commit", Box::new(git_panel::Commit)),
+        ("Git: Stage All Changes", Box::new(git_panel::StageAll)),
     ]
 }
 
@@ -162,7 +170,7 @@ struct Project {
     changes: Entity<GitPanel>,
     /// `None` outside a repository, and until the first read finishes.
     git: Option<Arc<RepoStatus>>,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 5],
     _git_poll: Task<()>,
     /// Reports files changed by other programs. `None` when the system would
     /// not watch the folder; the git poll then still notices new files.
@@ -301,6 +309,8 @@ impl Workspace {
                         .update(cx, |area, cx| area.open_diff(root, path, staged, untracked, window, cx));
                 }
             }),
+            // A fetch, pull or push shows in the status bar while it runs.
+            cx.observe(&changes, |_, _, cx| cx.notify()),
             // Tabs opened, closed or split are written down for the next launch.
             cx.observe(&terminals, |this, _, cx| this.remember_layout(cx)),
         ];
@@ -774,6 +784,39 @@ impl Workspace {
         self.state.panel_open = self.panel_open;
         self.save();
         cx.notify();
+    }
+
+    /// Fetches, pulls or pushes from a shortcut or the palette. The panel
+    /// does the work; the status bar shows how it goes.
+    fn git_remote(&mut self, command: Remote, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        cx.notify();
+        let Some(panel) = self.project.as_ref().map(|p| p.changes.clone()) else { return };
+        panel.update(cx, |panel, cx| panel.remote(command, window, cx));
+    }
+
+    fn git_stage_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        cx.notify();
+        let Some(panel) = self.project.as_ref().map(|p| p.changes.clone()) else { return };
+        panel.update(cx, |panel, cx| panel.stage_all(window, cx));
+    }
+
+    /// Commits the message written in the git panel. Without one, puts the
+    /// keyboard in the message field. Either way the panel shows, since it
+    /// is where the field and any complaint from git are.
+    fn git_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        cx.notify();
+        let Some(panel) = self.project.as_ref().map(|p| p.changes.clone()) else { return };
+        if !(self.panel_open && self.panel == PanelKind::Git) {
+            self.show_panel(PanelKind::Git, window, cx);
+        }
+        if panel.read(cx).has_message(cx) {
+            panel.update(cx, |panel, cx| panel.commit(window, cx));
+        } else {
+            panel.update(cx, |panel, cx| panel.focus_message(window, cx));
+        }
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1368,6 +1411,7 @@ impl Workspace {
     /// Branch, unpushed commits and changes. The branch takes the colour of
     /// the worst thing true about the working tree.
     fn render_status(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
+        let activity = project.changes.read(cx).activity();
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
         let item = || h_flex().flex_none().gap_1().items_center();
@@ -1450,6 +1494,32 @@ impl Workspace {
             .text_xs()
             .text_color(muted)
             .child(git)
+            .when_some(activity.label(), |d, label| {
+                let failed = matches!(activity, RemoteActivity::Failed(_));
+                d.child(
+                    item()
+                        .id("status-git-activity")
+                        .test_support()
+                        .px_1()
+                        .rounded_sm()
+                        .child(if failed {
+                            Icon::new(IconName::TriangleAlert).xsmall()
+                        } else {
+                            Icon::new(Lucide::RefreshCw).xsmall()
+                        })
+                        .child(label)
+                        // What git said is in the panel.
+                        .when(failed, |d| {
+                            d.text_color(theme.danger)
+                                .hover(|s| s.bg(theme.secondary_hover))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    if !(this.panel_open && this.panel == PanelKind::Git) {
+                                        this.show_panel(PanelKind::Git, window, cx);
+                                    }
+                                }))
+                        }),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -1515,6 +1585,13 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowGit, window, cx| this.show_panel(PanelKind::Git, window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_action(cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)))
+            .on_action(cx.listener(|this, _: &git_panel::Pull, window, cx| this.git_remote(Remote::Pull, window, cx)))
+            .on_action(cx.listener(|this, _: &git_panel::Push, window, cx| this.git_remote(Remote::Push, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &git_panel::Fetch, window, cx| this.git_remote(Remote::Fetch, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &git_panel::Commit, window, cx| this.git_commit(window, cx)))
+            .on_action(cx.listener(|this, _: &git_panel::StageAll, window, cx| this.git_stage_all(window, cx)))
             .on_action(cx.listener(|this, _: &NewWindow, _, cx| this.new_window(cx)))
             .on_action(cx.listener(|this, _: &SwitchProject, _, cx| {
                 this.palette = None;
@@ -1858,6 +1935,94 @@ mod tests {
         assert!(f.workspace.read_with(cx, |w, _| w.branches.as_ref().is_some_and(|m| m.error.is_some())));
         press(cx, f.window, &["escape"]);
         assert!(f.workspace.read_with(cx, |w, _| w.branches.is_none()));
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn git_shortcuts_commit_push_pull_and_report_in_the_status_bar(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        use crate::panel::{Remote, RemoteActivity};
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = project_dir("gitkeys");
+        let remote = repo.parent().unwrap().join("remote.git");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "trunk"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "First"]);
+        assert!(Command::new("git").args(["init", "-q", "--bare"]).arg(&remote).status().unwrap().success());
+        git(&["remote", "add", "origin", &remote.to_string_lossy()]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+
+        let f = open(cx, "gitkeys");
+        let status = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            f.workspace.read_with(cx, |w, _| w.git().expect("a repository"))
+        };
+        assert_eq!(status(cx).changed(), 1);
+        let panel = f.workspace.read_with(cx, |w, _| w.changes()).unwrap();
+        let shown =
+            |cx: &mut TestAppContext| f.workspace.read_with(cx, |w, _| w.panel_open && w.panel == PanelKind::Git);
+        let activity = |cx: &mut TestAppContext| panel.read_with(cx, |p, _| p.activity());
+
+        // Commit with no message yet: the git panel opens with the keyboard in its field.
+        assert!(!shown(cx));
+        press(cx, f.window, &["ctrl-shift-enter"]);
+        assert!(shown(cx));
+        let focused =
+            cx.update_window(f.window, |_, window, cx| panel.read(cx).message_focused(window, cx)).unwrap();
+        assert!(focused);
+        // With a message, the same keys commit everything that changed.
+        cx.update_window(f.window, |_, window, cx| panel.update(cx, |p, cx| p.write_message("Second", window, cx)))
+            .unwrap();
+        press(cx, f.window, &["ctrl-shift-enter"]);
+        assert_eq!(status(cx).changed(), 0);
+        assert_eq!(panel.read_with(cx, |p, cx| p.message_text(cx)), "");
+
+        // Up pushes, and the first push publishes the branch. The status bar
+        // says what is running, since the panel may be hidden.
+        assert!(!status(cx).has_upstream);
+        press(cx, f.window, &["ctrl-shift-up"]);
+        assert_eq!(activity(cx), RemoteActivity::Running(Remote::Push));
+        assert!(status(cx).has_upstream);
+        assert_eq!(activity(cx), RemoteActivity::Idle);
+        press(cx, f.window, &["ctrl-shift-down"]);
+        assert_eq!(activity(cx), RemoteActivity::Running(Remote::Pull));
+        cx.run_until_parked();
+        press(cx, f.window, &["ctrl-shift-r"]);
+        cx.run_until_parked();
+        assert_eq!(activity(cx), RemoteActivity::Idle);
+        assert_eq!(panel.read_with(cx, |p, _| p.error().map(str::to_string)), None);
+
+        // A failure stays in the status bar with the panel hidden; a click on
+        // it shows the panel with git's own words.
+        git(&["remote", "set-url", "origin", &repo.parent().unwrap().join("gone.git").to_string_lossy()]);
+        press(cx, f.window, &["ctrl-shift-g"]);
+        assert!(!shown(cx));
+        press(cx, f.window, &["ctrl-shift-r"]);
+        cx.run_until_parked();
+        assert_eq!(activity(cx), RemoteActivity::Failed(Remote::Fetch));
+        assert!(panel.read_with(cx, |p, _| p.error().is_some()));
+        cx.update_window(f.window, |_, window, cx| window.click("status-git-activity", cx)).unwrap();
+        assert!(shown(cx));
+
+        // Stage All is in the palette.
+        std::fs::write(repo.join("b.txt"), "new\n").unwrap();
+        f.workspace.update(cx, |w, cx| w.refresh_git(cx));
+        assert_eq!(status(cx).unstaged().count(), 1);
+        press(cx, f.window, &["ctrl-shift-p"]);
+        cx.update_window(f.window, |_, window, cx| window.input("stage all", cx)).unwrap();
+        press(cx, f.window, &["enter"]);
+        assert_eq!((status(cx).staged().count(), status(cx).unstaged().count()), (1, 0));
+        assert_eq!(activity(cx), RemoteActivity::Idle);
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

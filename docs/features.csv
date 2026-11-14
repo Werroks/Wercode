@@ -1,6 +1,7 @@
 feature,area,priority,reference,done,notes
 Open a folder as workspace (dialog and CLI argument),workspace,must,yes,partial,CLI argument and system folder dialog; the dialog itself is not hand-tested
 Terminal in the center running the user's shell,terminal,must,yes,yes,in Cursor it is a bottom panel
+Clean environment for the shells,terminal,must,no,yes,marks left by Claude Code (CLAUDECODE and the like) and by an editor's terminal are dropped at start; NO_COLOR and git's prompt settings go only when Claude Code left them; unit-tested
 Correct VT emulation (colors cursor alt screen mouse),terminal,must,yes,partial,alacritty_terminal; mouse reporting (SGR and legacy) implemented; not hand-tested in vim/htop
 Terminal resize follows window and splitter,terminal,must,yes,yes,PTY resize debounced 60 ms
 Scrollback with mouse wheel,terminal,must,yes,partial,implemented; not hand-tested
@@ -32,7 +33,8 @@ Diff view for a changed file,git,should,yes,yes,a click on a file in the git pan
 Push pull fetch buttons,git,should,yes,yes,above the commit field; the first push publishes the branch to origin; git's own error is shown; no password prompt (credentials must already work in the terminal)
 Switch and create branch,git,should,yes,yes,click the branch in the status bar or Git: Switch or Create Branch in the palette; local branches only
 Discard changes,git,should,yes,yes,button on each row of Changes; asks first; a new file goes to the trash instead
-Command palette,shell,should,yes,yes,Ctrl+Shift+P; 21 commands; covered by a UI test
+Shortcuts for git commands,git,should,no,yes,Ctrl+Shift+Up push; Ctrl+Shift+Down pull; Ctrl+Shift+R fetch; Ctrl+Shift+Enter commits the message in the git panel or puts the keyboard in its field; Stage All in the palette without a shortcut; the status bar says what is running and keeps a failure until the next command; covered by a UI test
+Command palette,shell,should,yes,yes,Ctrl+Shift+P; 26 commands; covered by a UI test
 Quick open file by fuzzy name,shell,should,yes,yes,Ctrl+Shift+K (plain Ctrl+P belongs to the shell) or File: Go to File in the palette; letters in order; the file name counts for more than the folders; ignored files are left out; at most 100000 files are listed
 Configurable keybindings,settings,should,yes,partial,the [keys] table of settings.toml: command name = shortcut or a list of them; an empty value removes the shortcut; the settings screen lists the names with their current shortcuts and says what could not be read; no editing on the screen itself; a hand-edited file is read when the settings screen opens
 Recent workspaces list,workspace,should,yes,yes,in the title switcher and on the welcome screen

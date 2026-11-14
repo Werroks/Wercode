@@ -34,6 +34,8 @@ fn window_bounds(state: &State, cx: &App) -> Option<WindowBounds> {
 }
 
 fn main() {
+    // SAFETY: first thing in `main`; no other thread has started yet.
+    unsafe { wercode_core::environment::drop_leftovers() };
     let state = wercode_core::state::load();
     let root = project_root(&state);
     let (settings, settings_error) = wercode_core::config::load();

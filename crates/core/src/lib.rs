@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod document;
+pub mod environment;
 pub mod file_icons;
 pub mod finder;
 pub mod fs_ops;

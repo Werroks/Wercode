@@ -14,6 +14,21 @@ use wercode_core::{file_icons, fs_ops};
 
 use super::files::status_color;
 
+actions!(
+    git,
+    [
+        /// Brings in the remote's commits.
+        Pull,
+        /// Sends the branch's commits to its remote.
+        Push,
+        Fetch,
+        /// Commits with the message in the git panel; without one, puts the
+        /// keyboard in the message field.
+        Commit,
+        StageAll
+    ]
+);
+
 pub enum GitPanelEvent {
     /// A command changed the repository; its status should be read again.
     Changed,
@@ -25,10 +40,36 @@ pub enum GitPanelEvent {
 
 /// The commands that talk to the remote.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Remote {
+pub enum Remote {
     Fetch,
     Pull,
     Push,
+}
+
+/// The last fetch, pull or push, for the status bar: these are often started
+/// by a shortcut while the panel is hidden.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RemoteActivity {
+    #[default]
+    Idle,
+    Running(Remote),
+    /// Git's own words are in the panel.
+    Failed(Remote),
+}
+
+impl RemoteActivity {
+    /// What the status bar says, if anything.
+    pub fn label(self) -> Option<&'static str> {
+        Some(match self {
+            RemoteActivity::Idle => return None,
+            RemoteActivity::Running(Remote::Fetch) => "Fetching\u{2026}",
+            RemoteActivity::Running(Remote::Pull) => "Pulling\u{2026}",
+            RemoteActivity::Running(Remote::Push) => "Pushing\u{2026}",
+            RemoteActivity::Failed(Remote::Fetch) => "Fetch failed",
+            RemoteActivity::Failed(Remote::Pull) => "Pull failed",
+            RemoteActivity::Failed(Remote::Push) => "Push failed",
+        })
+    }
 }
 
 /// Which of the two lists a row belongs to.
@@ -45,6 +86,7 @@ pub struct GitPanel {
     /// A git command is running; the buttons wait for it.
     busy: bool,
     error: Option<String>,
+    activity: RemoteActivity,
     _subscription: Subscription,
 }
 
@@ -61,7 +103,32 @@ impl GitPanel {
                     this.commit(window, cx);
                 }
             });
-        Self { root, git: None, message, busy: false, error: None, _subscription: subscription }
+        Self {
+            root,
+            git: None,
+            message,
+            busy: false,
+            error: None,
+            activity: RemoteActivity::Idle,
+            _subscription: subscription,
+        }
+    }
+
+    pub fn activity(&self) -> RemoteActivity {
+        self.activity
+    }
+
+    pub fn has_message(&self, cx: &App) -> bool {
+        !self.message.read(cx).value().trim().is_empty()
+    }
+
+    pub fn focus_message(&self, window: &mut Window, cx: &mut App) {
+        self.message.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    pub fn stage_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.paths(List::Changes);
+        self.move_files(List::Changes, paths, window, cx);
     }
 
     pub fn set_git(&mut self, git: Option<Arc<RepoStatus>>, cx: &mut Context<Self>) {
@@ -91,12 +158,17 @@ impl GitPanel {
         }
         self.busy = true;
         self.error = None;
+        self.activity = RemoteActivity::Idle;
         cx.notify();
         let root = self.root.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_executor().spawn(async move { command(&root) }).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
+                if let RemoteActivity::Running(command) = this.activity {
+                    this.activity =
+                        if result.is_ok() { RemoteActivity::Idle } else { RemoteActivity::Failed(command) };
+                }
                 match result {
                     Ok(()) => done(this, window, cx),
                     Err(error) => this.error = Some(error),
@@ -126,7 +198,10 @@ impl GitPanel {
 
     /// Fetches, pulls or pushes. Git's own words are shown when it fails
     /// (no remote, rejected push, no way to ask for a password).
-    fn remote(&mut self, command: Remote, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn remote(&mut self, command: Remote, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy || self.git.is_none() {
+            return;
+        }
         let has_upstream = self.git.as_ref().is_some_and(|git| git.has_upstream);
         self.run(
             move |root| match command {
@@ -138,6 +213,7 @@ impl GitPanel {
             window,
             cx,
         );
+        self.activity = RemoteActivity::Running(command);
     }
 
     /// Asks, then throws away the changes to a file: a tracked file goes back
@@ -167,7 +243,7 @@ impl GitPanel {
     }
 
     /// Commits the staged files; with nothing staged, everything that changed.
-    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let message = self.message.read(cx).value().trim().to_string();
         if message.is_empty() {
             self.error = Some("Write a commit message first.".into());
@@ -441,5 +517,9 @@ impl GitPanel {
 
     pub fn message_text(&self, cx: &App) -> String {
         self.message.read(cx).value().to_string()
+    }
+
+    pub fn message_focused(&self, window: &Window, cx: &App) -> bool {
+        self.message.read(cx).focus_handle(cx).is_focused(window)
     }
 }

@@ -6,6 +6,7 @@ use std::rc::Rc;
 use gpui_kit::*;
 
 use crate::editor::Save;
+use crate::panel::git::{Commit, Fetch, Pull, Push, StageAll};
 use crate::term::{
     ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
 };
@@ -46,6 +47,12 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("workspace.switch_branch", "Workspace", SwitchBranch, []),
         shortcut!("workspace.new_window", "Workspace", NewWindow, ["ctrl-shift-n"]),
         shortcut!("workspace.settings", "Workspace", OpenSettings, []),
+        // Up sends commits away, down brings them in, like the arrows on the buttons.
+        shortcut!("git.push", "Workspace", Push, ["ctrl-shift-up"]),
+        shortcut!("git.pull", "Workspace", Pull, ["ctrl-shift-down"]),
+        shortcut!("git.fetch", "Workspace", Fetch, ["ctrl-shift-r"]),
+        shortcut!("git.commit", "Workspace", Commit, ["ctrl-shift-enter"]),
+        shortcut!("git.stage_all", "Workspace", StageAll, []),
         shortcut!("terminal.toggle", "TerminalArea", ToggleTerminal, ["ctrl-shift-j"]),
         shortcut!("terminal.new_tab", "TerminalArea", NewTab, ["ctrl-shift-t"]),
         shortcut!("terminal.close_tab", "TerminalArea", CloseTab, ["ctrl-shift-q"]),

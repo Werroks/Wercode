@@ -21,7 +21,8 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 - `crates/core` — no window, tested without a GPU: settings, state, themes,
   shell lookup, PTY terminal, links, git status, file listing, finding a file
   by name, reading and
-  writing documents, project search, watching the folder for changes.
+  writing documents, project search, watching the folder for changes,
+  dropping what the program that started Wercode left in its environment.
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
   `panel/` (file tree, search, git panel), `editor.rs` (a file in a tab),
@@ -68,5 +69,13 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   command gets a line there, not a `KeyBinding` of its own.
 - In a test module `use super::*` next to `use gpui_kit::*` makes `#[test]`
   mean the library's macro; import the names you need instead.
+- Wercode started from Claude Code (`cargo run` in its tools) inherits
+  `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `NO_COLOR=1` and git settings
+  meant for a program. `core::environment::drop_leftovers()` removes them as
+  the first line of `main`; keep it before anything that starts a thread.
+- `drive.ps1`'s `text:` (WM_CHAR) does not reach the current window. Type
+  with `key:` and virtual key codes; switch the window to the English layout
+  first (`WM_INPUTLANGCHANGEREQUEST` with `LoadKeyboardLayout("00000409")`),
+  or the letters come out in the user's layout.
 - After finishing a feature, update `docs/features.csv` and
   `docs/build-log.md`.

@@ -24,6 +24,10 @@ actions!(
         PrevPane,
         /// Shows the terminal and puts the keyboard in it, or puts it away.
         ToggleTerminal,
+        /// Looks for text in the output of the terminal with the keyboard.
+        Find,
+        /// Gives the terminal tab a name of its own.
+        RenameTab,
     ]
 );
 

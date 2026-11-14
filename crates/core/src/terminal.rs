@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use alacritty_terminal::event::{Event as AEvent, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
+use alacritty_terminal::term::search::RegexSearch;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, Color, CursorShape, NamedColor};
 use anyhow::{Context as _, Result};
@@ -426,6 +427,33 @@ impl Terminal {
         self.term.lock().unwrap().selection = None;
     }
 
+    /// Finds `text` in the output, screen and scrollback, going to older
+    /// output (`older`) or newer from the last match, or from the bottom when
+    /// there is none. The match is selected and scrolled into view. Lower-case
+    /// text matches either case; a capital letter makes the case count.
+    pub fn find(&self, text: &str, older: bool) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let Ok(mut regex) = RegexSearch::new(&regex::escape(text)) else { return false };
+        let mut term = self.term.lock().unwrap();
+        let last = term.selection.as_ref().and_then(|s| s.to_range(&term));
+        let origin = match (last, older) {
+            // One cell past the last match, so it is not found again.
+            (Some(range), true) => range.start.sub(&*term, Boundary::Grid, 1),
+            (Some(range), false) => range.end.add(&*term, Boundary::Grid, 1),
+            (None, true) => Point::new(term.bottommost_line(), term.last_column()),
+            (None, false) => Point::new(term.topmost_line(), Column(0)),
+        };
+        let (direction, side) = if older { (Direction::Left, Side::Left) } else { (Direction::Right, Side::Right) };
+        let Some(found) = term.search_next(&mut regex, origin, direction, side, None) else { return false };
+        let mut selection = Selection::new(SelectionType::Simple, *found.start(), Side::Left);
+        selection.update(*found.end(), Side::Right);
+        term.selection = Some(selection);
+        term.scroll_to_point(*found.start());
+        true
+    }
+
     /// The selected text, or `None` when nothing (or only whitespace-free emptiness) is selected.
     pub fn selection_text(&self) -> Option<String> {
         let term = self.term.lock().unwrap();
@@ -586,6 +614,13 @@ mod tests {
             seen = text(&term.frame(&palette)).contains("wercode-ok");
         }
         assert!(seen, "screen was:\n{}", text(&term.frame(&palette)));
+
+        // Finding selects the match; lower case matches either case, a
+        // capital makes the case count.
+        assert!(term.find("WERCODE-ok".to_lowercase().as_str(), true));
+        assert_eq!(term.selection_text().as_deref(), Some("wercode-ok"));
+        assert!(!term.find("Wercode-OK", true));
+        assert!(!term.find("", true));
 
         term.resize(100, 30);
         assert_eq!(term.size(), (100, 30));

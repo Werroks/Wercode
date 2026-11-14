@@ -8,7 +8,7 @@ use gpui_kit::*;
 use crate::editor::Save;
 use crate::panel::git::{Commit, Fetch, Pull, Push, StageAll};
 use crate::term::{
-    ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
+    ClosePane, CloseTab, Find, NewTab, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
 };
 use crate::theme::AppState;
 use crate::workspace::{
@@ -64,6 +64,9 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("terminal.previous_tab", "TerminalArea", PrevTab, ["ctrl-shift-tab", "ctrl-pageup"]),
         shortcut!("terminal.next_pane", "TerminalArea", NextPane, ["ctrl-alt-right", "ctrl-alt-down"]),
         shortcut!("terminal.previous_pane", "TerminalArea", PrevPane, ["ctrl-alt-left", "ctrl-alt-up"]),
+        // Ctrl+Shift+F finds in the project's files; S for "search" here.
+        shortcut!("terminal.find", "Terminal", Find, ["ctrl-shift-s"]),
+        shortcut!("terminal.rename_tab", "TerminalArea", RenameTab, []),
         // Plain Ctrl+S is safe here: the keyboard is in a text editor, not in a shell.
         shortcut!("editor.save", "EditorView", Save, ["ctrl-s"]),
     ]

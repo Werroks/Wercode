@@ -27,7 +27,12 @@ pub struct Layout {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum TabLayout {
-    Terminals { panes: PaneLayout },
+    Terminals {
+        panes: PaneLayout,
+        /// The name the user gave the tab, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     File { path: PathBuf },
 }
 
@@ -37,6 +42,9 @@ pub enum PaneLayout {
     Terminal {
         /// The shell's directory, when it was known.
         cwd: Option<PathBuf>,
+        /// The shell chosen for this terminal; none means the one in the settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<String>,
     },
     Split {
         /// One above the other instead of side by side.
@@ -179,11 +187,14 @@ mod tests {
         let split = PaneLayout::Split {
             stacked: true,
             ratio: 0.3,
-            first: Box::new(PaneLayout::Terminal { cwd: Some(dir.join("src")) }),
-            second: Box::new(PaneLayout::Terminal { cwd: None }),
+            first: Box::new(PaneLayout::Terminal { cwd: Some(dir.join("src")), shell: Some("cmd.exe".into()) }),
+            second: Box::new(PaneLayout::Terminal { cwd: None, shell: None }),
         };
         assert_eq!(split.terminals(), 2);
-        let tabs = vec![TabLayout::Terminals { panes: split }, TabLayout::File { path: dir.join("a.rs") }];
+        let tabs = vec![
+            TabLayout::Terminals { panes: split, name: Some("server".into()) },
+            TabLayout::File { path: dir.join("a.rs") },
+        ];
         s.layouts.insert(dir.clone(), Layout { tabs, active: 1, ..Layout::default() });
         save_to(&path, &s).unwrap();
         assert_eq!(load_from(&path), s);

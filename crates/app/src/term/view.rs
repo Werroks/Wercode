@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::terminal::{
@@ -18,7 +21,7 @@ use wercode_core::links::{self, Link, LinkTarget};
 use wercode_core::theme::Rgb;
 
 use super::mouse::{self, Kind as MouseKind};
-use super::{SendBackTab, SendTab, input};
+use super::{Find, SendBackTab, SendTab, input};
 use crate::theme::{AppState, hsla};
 use wercode_core::i18n::{t, tf};
 
@@ -39,6 +42,14 @@ pub enum TerminalViewEvent {
     Exited(Option<u32>),
     /// The user clicked a file path in the output.
     OpenPath { path: PathBuf, line: Option<u32>, col: Option<u32> },
+}
+
+/// The field for finding text in the output.
+struct FindBar {
+    input: Entity<InputState>,
+    /// The last look found nothing.
+    missed: bool,
+    _subscription: Subscription,
 }
 
 pub struct TerminalView {
@@ -62,6 +73,10 @@ pub struct TerminalView {
     _blink: Task<()>,
     dirty: Arc<AtomicBool>,
     _events: Option<Task<()>>,
+    /// The field for finding text in the output, while it is open.
+    find: Option<FindBar>,
+    /// The shell asked for when it was opened; `None` is the settings' one.
+    chosen_shell: Option<String>,
 }
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
@@ -73,9 +88,14 @@ impl Focusable for TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(cwd: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+    /// A terminal running `shell` (a setting such as "pwsh" or a path), or
+    /// the shell in the settings when it is `None`.
+    pub fn with_shell(cwd: Option<PathBuf>, chosen: Option<String>, cx: &mut Context<Self>) -> Self {
         let settings = cx.global::<AppState>().settings.clone();
-        let shell = wercode_core::shell::resolve(&settings.shell, &settings.shell_args);
+        let shell = match &chosen {
+            Some(setting) => wercode_core::shell::resolve(setting, &[]),
+            None => wercode_core::shell::resolve(&settings.shell, &settings.shell_args),
+        };
         let title: SharedString = shell
             .program
             .file_stem()
@@ -153,6 +173,8 @@ impl TerminalView {
             _blink: blink,
             dirty,
             _events: Some(events),
+            find: None,
+            chosen_shell: chosen,
         }
     }
 
@@ -274,6 +296,126 @@ impl TerminalView {
             term.scroll_to_bottom();
             term.paste(&text);
         }
+    }
+
+    /// Opens the field for finding text in the output, with the selected
+    /// text in it, or puts the keyboard back in it.
+    /// The shell this terminal was opened with, when it is not the default.
+    pub fn chosen_shell(&self) -> Option<String> {
+        self.chosen_shell.clone()
+    }
+
+    pub fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bar) = &self.find {
+            bar.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+            return;
+        }
+        let selected = self.term.as_ref().and_then(|t| t.selection_text()).filter(|s| !s.contains('\n'));
+        let input = cx.new(|cx| {
+            let input = InputState::new(window, cx).placeholder(t("Find in this terminal"));
+            match selected {
+                Some(text) => input.default_value(text),
+                None => input,
+            }
+        });
+        let subscription = cx.subscribe_in(&input, window, |this, input, event: &InputEvent, _, cx| match event {
+            // Each change looks again from the newest output.
+            InputEvent::Change => {
+                let text = input.read(cx).value().to_string();
+                if let Some(term) = &this.term {
+                    term.clear_selection();
+                }
+                this.find_next(&text, true, cx);
+            }
+            InputEvent::PressEnter { .. } => {
+                let text = input.read(cx).value().to_string();
+                this.find_next(&text, true, cx);
+            }
+            _ => {}
+        });
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        self.find = Some(FindBar { input, missed: false, _subscription: subscription });
+        cx.notify();
+    }
+
+    fn find_next(&mut self, text: &str, older: bool, cx: &mut Context<Self>) {
+        let found = self.term.as_ref().is_some_and(|term| term.find(text, older));
+        if let Some(bar) = &mut self.find {
+            bar.missed = !found && !text.is_empty();
+        }
+        cx.notify();
+    }
+
+    fn step_find(&mut self, older: bool, cx: &mut Context<Self>) {
+        let Some(bar) = &self.find else { return };
+        let text = bar.input.read(cx).value().to_string();
+        self.find_next(&text, older, cx);
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn render_find(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let bar = self.find.as_ref()?;
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .id("terminal-find")
+                .test_support()
+                .absolute()
+                .top(px(6.))
+                .right(px(14.))
+                .w(px(330.))
+                .gap_1()
+                .p_1()
+                .rounded_md()
+                .border_1()
+                .border_color(if bar.missed { theme.danger } else { theme.border })
+                .bg(theme.popover)
+                .shadow_md()
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.close_find(window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(div().flex_1().min_w_0().child(Input::new(&bar.input).small()))
+                .when(bar.missed, |d| d.child(div().flex_none().text_xs().text_color(theme.danger).child(t("No results."))))
+                .child(
+                    Button::new("terminal-find-older")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ArrowUp)
+                        .tooltip(t("Older match (Enter)"))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.step_find(true, cx))),
+                )
+                .child(
+                    Button::new("terminal-find-newer")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ArrowDown)
+                        .tooltip(t("Newer match"))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.step_find(false, cx))),
+                )
+                .child(
+                    Button::new("terminal-find-close")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip(t("Close (Esc)"))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_find(window, cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -638,6 +780,7 @@ impl Render for TerminalView {
             .p(px(PADDING))
             .map(|d| if hover.is_some() { d.cursor_pointer() } else { d.cursor_text() })
             .on_action(cx.listener(|this, _: &SendTab, _, cx| this.send(b"\t", cx)))
+            .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
             .on_action(cx.listener(|this, _: &SendBackTab, _, cx| this.send(b"\x1b[Z", cx)))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
@@ -842,6 +985,16 @@ impl Render for TerminalView {
                     .child(text),
             );
         }
-        root.into_any_element()
+        // The field sits next to the terminal, not in it, so what is typed
+        // there never reaches the shell.
+        let find = self.render_find(cx);
+        div().size_full().relative().child(root).children(find).into_any_element()
+    }
+}
+
+#[cfg(test)]
+impl TerminalView {
+    pub fn find_is_open(&self) -> bool {
+        self.find.is_some()
     }
 }

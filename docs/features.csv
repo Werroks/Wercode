@@ -24,6 +24,9 @@ Settings: font size theme shell,settings,must,yes,yes,gear button in the title b
 Restore last workspace and layout on launch,workspace,must,yes,yes,last project; panel; panel width; window size and position; tabs with their splits and each shell's folder; open files; kept per project; terminal output is not kept
 Terminal splits (side by side and stacked),terminal,must,yes,yes,user decision 2026-11-11; Ctrl+Shift+D / Ctrl+Shift+E; draggable divider; at most 4 terminals per tab; each terminal of a split has its own close cross; covered by UI tests
 Dark theme by default plus several built-in color schemes in settings,settings,must,yes,yes,user decision 2026-11-11; own palettes only; 5 schemes chosen on the settings screen
+Find in terminal output,terminal,should,yes,yes,Ctrl+Shift+S in a terminal (Ctrl+Shift+F stays Find in Files) or Terminal: Find in the palette; field over the top right of the terminal; newest match first; Enter and the up arrow go to older matches; the match is selected and scrolled into view; lower case matches either case; Esc closes; covered by tests
+Rename and reorder tabs,terminal,should,yes,yes,double-click a terminal tab or Terminal: Rename Tab in the palette; Enter keeps the name; an empty name goes back to the automatic one; Esc cancels; the name is kept for the next launch; tabs are dragged to a new place; covered by a UI test
+Choose the shell for a new terminal,terminal,should,yes,yes,the arrow next to + lists the shells found (PowerShell 7; Windows PowerShell; Command Prompt; Git Bash; WSL; zsh bash fish elsewhere); a split runs the same shell; each terminal's shell is kept for the next launch
 Clickable file paths and URLs in terminal output,terminal,should,yes,partial,Ctrl+click; detection unit-tested; pointer part not hand-tested; a path opens in the editor at its line
 Click file opens it in the built-in editor,files,must,yes,yes,from the file tree and from the git panel; a file that is not UTF-8 text or is over 20 MB gets a note and an Open in the Default App button
 Insert file path into terminal (click or drag),files,should,partial,yes,Alt+click on a file; Insert Path into Terminal in the menu; or drag a file or folder from the tree onto the terminal; relative to the shell's folder; quoted when needed; files dropped from another program are typed too (that part not checked by hand)
@@ -45,10 +48,10 @@ Word-level diff highlighting,git,could,yes,no,
 Commit history / graph,git,must,yes,yes,GRAPH section under the changes in the git panel with a border to drag; lanes and dots in colours like VS Code; the checked-out commit has a ring; branch and tag badges; author; a card with hash and time on hover; a click lists the commit's files and a click on a file opens what it changed in a tab; folds away; 200 commits and Show More; follows new commits, fetches and pulls; covered by a UI test
 Stage individual hunks,git,could,yes,no,
 Git worktrees switcher,git,could,yes,no,useful for parallel CLI agents
-Custom themes from file,settings,could,yes,no,
+Custom themes from file,settings,could,yes,no,later: the user asked to keep it for the future (2026-11-14)
 Sidebar on left option,shell,could,yes,yes,panel_side in settings.toml
 Multiple windows,workspace,could,yes,yes,New window in the project menu and the palette; Ctrl+Shift+N; starts on the welcome screen; all windows are one process
-Image preview,files,could,yes,no,
+Image preview,files,could,yes,no,later: the user asked to keep it for the future (2026-11-14)
 Built-in editor: open edit save with syntax highlight,editor,must,yes,yes,user decision 2026-11-11; the component library editor; Ctrl+S; keeps CRLF and BOM; 20 grammars compiled in
 Editor tabs alongside terminal tabs,editor,must,yes,yes,one tab bar; a file takes a whole tab and does not split
 Undo redo find and replace in file,editor,must,yes,yes,provided by the editor component; Ctrl+Z / Ctrl+Y / Ctrl+F / Ctrl+H covered by a UI test; the find bar itself not clicked by hand
@@ -57,8 +60,8 @@ Reload file changed on disk (agent edits it),editor,must,partial,yes,checked onc
 Search button: project-wide text search panel,search,must,yes,yes,Ctrl+Shift+F; match case / whole word / regex; results by file as they are found; a click opens the file at the line; skips ignored and binary files and files over 4 MB; stops at 5000 lines; no replace across files
 Recent projects switcher at the top of the window,workspace,must,yes,yes,covered by a UI test
 Terminal as a panel below the files (as in the reference),shell,should,yes,yes,user request 2026-11-13; Layout on the settings screen: one row of tabs (default) or terminal below files; files above with their own tabs and terminals below with theirs; the line between them drags; Ctrl+Shift+J shows or hides the terminal; with no file open the terminals take the whole space; applied at once; height and hidden state kept per project
-Editor splits,editor,could,yes,no,
-LSP (go to definition hover diagnostics),editor,could,yes,no,after MVP and opt-in; language servers use a lot of RAM
+Editor splits,editor,could,yes,no,later: the user asked to keep it for the future (2026-11-14)
+LSP (go to definition hover diagnostics),editor,could,yes,no,after MVP and opt-in; language servers use a lot of RAM; later: the user asked to keep it for the future (2026-11-14)
 AI chat and agent panel,ai,skip,yes,skip,user runs a CLI agent in the terminal
 Tab autocomplete model,ai,skip,yes,skip,Cursor's own model and service
 Cloud agents and handoff,ai,skip,yes,skip,Cursor's infrastructure

@@ -8,16 +8,18 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use wercode_core::{file_icons, fs_ops};
+use wercode_core::{file_icons, fs_ops, shell};
 use wercode_core::state::{Layout, PaneLayout, TabLayout};
 
 use super::view::{TerminalView, TerminalViewEvent};
 use super::{
-    ClosePane, CloseTab, NewTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
+    ClosePane, CloseTab, Find, NewTab, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
     ToggleTerminal,
 };
 use crate::diff::DiffView;
@@ -117,7 +119,10 @@ impl Node {
     /// What to write down so this part of the tab can be put back later.
     fn layout(&self, cx: &App) -> PaneLayout {
         match self {
-            Node::Leaf(pane) => PaneLayout::Terminal { cwd: pane.read(cx).cwd() },
+            Node::Leaf(pane) => {
+                let pane = pane.read(cx);
+                PaneLayout::Terminal { cwd: pane.cwd(), shell: pane.chosen_shell() }
+            }
             Node::Split(split) => PaneLayout::Split {
                 stacked: split.axis == Axis::Vertical,
                 ratio: split.ratio,
@@ -156,7 +161,38 @@ enum Body {
 
 struct Tab {
     id: usize,
+    /// A name the user gave a terminal tab; without one it shows what runs in it.
+    name: Option<String>,
     body: Body,
+}
+
+/// A tab being dragged to another place in the row.
+#[derive(Clone)]
+pub struct DraggedTab {
+    id: usize,
+    label: SharedString,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .text_sm()
+            .child(self.label.clone())
+    }
+}
+
+/// The field on a tab while it is being renamed.
+struct Renaming {
+    tab: usize,
+    input: Entity<InputState>,
+    _subscription: Subscription,
 }
 
 impl Tab {
@@ -238,6 +274,8 @@ pub struct TerminalArea {
     dock_dragging: bool,
     /// Where the files and the terminal were last laid out together.
     dock_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// A terminal tab whose name is being typed.
+    renaming: Option<Renaming>,
 }
 
 impl Focusable for TerminalArea {
@@ -268,6 +306,7 @@ impl TerminalArea {
             terminal_hidden: layout.is_some_and(|l| l.terminal_hidden),
             dock_dragging: false,
             dock_bounds: Rc::default(),
+            renaming: None,
         };
         if let Some(layout) = layout {
             this.restore(layout, window, cx);
@@ -376,7 +415,9 @@ impl TerminalArea {
             .tabs
             .iter()
             .filter_map(|tab| match &tab.body {
-                Body::Terminals { root, .. } => Some(TabLayout::Terminals { panes: root.layout(cx) }),
+                Body::Terminals { root, .. } => {
+                    Some(TabLayout::Terminals { panes: root.layout(cx), name: tab.name.clone() })
+                }
                 Body::Editor(editor) => Some(TabLayout::File { path: editor.read(cx).path().to_path_buf() }),
                 Body::Diff(_) => None,
             })
@@ -417,7 +458,7 @@ impl TerminalArea {
             None => {
                 let diff = cx.new(|cx| DiffView::new(root, path, staged, untracked, cx));
                 let id = self.id();
-                self.tabs.push(Tab { id, body: Body::Diff(diff) });
+                self.tabs.push(Tab { id, name: None, body: Body::Diff(diff) });
                 self.tabs.len() - 1
             }
         };
@@ -455,7 +496,7 @@ impl TerminalArea {
             None => {
                 let diff = cx.new(|cx| DiffView::of_commit(root, path, hash, parent, cx));
                 let id = self.id();
-                self.tabs.push(Tab { id, body: Body::Diff(diff) });
+                self.tabs.push(Tab { id, name: None, body: Body::Diff(diff) });
                 self.tabs.len() - 1
             }
         };
@@ -471,13 +512,14 @@ impl TerminalArea {
                         self.push_editor(path.clone(), window, cx);
                     }
                 }
-                TabLayout::Terminals { panes } => {
+                TabLayout::Terminals { panes, name } => {
                     let mut room = MAX_PANES;
                     let Some(root) = self.restore_node(panes, &mut room, window, cx) else { continue };
                     let mut leaves = Vec::new();
                     root.leaves(&mut leaves);
                     let id = self.id();
-                    self.tabs.push(Tab { id, body: Body::Terminals { root, active: leaves[0].clone() } });
+                    let name = name.clone();
+                    self.tabs.push(Tab { id, name, body: Body::Terminals { root, active: leaves[0].clone() } });
                 }
             }
         }
@@ -491,11 +533,11 @@ impl TerminalArea {
         cx: &mut Context<Self>,
     ) -> Option<Node> {
         match layout {
-            PaneLayout::Terminal { cwd } => {
+            PaneLayout::Terminal { cwd, shell } => {
                 *room = room.checked_sub(1)?;
                 // The folder may have been deleted since; the project folder is still there.
                 let cwd = cwd.clone().filter(|dir| dir.is_dir()).unwrap_or_else(|| self.root_dir.clone());
-                Some(Node::Leaf(self.spawn_pane(cwd, window, cx)))
+                Some(Node::Leaf(self.spawn_pane_with(cwd, shell.clone(), window, cx)))
             }
             PaneLayout::Split { stacked, ratio, first, second } => {
                 let first = self.restore_node(first, room, window, cx);
@@ -522,7 +564,7 @@ impl TerminalArea {
         let subscription = cx.subscribe(&editor, |_, _, _: &EditorEvent, cx| cx.notify());
         self.subscriptions.insert(editor.entity_id(), subscription);
         let id = self.id();
-        self.tabs.push(Tab { id, body: Body::Editor(editor) });
+        self.tabs.push(Tab { id, name: None, body: Body::Editor(editor) });
         self.tabs.len() - 1
     }
 
@@ -655,8 +697,15 @@ impl TerminalArea {
         self.next_id
     }
 
-    fn spawn_pane(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Pane {
-        let pane = cx.new(|cx| TerminalView::new(Some(cwd), cx));
+    /// A terminal running `shell`, or the shell in the settings.
+    fn spawn_pane_with(
+        &mut self,
+        cwd: PathBuf,
+        shell: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Pane {
+        let pane = cx.new(|cx| TerminalView::with_shell(Some(cwd), shell, cx));
         let subscription = cx.subscribe_in(&pane, window, |this, pane, event, window, cx| match event {
             TerminalViewEvent::TitleChanged => cx.notify(),
             // A shell that ended normally (`exit`) takes its pane with it. After
@@ -672,13 +721,66 @@ impl TerminalArea {
     }
 
     fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_tab_with(None, window, cx);
+    }
+
+    /// A new terminal tab running `shell`, or the shell in the settings.
+    pub fn add_tab_with(&mut self, shell: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         // New tabs start in the project folder; splits follow the pane they came from.
-        let pane = self.spawn_pane(self.root_dir.clone(), window, cx);
+        let pane = self.spawn_pane_with(self.root_dir.clone(), shell, window, cx);
         let id = self.id();
-        self.tabs.push(Tab { id, body: Body::Terminals { root: Node::Leaf(pane.clone()), active: pane } });
+        self.tabs.push(Tab { id, name: None, body: Body::Terminals { root: Node::Leaf(pane.clone()), active: pane } });
         self.active = self.tabs.len() - 1;
         self.note_active();
         self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Puts a field on a terminal tab to give it a name of its own.
+    fn start_rename(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id && t.is_terminal()) else { return };
+        let current = tab.name.clone().unwrap_or_else(|| {
+            tab.active_pane().map(|p| p.read(cx).label().to_string()).unwrap_or_default()
+        });
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        let subscription = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::PressEnter { .. } | InputEvent::Blur => this.finish_rename(true, window, cx),
+            _ => {}
+        });
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        self.renaming = Some(Renaming { tab: id, input, _subscription: subscription });
+        cx.notify();
+    }
+
+    /// Takes the typed name (an empty one goes back to the automatic name),
+    /// or, without `keep`, leaves the name as it was.
+    fn finish_rename(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renaming) = self.renaming.take() else { return };
+        if keep {
+            let typed = renaming.input.read(cx).value().trim().to_string();
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == renaming.tab) {
+                tab.name = (!typed.is_empty()).then_some(typed);
+            }
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Moves a tab to where another one is, keeping the same tab active.
+    fn move_tab(&mut self, id: usize, to: usize, cx: &mut Context<Self>) {
+        let Some(from) = self.tabs.iter().position(|t| t.id == id) else { return };
+        if from == to || to >= self.tabs.len() {
+            return;
+        }
+        let active = self.tabs.get(self.active).map(|t| t.id);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        if let Some(index) = active.and_then(|id| self.tabs.iter().position(|t| t.id == id)) {
+            self.active = index;
+        }
         cx.notify();
     }
 
@@ -707,7 +809,9 @@ impl TerminalArea {
         // Only terminals split; a file takes its whole tab.
         let Some(source) = tab.active_pane().cloned() else { return };
         let cwd = source.read(cx).cwd().unwrap_or_else(|| self.root_dir.clone());
-        let pane = self.spawn_pane(cwd, window, cx);
+        // A split runs the same shell as the terminal it came from.
+        let shell = source.read(cx).chosen_shell();
+        let pane = self.spawn_pane_with(cwd, shell, window, cx);
         let id = self.id();
         if let Body::Terminals { root, active } = &mut self.tabs[self.active].body
             && root.split(source.entity_id(), axis, &pane, id)
@@ -843,6 +947,7 @@ impl TerminalArea {
         };
         self.subscriptions.remove(&id);
         let tab = self.tabs.remove(index);
+        let name = tab.name.clone();
         let Body::Terminals { root, active } = tab.body else { return };
         let was_active = active.entity_id() == id;
         match root.without(id) {
@@ -850,7 +955,7 @@ impl TerminalArea {
                 let mut panes = Vec::new();
                 root.leaves(&mut panes);
                 let active = if was_active { panes[0].clone() } else { active };
-                self.tabs.insert(index, Tab { id: tab.id, body: Body::Terminals { root, active } });
+                self.tabs.insert(index, Tab { id: tab.id, name, body: Body::Terminals { root, active } });
             }
             None => self.settle(index, true, cx),
         }
@@ -1044,7 +1149,10 @@ impl TerminalArea {
             let tab_id = tab.id;
             let selected = Some(index) == shown;
             let (label, picture, unsaved) = match &tab.body {
-                Body::Terminals { active, .. } => (active.read(cx).label(), None, false),
+                Body::Terminals { active, .. } => {
+                    let label = tab.name.clone().map(SharedString::from).unwrap_or_else(|| active.read(cx).label());
+                    (label, None, false)
+                }
                 Body::Editor(editor) => {
                     let editor = editor.read(cx);
                     let name = editor.file_name();
@@ -1058,8 +1166,14 @@ impl TerminalArea {
                 }
             };
             let panes = tab.panes().len();
+            let terminal = tab.is_terminal();
+            let renaming = self.renaming.as_ref().filter(|r| r.tab == tab_id).map(|r| r.input.clone());
+            let dragged = DraggedTab { id: tab_id, label: label.clone() };
             h_flex()
                 .id(("tab", tab_id))
+                .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+                .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(hover_bg))
+                .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.move_tab(dragged.id, index, cx)))
                 .h_full()
                 .min_w(px(64.))
                 .max_w(px(240.))
@@ -1073,8 +1187,13 @@ impl TerminalArea {
                 .text_color(if selected { foreground } else { muted })
                 .when(selected, |d| d.bg(active_bg))
                 .hover(|s| s.text_color(foreground))
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.select_tab(index, window, cx);
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    // A double click on a terminal tab gives it a name.
+                    if terminal && event.click_count() >= 2 {
+                        this.start_rename(tab_id, window, cx);
+                    } else {
+                        this.select_tab(index, window, cx);
+                    }
                 }))
                 .on_mouse_down(
                     MouseButton::Middle,
@@ -1083,7 +1202,20 @@ impl TerminalArea {
                     }),
                 )
                 .when_some(picture, |d, picture| d.child(img(picture).flex_none().size(px(14.))))
-                .child(div().flex_1().min_w_0().truncate().child(label))
+                .child(match renaming {
+                    Some(input) => div()
+                        .flex_1()
+                        .min_w(px(160.))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            if event.keystroke.key == "escape" {
+                                this.finish_rename(false, window, cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .child(Input::new(&input).xsmall())
+                        .into_any_element(),
+                    None => div().flex_1().min_w_0().truncate().child(label).into_any_element(),
+                })
                 // A dot marks edits that are not on disk yet.
                 .when(unsaved, |d| d.child(div().flex_none().size(px(7.)).rounded_full().bg(foreground)))
                 .when(panes > 1, |d| d.child(div().flex_none().text_xs().text_color(muted).child(format!("{panes}"))))
@@ -1128,10 +1260,26 @@ impl TerminalArea {
                 this.close_active(window, cx);
             }
         }));
-        let new_tab = div().px_2().flex_none().child(
-            button("new-tab", IconName::Plus, t("New terminal (Ctrl+Shift+T)"))
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_tab(window, cx))),
-        );
+        let area = cx.entity().downgrade();
+        let new_tab = h_flex()
+            .px_2()
+            .flex_none()
+            .child(
+                button("new-tab", IconName::Plus, t("New terminal (Ctrl+Shift+T)"))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_tab(window, cx))),
+            )
+            .child(button("new-tab-shell", IconName::ChevronDown, t("New terminal with another shell")).dropdown_menu(
+                move |menu, _, _| {
+                    let mut menu = menu.label(t("Open a terminal with"));
+                    for found in shell::available() {
+                        let (area, setting) = (area.clone(), found.setting.clone());
+                        menu = menu.item(PopupMenuItem::new(found.name).on_click(move |_, window, cx| {
+                            let _ = area.update(cx, |area, cx| area.add_tab_with(Some(setting.clone()), window, cx));
+                        }));
+                    }
+                    menu
+                },
+            ));
         h_flex()
             .h(px(TAB_BAR_HEIGHT))
             .flex_none()
@@ -1433,6 +1581,21 @@ impl Render for TerminalArea {
             .on_action(cx.listener(move |this, _: &ToggleTerminal, window, cx| {
                 if idle {
                     this.toggle_terminal(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
+                this.turn_to_terminal(cx);
+                if let Some(tab) = this.tabs.get(this.active).filter(|t| t.is_terminal()) {
+                    let id = tab.id;
+                    this.start_rename(id, window, cx);
+                }
+            }))
+            // From the palette: the terminal shown in the terminal row.
+            .on_action(cx.listener(|this, _: &Find, window, cx| {
+                this.turn_to_terminal(cx);
+                let pane = this.tabs.get(this.active).and_then(|tab| tab.active_pane().cloned());
+                if let Some(pane) = pane {
+                    pane.update(cx, |pane, cx| pane.open_find(window, cx));
                 }
             }))
             .child(content)
@@ -1741,7 +1904,7 @@ two
         let layout = area.read_with(cx, |a, cx| a.layout(cx));
         assert_eq!(layout.active, 2);
         assert_eq!(layout.tabs.len(), 3);
-        let TabLayout::Terminals { panes } = &layout.tabs[0] else { panic!("{layout:?}") };
+        let TabLayout::Terminals { panes, .. } = &layout.tabs[0] else { panic!("{layout:?}") };
         assert_eq!(panes.terminals(), 3);
         // Split right, then the right half split down.
         let PaneLayout::Split { stacked: false, second, .. } = panes else { panic!("{panes:?}") };
@@ -1750,7 +1913,7 @@ two
 
         // A layout from the state file: a folder and a file that are gone are
         // left out, a broken ratio is repaired, and no tab gets a fifth terminal.
-        let terminal = |cwd: Option<std::path::PathBuf>| Box::new(PaneLayout::Terminal { cwd });
+        let terminal = |cwd: Option<std::path::PathBuf>| Box::new(PaneLayout::Terminal { cwd, shell: None });
         let split = |stacked, ratio, first, second| Box::new(PaneLayout::Split { stacked, ratio, first, second });
         let crowded = split(
             false,
@@ -1763,7 +1926,7 @@ two
             terminal_hidden: false,
             tabs: vec![
                 TabLayout::File { path: dir.join("gone.txt") },
-                TabLayout::Terminals { panes: *crowded },
+                TabLayout::Terminals { panes: *crowded, name: None },
                 TabLayout::File { path: file.clone() },
             ],
             active: 7,
@@ -1779,7 +1942,7 @@ two
         assert_eq!(layout.tabs.len(), 2);
         assert_eq!(layout.active, 1);
         assert_eq!(layout.tabs[1], TabLayout::File { path: file.clone() });
-        let TabLayout::Terminals { panes } = &layout.tabs[0] else { panic!("{layout:?}") };
+        let TabLayout::Terminals { panes, .. } = &layout.tabs[0] else { panic!("{layout:?}") };
         assert_eq!(panes.terminals(), 4);
         let PaneLayout::Split { stacked: false, ratio, first, second } = panes else { panic!("{panes:?}") };
         assert_eq!(*ratio, 0.5);
@@ -1862,5 +2025,60 @@ two
         cx.update(|cx| crate::theme::change_settings(cx, |s| s.layout = "tabs".into()).unwrap());
         assert_eq!(on_screen(cx), (false, false));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    async fn tabs_are_renamed_moved_and_opened_with_another_shell(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, area) = open(cx);
+        let names = |cx: &mut TestAppContext| {
+            area.read_with(cx, |a, _| a.tabs.iter().map(|t| t.name.clone()).collect::<Vec<_>>())
+        };
+
+        // The palette's Rename Tab puts a field on the tab; Enter keeps the name.
+        cx.update_window(window, |_, window, cx| {
+            area.update(cx, |a, cx| a.focus_active(window, cx));
+            window.dispatch_action(Box::new(super::RenameTab), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(area.read_with(cx, |a, _| a.renaming.is_some()));
+        let input = area.read_with(cx, |a, _| a.renaming.as_ref().unwrap().input.clone());
+        cx.update_window(window, |_, window, cx| {
+            input.update(cx, |input, cx| input.set_value("server", window, cx));
+        })
+        .unwrap();
+        press(cx, window, &["enter"]);
+        assert_eq!(names(cx), [Some("server".to_string())]);
+        assert!(area.read_with(cx, |a, _| a.renaming.is_none()));
+        // The name is written down and comes back with the tab.
+        let layout = area.read_with(cx, |a, cx| a.layout(cx));
+        let wercode_core::state::TabLayout::Terminals { name, .. } = &layout.tabs[0] else { panic!("{layout:?}") };
+        assert_eq!(name.as_deref(), Some("server"));
+
+        // A tab with another shell; a split of it runs the same shell.
+        let shell = wercode_core::shell::resolve("auto", &[]).program.to_string_lossy().into_owned();
+        cx.update_window(window, |_, window, cx| {
+            area.update(cx, |a, cx| a.add_tab_with(Some(shell.clone()), window, cx));
+        })
+        .unwrap();
+        press(cx, window, &["ctrl-shift-d"]);
+        let chosen = area.read_with(cx, |a, cx| {
+            a.tabs[1].panes().iter().map(|p| p.read(cx).chosen_shell()).collect::<Vec<_>>()
+        });
+        assert_eq!(chosen, [Some(shell.clone()), Some(shell.clone())]);
+
+        // Dragging the second tab before the first keeps it the active one.
+        let second = area.read_with(cx, |a, _| a.tabs[1].id);
+        area.update(cx, |a, cx| a.move_tab(second, 0, cx));
+        assert_eq!(names(cx), [None, Some("server".to_string())]);
+        assert_eq!(area.read_with(cx, |a, _| (a.active, a.tabs[0].id)), (0, second));
+
+        // The find field opens over the terminal with the keyboard in it.
+        press(cx, window, &["ctrl-shift-s"]);
+        let pane = area.read_with(cx, |a, _| a.tabs[0].active_pane().cloned().unwrap());
+        assert!(pane.read_with(cx, |p, _| p.find_is_open()));
+        press(cx, window, &["escape"]);
+        assert!(!pane.read_with(cx, |p, _| p.find_is_open()));
     }
 }

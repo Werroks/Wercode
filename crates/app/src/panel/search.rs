@@ -15,6 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::file_icons;
 use wercode_core::search::{self, FileMatches, Query, Summary};
+use wercode_core::i18n::{self, Language, t, tf, tn};
 
 /// Typing starts a search this long after the last key.
 const TYPING_PAUSE: Duration = Duration::from_millis(250);
@@ -43,6 +44,8 @@ enum Toggle {
 pub struct SearchPanel {
     root: PathBuf,
     input: Entity<InputState>,
+    /// The language the field's hint is in; it follows the settings.
+    language: Language,
     options: Query,
     files: Vec<FileMatches>,
     /// Files whose lines are hidden.
@@ -68,7 +71,7 @@ impl Drop for SearchPanel {
 
 impl SearchPanel {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search in files"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t("Search in files")));
         let subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| match event {
             InputEvent::Change => this.start(TYPING_PAUSE, cx),
             InputEvent::PressEnter { .. } => this.start(Duration::ZERO, cx),
@@ -77,6 +80,7 @@ impl SearchPanel {
         Self {
             root,
             input,
+            language: i18n::language(),
             options: Query::default(),
             files: Vec::new(),
             collapsed: HashSet::new(),
@@ -210,17 +214,20 @@ impl SearchPanel {
     /// The line under the field: how the search went.
     fn status(&self) -> Option<String> {
         if let Some(error) = &self.error {
-            return Some(format!("Not a valid pattern: {error}"));
+            return Some(tf("Not a valid pattern: {error}", &[("error", error)]));
         }
         let lines: usize = self.files.iter().map(|f| f.lines.len()).sum();
-        let count = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
-        let found = format!("{} in {}", count(lines, "result"), count(self.files.len(), "file"));
+        let results = tn(lines as u64, "{n} result", "{n} results", &[]);
+        let files = tn(self.files.len() as u64, "{n} file", "{n} files", &[]);
+        let found = tf("{results} in {files}", &[("results", &results), ("files", &files)]);
         match self.summary {
-            None if self.running && lines == 0 => Some("Searching\u{2026}".into()),
-            None if self.running => Some(format!("{found}, still searching\u{2026}")),
+            None if self.running && lines == 0 => Some(t("Searching\u{2026}").into()),
+            None if self.running => Some(tf("{found}, still searching\u{2026}", &[("found", &found)])),
             None => None,
-            Some(_) if lines == 0 => Some("No results.".into()),
-            Some(summary) if summary.truncated => Some(format!("{found}. There are more: only the first are shown.")),
+            Some(_) if lines == 0 => Some(t("No results.").into()),
+            Some(summary) if summary.truncated => {
+                Some(tf("{found}. There are more: only the first are shown.", &[("found", &found)]))
+            }
             Some(_) => Some(found),
         }
     }
@@ -288,7 +295,11 @@ impl SearchPanel {
 }
 
 impl Render for SearchPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.language != i18n::language() {
+            self.language = i18n::language();
+            self.input.update(cx, |input, cx| input.set_placeholder(t("Search in files"), window, cx));
+        }
         let theme = cx.theme();
         let (muted, danger) = (theme.muted_foreground, theme.danger);
         let option = |id: &'static str, label: &'static str, tooltip: &'static str, on: bool, which: Toggle| {
@@ -302,9 +313,9 @@ impl Render for SearchPanel {
         };
         let options = h_flex()
             .gap_1()
-            .child(option("search-case", "Aa", "Match case", self.options.case_sensitive, Toggle::Case))
-            .child(option("search-word", "ab", "Match whole word", self.options.whole_word, Toggle::Word))
-            .child(option("search-regex", ".*", "Use a regular expression", self.options.regex, Toggle::Regex));
+            .child(option("search-case", "Aa", t("Match case"), self.options.case_sensitive, Toggle::Case))
+            .child(option("search-word", "ab", t("Match whole word"), self.options.whole_word, Toggle::Word))
+            .child(option("search-regex", ".*", t("Use a regular expression"), self.options.regex, Toggle::Regex));
         let status = self.status();
         let failed = self.error.is_some();
         let count = self.rows.len();

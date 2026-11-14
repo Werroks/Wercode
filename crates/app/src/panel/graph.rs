@@ -15,6 +15,7 @@ use wercode_core::git::{FileStatus, RepoStatus};
 use wercode_core::history::{self, Ago, Commit, CommitFile, RefKind, Row};
 
 use super::files::status_color;
+use wercode_core::i18n::{t, tn};
 
 /// How many commits are read at first, and how many more each time.
 const PAGE: usize = 200;
@@ -188,14 +189,14 @@ impl GraphView {
                 cx.notify();
             }))
             .child(Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).xsmall())
-            .child(div().flex_1().child("GRAPH"))
+            .child(div().flex_1().child(t("GRAPH")))
             .when(!collapsed, |d| {
                 d.child(
                     Button::new("graph-refresh")
                         .ghost()
                         .xsmall()
                         .icon(Icon::new(Lucide::RefreshCw))
-                        .tooltip("Refresh")
+                        .tooltip(t("Refresh"))
                         .loading(self.loading)
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
@@ -242,8 +243,9 @@ impl GraphView {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle(index, cx)))
             .tooltip(move |_, cx| cx.new(|_| tip.clone()).into())
             .child(lanes_canvas(row.clone(), lanes, theme.background, is_head))
-            .child(div().flex_1().min_w_0().truncate().child(commit.subject.clone()))
-            .children(refs)
+            // The message keeps some room; badges give way first.
+            .child(div().flex_1().min_w(px(90.)).truncate().child(commit.subject.clone()))
+            .child(h_flex().flex_shrink_1().min_w_0().overflow_hidden().gap_1().children(refs))
             .child(div().flex_none().max_w(px(120.)).truncate().text_xs().text_color(muted).child(commit.author.clone()))
             .into_any_element()
     }
@@ -270,9 +272,9 @@ impl GraphView {
                 .into_any_element()
         };
         let files = match &open.files {
-            None => return vec![note("Reading\u{2026}".into(), muted)],
+            None => return vec![note(t("Reading\u{2026}").into(), muted)],
             Some(Err(error)) => return vec![note(error.clone(), danger)],
-            Some(Ok(files)) if files.is_empty() => return vec![note("No files changed.".into(), muted)],
+            Some(Ok(files)) if files.is_empty() => return vec![note(t("No files changed.").into(), muted)],
             Some(Ok(files)) => files,
         };
         let repo = self.repo.clone().unwrap_or_else(|| self.root.clone());
@@ -339,7 +341,7 @@ impl Render for GraphView {
             items.extend(self.render_files(commit, row, lanes, cx));
         }
         if commits.is_empty() && !self.loading {
-            items.push(div().p_3().text_sm().text_color(muted).child("No commits yet.").into_any_element());
+            items.push(div().p_3().text_sm().text_color(muted).child(t("No commits yet.")).into_any_element());
         }
         if commits.len() >= self.limit {
             items.push(
@@ -349,7 +351,7 @@ impl Render for GraphView {
                         Button::new("graph-more")
                             .ghost()
                             .small()
-                            .label("Show More Commits")
+                            .label(t("Show More Commits"))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_more(cx))),
                     )
                     .into_any_element(),
@@ -432,15 +434,14 @@ fn lanes_canvas(row: Row, lanes: usize, background: Hsla, head: bool) -> impl In
 
 /// "5 minutes ago" and the like.
 pub fn ago_text(ago: Ago) -> String {
-    let count = |n: u64, one: &str, many: &str| if n == 1 { one.to_string() } else { many.replace("{n}", &n.to_string()) };
     match ago {
-        Ago::JustNow => "just now".into(),
-        Ago::Minutes(n) => count(n, "1 minute ago", "{n} minutes ago"),
-        Ago::Hours(n) => count(n, "1 hour ago", "{n} hours ago"),
-        Ago::Days(n) => count(n, "1 day ago", "{n} days ago"),
-        Ago::Weeks(n) => count(n, "1 week ago", "{n} weeks ago"),
-        Ago::Months(n) => count(n, "1 month ago", "{n} months ago"),
-        Ago::Years(n) => count(n, "1 year ago", "{n} years ago"),
+        Ago::JustNow => t("just now").to_string(),
+        Ago::Minutes(n) => tn(n, "{n} minute ago", "{n} minutes ago", &[]),
+        Ago::Hours(n) => tn(n, "{n} hour ago", "{n} hours ago", &[]),
+        Ago::Days(n) => tn(n, "{n} day ago", "{n} days ago", &[]),
+        Ago::Weeks(n) => tn(n, "{n} week ago", "{n} weeks ago", &[]),
+        Ago::Months(n) => tn(n, "{n} month ago", "{n} months ago", &[]),
+        Ago::Years(n) => tn(n, "{n} year ago", "{n} years ago", &[]),
     }
 }
 

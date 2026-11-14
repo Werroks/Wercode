@@ -20,6 +20,7 @@ use wercode_core::theme::Rgb;
 use super::mouse::{self, Kind as MouseKind};
 use super::{SendBackTab, SendTab, input};
 use crate::theme::{AppState, hsla};
+use wercode_core::i18n::{t, tf};
 
 const PADDING: f32 = 8.0;
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -653,7 +654,7 @@ impl Render for TerminalView {
             .on_scroll(cx.listener(Self::on_scroll));
 
         let Some(term) = self.term.clone() else {
-            let message = self.error.clone().unwrap_or_else(|| "Could not start a shell".into());
+            let message = self.error.clone().unwrap_or_else(|| t("Could not start a shell").into());
             return root.child(div().text_color(danger).child(message)).into_any_element();
         };
 
@@ -828,8 +829,8 @@ impl Render for TerminalView {
         root = root.child(grid);
         if let Some(code) = self.exit_code {
             let text = match code {
-                Some(code) => format!("Process exited with code {code}"),
-                None => "Process exited".to_string(),
+                Some(code) => tf("Process exited with code {code}", &[("code", &code)]),
+                None => t("Process exited").to_string(),
             };
             root = root.child(
                 div()

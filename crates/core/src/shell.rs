@@ -1,6 +1,7 @@
 //! Finding a shell to run.
 
 use std::path::{Path, PathBuf};
+use crate::i18n::t;
 
 #[derive(Debug, Clone)]
 pub struct Shell {
@@ -53,7 +54,7 @@ pub fn available() -> Vec<Found> {
     if cfg!(windows) {
         add("PowerShell 7", find_in_path("pwsh.exe"));
         add("Windows PowerShell", find_in_path("powershell.exe"));
-        add("Command Prompt", find_in_path("cmd.exe"));
+        add(t("Command Prompt"), find_in_path("cmd.exe"));
         // Git for Windows keeps bash out of PATH unless asked to add it.
         let git_bash = std::env::var_os("ProgramFiles")
             .map(|dir| PathBuf::from(dir).join("Git").join("bin").join("bash.exe"))

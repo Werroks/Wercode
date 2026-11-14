@@ -7,6 +7,7 @@ use gpui_kit::component::diff::{Diff, DiffFile, DiffState};
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 use wercode_core::{document, git, history};
+use wercode_core::i18n::{t, tf};
 
 pub struct DiffView {
     /// The project folder, where git is run.
@@ -40,7 +41,7 @@ impl DiffView {
             untracked,
             commit: None,
             state,
-            note: Some("Reading changes\u{2026}".into()),
+            note: Some(t("Reading changes\u{2026}").into()),
             task: None,
         };
         this.reload(cx);
@@ -57,7 +58,7 @@ impl DiffView {
             untracked: false,
             commit: Some((hash, parent)),
             state,
-            note: Some("Reading changes\u{2026}".into()),
+            note: Some(t("Reading changes\u{2026}").into()),
             task: None,
         };
         this.reload(cx);
@@ -83,8 +84,8 @@ impl DiffView {
         let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         match &self.commit {
             Some((hash, _)) => format!("{name} ({})", &hash[..hash.len().min(7)]),
-            None if self.staged => format!("{name} (staged)"),
-            None => format!("{name} (changes)"),
+            None if self.staged => tf("{name} (staged)", &[("name", &name)]),
+            None => tf("{name} (changes)", &[("name", &name)]),
         }
     }
 
@@ -115,9 +116,9 @@ impl DiffView {
             let _ = this.update(cx, |this, cx| {
                 let files = patch.and_then(|patch| DiffFile::parse(&patch).map_err(|e| format!("{e:?}")));
                 this.note = match &files {
-                    Ok(files) if files.is_empty() => Some("No changes in this file.".into()),
+                    Ok(files) if files.is_empty() => Some(t("No changes in this file.").into()),
                     Ok(_) => None,
-                    Err(error) => Some(format!("Could not show the changes: {error}")),
+                    Err(error) => Some(tf("Could not show the changes: {error}", &[("error", error)])),
                 };
                 let files: Vec<DiffFile> =
                     files.unwrap_or_default().into_iter().map(|file| file.with_language(language)).collect();

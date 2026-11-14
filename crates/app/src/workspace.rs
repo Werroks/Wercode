@@ -34,6 +34,7 @@ use crate::term::{
 };
 use crate::theme::AppState;
 use crate::update::{self, CheckForUpdates, CloseForUpdate};
+use wercode_core::i18n::{t, tf, tn};
 
 actions!(
     workspace,
@@ -133,33 +134,33 @@ impl PanelKind {
 /// next to each one comes from the key bindings.
 fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
     vec![
-        ("Terminal: Show or Hide", Box::new(ToggleTerminal)),
-        ("Terminal: New Tab", Box::new(NewTab)),
-        ("Terminal: Split Right", Box::new(SplitRight)),
-        ("Terminal: Split Down", Box::new(SplitDown)),
-        ("Terminal: Close Pane", Box::new(ClosePane)),
-        ("Terminal: Close Tab", Box::new(CloseTab)),
-        ("Terminal: Next Tab", Box::new(NextTab)),
-        ("Terminal: Previous Tab", Box::new(PrevTab)),
-        ("Terminal: Next Pane", Box::new(NextPane)),
-        ("Terminal: Previous Pane", Box::new(PrevPane)),
-        ("File: Go to File\u{2026}", Box::new(QuickOpen)),
-        ("File: Save", Box::new(Save)),
-        ("View: Toggle Side Panel", Box::new(TogglePanel)),
-        ("View: Show Files", Box::new(ShowFiles)),
-        ("Search: Find in Files", Box::new(ShowSearch)),
-        ("View: Show Git", Box::new(ShowGit)),
-        ("Window: New Window", Box::new(NewWindow)),
-        ("Project: Open Folder\u{2026}", Box::new(OpenFolder)),
-        ("Project: Switch to Recent\u{2026}", Box::new(SwitchProject)),
-        ("Preferences: Settings", Box::new(OpenSettings)),
-        ("Git: Switch or Create Branch\u{2026}", Box::new(SwitchBranch)),
-        ("Git: Pull", Box::new(git_panel::Pull)),
-        ("Git: Push", Box::new(git_panel::Push)),
-        ("Git: Fetch", Box::new(git_panel::Fetch)),
-        ("Git: Commit", Box::new(git_panel::Commit)),
-        ("Git: Stage All Changes", Box::new(git_panel::StageAll)),
-        ("Help: Check for Updates", Box::new(CheckForUpdates)),
+        (t("Terminal: Show or Hide"), Box::new(ToggleTerminal)),
+        (t("Terminal: New Tab"), Box::new(NewTab)),
+        (t("Terminal: Split Right"), Box::new(SplitRight)),
+        (t("Terminal: Split Down"), Box::new(SplitDown)),
+        (t("Terminal: Close Pane"), Box::new(ClosePane)),
+        (t("Terminal: Close Tab"), Box::new(CloseTab)),
+        (t("Terminal: Next Tab"), Box::new(NextTab)),
+        (t("Terminal: Previous Tab"), Box::new(PrevTab)),
+        (t("Terminal: Next Pane"), Box::new(NextPane)),
+        (t("Terminal: Previous Pane"), Box::new(PrevPane)),
+        (t("File: Go to File\u{2026}"), Box::new(QuickOpen)),
+        (t("File: Save"), Box::new(Save)),
+        (t("View: Toggle Side Panel"), Box::new(TogglePanel)),
+        (t("View: Show Files"), Box::new(ShowFiles)),
+        (t("Search: Find in Files"), Box::new(ShowSearch)),
+        (t("View: Show Git"), Box::new(ShowGit)),
+        (t("Window: New Window"), Box::new(NewWindow)),
+        (t("Project: Open Folder\u{2026}"), Box::new(OpenFolder)),
+        (t("Project: Switch to Recent\u{2026}"), Box::new(SwitchProject)),
+        (t("Preferences: Settings"), Box::new(OpenSettings)),
+        (t("Git: Switch or Create Branch\u{2026}"), Box::new(SwitchBranch)),
+        (t("Git: Pull"), Box::new(git_panel::Pull)),
+        (t("Git: Push"), Box::new(git_panel::Push)),
+        (t("Git: Fetch"), Box::new(git_panel::Fetch)),
+        (t("Git: Commit"), Box::new(git_panel::Commit)),
+        (t("Git: Stage All Changes"), Box::new(git_panel::StageAll)),
+        (t("Help: Check for Updates"), Box::new(CheckForUpdates)),
     ]
 }
 
@@ -388,7 +389,7 @@ impl Workspace {
         self.switcher_open = false;
         self.palette = None;
         let Some(project) = self.project.as_ref().filter(|p| p.git.is_some()) else { return };
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("New branch name, then Enter"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t("New branch name, then Enter")));
         let subscription = cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 let name = input.read(cx).value().to_string();
@@ -508,7 +509,7 @@ impl Workspace {
                         cx.stop_propagation();
                     }
                 }))
-                .child(div().px_3().py_1().text_xs().text_color(muted).child("BRANCHES"))
+                .child(div().px_3().py_1().text_xs().text_color(muted).child(t("BRANCHES")))
                 .child(v_flex().id("branch-list").flex_1().min_h_0().overflow_y_scroll().children(rows))
                 .child(div().h(px(1.)).bg(border))
                 .child(div().p_1().child(Input::new(&menu.input).small()))
@@ -541,16 +542,17 @@ impl Workspace {
         let (busy, unsaved) = (area.busy_count(cx), area.unsaved_count(cx));
         let terminals = project.terminals.clone();
         if unsaved > 0 {
-            let title = if unsaved == 1 {
-                "Save changes to 1 file before closing?".to_string()
-            } else {
-                format!("Save changes to {unsaved} files before closing?")
-            };
+            let title = tn(
+                unsaved as u64,
+                "Save changes to {n} file before closing?",
+                "Save changes to {n} files before closing?",
+                &[],
+            );
             let answer = window.prompt(
                 PromptLevel::Warning,
                 &title,
-                Some("Your changes will be lost if you do not save them."),
-                &["Save All", "Don't Save", "Cancel"],
+                Some(t("Your changes will be lost if you do not save them.")),
+                &[t("Save All"), t("Don't Save"), t("Cancel")],
                 cx,
             );
             cx.spawn_in(window, async move |this, cx| match answer.await {
@@ -577,12 +579,13 @@ impl Workspace {
             return false;
         }
         if busy > 0 && cx.global::<AppState>().settings.confirm_close {
-            let detail = if busy == 1 {
-                "A program is still running in a terminal. Closing the window will stop it.".to_string()
-            } else {
-                format!("Programs are still running in {busy} terminals. Closing the window will stop them.")
-            };
-            let answer = window.prompt(PromptLevel::Warning, "Close window?", Some(&detail), &["Close", "Cancel"], cx);
+            let detail = tn(
+                busy as u64,
+                "A program is still running in a terminal. Closing the window will stop it.",
+                "Programs are still running in {n} terminals. Closing the window will stop them.",
+                &[],
+            );
+            let answer = window.prompt(PromptLevel::Warning, t("Close window?"), Some(&detail), &[t("Close"), t("Cancel")], cx);
             cx.spawn_in(window, async move |this, cx| {
                 if answer.await == Ok(0) {
                     let _ = this.update_in(cx, |this, window, _| {
@@ -970,15 +973,25 @@ impl Workspace {
         let name = current.map(folder_name).unwrap_or_default();
         // Losing edits is the worse of the two, so it is the one that gets said.
         let detail = if unsaved > 0 {
-            format!("{unsaved} file(s) in {name} have unsaved changes. Switching discards them.")
+            tn(
+                unsaved as u64,
+                "{n} file in {name} has unsaved changes. Switching discards them.",
+                "{n} files in {name} have unsaved changes. Switching discards them.",
+                &[("name", &name)],
+            )
         } else {
-            format!("{busy} terminal(s) in {name} are still running a program. Switching closes them.")
+            tn(
+                busy as u64,
+                "{n} terminal in {name} is still running a program. Switching closes it.",
+                "{n} terminals in {name} are still running a program. Switching closes them.",
+                &[("name", &name)],
+            )
         };
         let answer = window.prompt(
             PromptLevel::Warning,
-            "Switch project?",
+            t("Switch project?"),
             Some(&detail),
-            &["Switch", "Cancel"],
+            &[t("Switch"), t("Cancel")],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1086,7 +1099,7 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Settings)
-                        .tooltip("Settings")
+                        .tooltip(t("Settings"))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(window, cx))),
                 ),
             )
@@ -1100,7 +1113,7 @@ impl Workspace {
                                 .ghost()
                                 .xsmall()
                                 .icon(if on_right { IconName::PanelRight } else { IconName::PanelLeft })
-                                .tooltip("Toggle side panel (Ctrl+Shift+B)")
+                                .tooltip(t("Toggle side panel (Ctrl+Shift+B)"))
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_panel(cx))),
                         ),
                 )
@@ -1162,7 +1175,7 @@ impl Workspace {
             .hover(|s| s.bg(hover))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.pick_folder(window, cx)))
             .child(Icon::new(IconName::FolderOpen).small().text_color(muted))
-            .child("Open folder\u{2026}")
+            .child(t("Open folder\u{2026}"))
             .child(div().flex_1())
             .child(div().text_xs().text_color(muted).child("Ctrl+Shift+O"))
     }
@@ -1182,7 +1195,7 @@ impl Workspace {
             .hover(|s| s.bg(hover))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_window(cx)))
             .child(Icon::new(IconName::Plus).small().text_color(muted))
-            .child("New window")
+            .child(t("New window"))
             .child(div().flex_1())
             .children(
                 crate::keymap::label_for("workspace.new_window", cx)
@@ -1228,7 +1241,7 @@ impl Workspace {
                 .shadow_lg()
                 // Presses inside the list must not reach the backdrop, which closes it.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(div().px_3().py_1().text_xs().text_color(muted).child("RECENT PROJECTS"))
+                .child(div().px_3().py_1().text_xs().text_color(muted).child(t("RECENT PROJECTS")))
                 .children(rows)
                 .child(div().my_1().h(px(1.)).bg(border))
                 .child(self.open_folder_row(cx))
@@ -1260,7 +1273,7 @@ impl Workspace {
                 .child(
                     Command::new(palette)
                         .items(items)
-                        .placeholder("Type a command\u{2026}")
+                        .placeholder(t("Type a command\u{2026}"))
                         .bordered(false)
                         // The item's action has been dispatched by now; all
                         // that is left is to get out of the way.
@@ -1320,9 +1333,9 @@ impl Workspace {
                         .items(items)
                         // The list is already the answer to what was typed.
                         .filterable(false)
-                        .placeholder("Type a file name\u{2026}")
+                        .placeholder(t("Type a file name\u{2026}"))
                         .bordered(false)
-                        .empty(|_, _, _| div().px_3().py_2().text_sm().child("No file matches"))
+                        .empty(|_, _, _| div().px_3().py_2().text_sm().child(t("No file matches")))
                         .on_query(move |query, _, cx| {
                             let _ = on_query.update(cx, |this, cx| this.finder_query(query, cx));
                         })
@@ -1368,12 +1381,12 @@ impl Workspace {
                         .pb_4()
                         .text_sm()
                         .text_color(muted)
-                        .child("A terminal with your files and git next to it. Open a folder to start."),
+                        .child(t("A terminal with your files and git next to it. Open a folder to start.")),
                 )
                 .child(self.open_folder_row(cx))
                 .when(has_recent, |d| {
                     d.child(div().my_2().h(px(1.)).bg(border))
-                        .child(div().px_3().py_1().text_xs().text_color(muted).child("RECENT PROJECTS"))
+                        .child(div().px_3().py_1().text_xs().text_color(muted).child(t("RECENT PROJECTS")))
                         .children(rows)
                 }),
         )
@@ -1413,14 +1426,14 @@ impl Workspace {
                     .gap_1()
                     .border_b_1()
                     .border_color(border)
-                    .child(tab("panel-files", Icon::new(IconName::Folder), "Files", PanelKind::Files))
+                    .child(tab("panel-files", Icon::new(IconName::Folder), t("Files"), PanelKind::Files))
                     .child(tab(
                         "panel-search",
                         Icon::new(IconName::Search),
-                        "Search (Ctrl+Shift+F)",
+                        t("Search (Ctrl+Shift+F)"),
                         PanelKind::Search,
                     ))
-                    .child(tab("panel-git", Icon::new(Lucide::GitBranch), "Git (Ctrl+Shift+G)", PanelKind::Git)),
+                    .child(tab("panel-git", Icon::new(Lucide::GitBranch), t("Git (Ctrl+Shift+G)"), PanelKind::Git)),
             )
             .child(div().flex_1().min_h_0().child(body))
     }
@@ -1448,9 +1461,8 @@ impl Workspace {
                 };
                 let branch = match &git.branch {
                     Some(name) => name.clone(),
-                    None => format!("detached at {}", git.head),
+                    None => tf("detached at {commit}", &[("commit", &git.head)]),
                 };
-                let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
                 h_flex()
                     .id("status-git")
                     .test_support()
@@ -1472,32 +1484,32 @@ impl Workspace {
                             item()
                                 .text_color(theme.link)
                                 .child(Icon::new(IconName::ArrowUp).xsmall())
-                                .child(format!("{} to push", plural(git.ahead as usize, "commit"))),
+                                .child(tn(git.ahead as u64, "{n} commit to push", "{n} commits to push", &[])),
                         )
                     })
                     .when(git.behind > 0, |d| {
                         d.child(
                             item()
                                 .child(Icon::new(IconName::ArrowDown).xsmall())
-                                .child(format!("{} to pull", plural(git.behind as usize, "commit"))),
+                                .child(tn(git.behind as u64, "{n} commit to pull", "{n} commits to pull", &[])),
                         )
                     })
-                    .when(git.branch.is_some() && !git.has_upstream, |d| d.child(item().child("not published")))
+                    .when(git.branch.is_some() && !git.has_upstream, |d| d.child(item().child(t("not published"))))
                     .when(changed > 0, |d| {
-                        d.child(item().text_color(theme.warning).child(plural(changed, "change")))
+                        d.child(item().text_color(theme.warning).child(tn(changed as u64, "{n} change", "{n} changes", &[])))
                     })
                     .when(conflicts > 0, |d| {
                         d.child(
                             item()
                                 .text_color(theme.danger)
                                 .child(Icon::new(IconName::TriangleAlert).xsmall())
-                                .child(plural(conflicts, "conflict")),
+                                .child(tn(conflicts as u64, "{n} conflict", "{n} conflicts", &[])),
                         )
                     })
-                    .when(changed == 0, |d| d.child(item().child("clean")))
+                    .when(changed == 0, |d| d.child(item().child(t("clean"))))
                     .into_any_element()
             }
-            None => item().child("No git repository").into_any_element(),
+            None => item().child(t("No git repository")).into_any_element(),
         };
 
         h_flex()
@@ -1547,7 +1559,7 @@ impl Workspace {
                     .rounded_sm()
                     .hover(|s| s.bg(theme.secondary_hover))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_palette(window, cx)))
-                    .child("Commands  Ctrl+Shift+P"),
+                    .child(t("Commands  Ctrl+Shift+P")),
             )
     }
 
@@ -1561,17 +1573,17 @@ impl Workspace {
                 .text_color(theme.link)
                 .hover(|s| s.bg(theme.secondary_hover))
                 .child(Icon::new(IconName::ArrowDown).xsmall())
-                .child(format!("Restart to update to {version}"))
+                .child(tf("Restart to update to {version}", &[("version", &version)]))
                 .on_click(cx.listener(|_, _: &ClickEvent, _, cx| update::restart(cx))),
             update::Status::Downloading(version) => item
                 .child(Icon::new(Lucide::RefreshCw).xsmall())
-                .child(format!("Downloading Wercode {version}\u{2026}")),
-            update::Status::Checking => item.child("Checking for updates\u{2026}"),
-            update::Status::UpToDate => item.child("Wercode is up to date"),
+                .child(tf("Downloading Wercode {version}\u{2026}", &[("version", &version)])),
+            update::Status::Checking => item.child(t("Checking for updates\u{2026}")),
+            update::Status::UpToDate => item.child(t("Wercode is up to date")),
             update::Status::Failed(_) => item
                 .text_color(theme.danger)
                 .child(Icon::new(IconName::TriangleAlert).xsmall())
-                .child("Could not check for updates"),
+                .child(t("Could not check for updates")),
             update::Status::Idle | update::Status::Off => item,
         }
     }

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use crate::i18n::tf;
 
 /// The shortcuts of one command: a single one, or several that do the same.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +57,9 @@ pub struct Settings {
     /// Look for new versions now and then, download them in the background
     /// and install them when Wercode restarts.
     pub auto_update: bool,
+    /// The language of the interface: "auto" follows the computer, or one of
+    /// "en", "ru", "de", "es", "zh".
+    pub language: String,
     /// Shortcuts that replace the built-in ones, by command name:
     /// `"terminal.new_tab" = "ctrl-shift-y"`. Written by hand in the `[keys]`
     /// table; the settings screen lists the names.
@@ -93,6 +97,7 @@ impl Default for Settings {
             panel_side: "left".into(),
             layout: "tabs".into(),
             auto_update: true,
+            language: "auto".into(),
             keys: BTreeMap::new(),
         }
     }
@@ -163,7 +168,7 @@ pub fn save_to(path: &Path, settings: &Settings) -> Result<(), String> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     // A file that does not parse is the user's to fix; rewriting it would lose their work.
     let mut doc: toml_edit::DocumentMut =
-        text.parse().map_err(|e| format!("{} has a mistake and was not changed: {e}", path.display()))?;
+        text.parse().map_err(|e| tf("{file} has a mistake and was not changed: {error}", &[("file", &path.display()), ("error", &e)]))?;
     let on_disk: Settings = toml::from_str(&text).unwrap_or_default();
     let table = |s: &Settings| match toml::Value::try_from(s) {
         Ok(toml::Value::Table(table)) => table,
@@ -181,7 +186,7 @@ pub fn save_to(path: &Path, settings: &Settings) -> Result<(), String> {
             doc[key.as_str()] = item;
         }
     }
-    let failed = |e: std::io::Error| format!("Could not write {}: {e}", path.display());
+    let failed = |e: std::io::Error| tf("Could not write {file}: {error}", &[("file", &path.display()), ("error", &e)]);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(failed)?;
     }

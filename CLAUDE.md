@@ -4,9 +4,13 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 
 ## Rules
 
-- The interface is English. Every string the user sees goes in English; a Russian
-  translation comes later as a second language, so keep strings easy to find
-  (no text assembled from fragments).
+- The interface is written in English and translated into Russian, German,
+  Spanish and Chinese (`language` in the settings; "auto" follows the
+  computer). Every text the user sees goes through `t("…")`, `tf("… {name}", …)`
+  or `tn(n, "{n} file", "{n} files", …)` from `core::i18n`, as one whole
+  sentence (no text assembled from fragments), and gets a line in each of
+  `crates/core/locales/*.toml`. A core test fails on a missing or stale
+  translation or a changed `{hole}`.
 - This repository is public. Never commit anything that identifies the author or
   the machine: real names, e-mail addresses, home-directory paths, hostnames,
   screenshots showing a prompt with a user name, tokens, local config. Use
@@ -23,7 +27,8 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   by name, reading and
   writing documents, project search, watching the folder for changes,
   dropping what the program that started Wercode left in its environment,
-  commit history and its graph (`history`), updates (`update`).
+  commit history and its graph (`history`), updates (`update`), the
+  languages of the interface (`i18n`, with `locales/`).
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
   `panel/` (file tree, search, git panel, `graph.rs` for the history),

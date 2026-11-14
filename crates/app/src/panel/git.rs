@@ -15,6 +15,7 @@ use wercode_core::{file_icons, fs_ops};
 
 use super::files::status_color;
 use super::graph::{GraphEvent, GraphView};
+use wercode_core::i18n::{self, Language, t, tf};
 
 actions!(
     git,
@@ -66,12 +67,12 @@ impl RemoteActivity {
     pub fn label(self) -> Option<&'static str> {
         Some(match self {
             RemoteActivity::Idle => return None,
-            RemoteActivity::Running(Remote::Fetch) => "Fetching\u{2026}",
-            RemoteActivity::Running(Remote::Pull) => "Pulling\u{2026}",
-            RemoteActivity::Running(Remote::Push) => "Pushing\u{2026}",
-            RemoteActivity::Failed(Remote::Fetch) => "Fetch failed",
-            RemoteActivity::Failed(Remote::Pull) => "Pull failed",
-            RemoteActivity::Failed(Remote::Push) => "Push failed",
+            RemoteActivity::Running(Remote::Fetch) => t("Fetching\u{2026}"),
+            RemoteActivity::Running(Remote::Pull) => t("Pulling\u{2026}"),
+            RemoteActivity::Running(Remote::Push) => t("Pushing\u{2026}"),
+            RemoteActivity::Failed(Remote::Fetch) => t("Fetch failed"),
+            RemoteActivity::Failed(Remote::Pull) => t("Pull failed"),
+            RemoteActivity::Failed(Remote::Push) => t("Push failed"),
         })
     }
 }
@@ -91,6 +92,8 @@ pub struct GitPanel {
     busy: bool,
     error: Option<String>,
     activity: RemoteActivity,
+    /// The language the message field's hint is in; it follows the settings.
+    language: Language,
     /// The history under the changes.
     graph: Entity<GraphView>,
     _subscriptions: [Subscription; 3],
@@ -101,7 +104,7 @@ impl EventEmitter<GitPanelEvent> for GitPanel {}
 impl GitPanel {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(1, 8).placeholder("Commit message (Ctrl+Enter to commit)")
+            TextareaState::new(window, cx).auto_grow(1, 8).placeholder(t("Commit message (Ctrl+Enter to commit)"))
         });
         let subscription =
             cx.subscribe_in(&message, window, |this, _, event: &InputEvent, window, cx| {
@@ -126,6 +129,7 @@ impl GitPanel {
             busy: false,
             error: None,
             activity: RemoteActivity::Idle,
+            language: i18n::language(),
             graph,
             _subscriptions: [subscription, opened, folded],
         }
@@ -239,11 +243,19 @@ impl GitPanel {
     fn discard(&mut self, path: PathBuf, untracked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let (title, detail, button) = if untracked {
-            (format!("Move {name} to the trash?"), "Git does not know this file yet. You can bring it back from the trash.", "Move to Trash")
+            (
+                tf("Move {name} to the trash?", &[("name", &name)]),
+                t("Git does not know this file yet. You can bring it back from the trash."),
+                t("Move to Trash"),
+            )
         } else {
-            (format!("Discard changes in {name}?"), "The file goes back to its last staged or committed text. This cannot be undone.", "Discard")
+            (
+                tf("Discard changes in {name}?", &[("name", &name)]),
+                t("The file goes back to its last staged or committed text. This cannot be undone."),
+                t("Discard"),
+            )
         };
-        let answer = window.prompt(PromptLevel::Warning, &title, Some(detail), &[button, "Cancel"], cx);
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(detail), &[button, t("Cancel")], cx);
         cx.spawn_in(window, async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
@@ -264,13 +276,13 @@ impl GitPanel {
     pub fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let message = self.message.read(cx).value().trim().to_string();
         if message.is_empty() {
-            self.error = Some("Write a commit message first.".into());
+            self.error = Some(t("Write a commit message first.").into());
             cx.notify();
             return;
         }
         let Some(git) = &self.git else { return };
         if git.changes.is_empty() {
-            self.error = Some("There is nothing to commit.".into());
+            self.error = Some(t("There is nothing to commit.").into());
             cx.notify();
             return;
         }
@@ -300,8 +312,8 @@ impl GitPanel {
         let theme = cx.theme();
         let (muted, hover) = (theme.muted_foreground, theme.list_hover);
         let (title, all_id, all_icon, all_tip, row_tip) = match list {
-            List::Staged => ("STAGED CHANGES", "git-unstage-all", IconName::Minus, "Unstage all", "Unstage"),
-            List::Changes => ("CHANGES", "git-stage-all", IconName::Plus, "Stage all", "Stage"),
+            List::Staged => (t("STAGED CHANGES"), "git-unstage-all", IconName::Minus, t("Unstage all"), t("Unstage")),
+            List::Changes => (t("CHANGES"), "git-stage-all", IconName::Plus, t("Stage all"), t("Stage")),
         };
         let (prefix, button) = match list {
             List::Staged => ("git-staged", "git-unstage"),
@@ -363,7 +375,7 @@ impl GitPanel {
                             .ghost()
                             .xsmall()
                             .icon(IconName::File)
-                            .tooltip("Open the file")
+                            .tooltip(t("Open the file"))
                             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                                 cx.stop_propagation();
                                 cx.emit(GitPanelEvent::Open(opened.clone()));
@@ -376,7 +388,7 @@ impl GitPanel {
                             .ghost()
                             .xsmall()
                             .icon(Icon::new(Lucide::Undo2))
-                            .tooltip("Discard changes")
+                            .tooltip(t("Discard changes"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 cx.stop_propagation();
@@ -440,7 +452,12 @@ impl GitPanel {
 }
 
 impl Render for GitPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.language != i18n::language() {
+            self.language = i18n::language();
+            let hint = t("Commit message (Ctrl+Enter to commit)");
+            self.message.update(cx, |input, cx| input.set_placeholder(hint, window, cx));
+        }
         let theme = cx.theme();
         let (muted, danger) = (theme.muted_foreground, theme.danger);
         let note = |text: &'static str| div().p_3().text_sm().text_color(muted).child(text);
@@ -448,12 +465,12 @@ impl Render for GitPanel {
         let Some(git) = self.git.clone() else {
             return v_flex()
                 .size_full()
-                .child(note("This folder is not a git repository. Run git init in the terminal to start one."))
+                .child(note(t("This folder is not a git repository. Run git init in the terminal to start one.")))
                 .into_any_element();
         };
         let nothing_staged = git.staged().next().is_none();
         let clean = git.changes.is_empty();
-        let label = if nothing_staged && !clean { "Stage All and Commit" } else { "Commit" };
+        let label = if nothing_staged && !clean { t("Stage All and Commit") } else { t("Commit") };
         let staged = self.render_section(List::Staged, cx);
         let changes = self.render_section(List::Changes, cx);
         let busy = self.busy;
@@ -468,16 +485,16 @@ impl Render for GitPanel {
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.remote(command, window, cx)))
         };
         let count = |word: &str, n: u32| if n > 0 { format!("{word} {n}") } else { word.to_string() };
-        let push_label = if git.has_upstream { count("Push", git.ahead) } else { "Publish".to_string() };
+        let push_label = if git.has_upstream { count(t("Push"), git.ahead) } else { t("Publish").to_string() };
         let remotes = h_flex()
             .gap_1()
-            .child(remote("git-fetch", Lucide::RefreshCw, "Fetch".into(), "Fetch from all remotes", Remote::Fetch))
-            .child(remote("git-pull", Lucide::ArrowDownToLine, count("Pull", git.behind), "Pull", Remote::Pull))
+            .child(remote("git-fetch", Lucide::RefreshCw, t("Fetch").into(), t("Fetch from all remotes"), Remote::Fetch))
+            .child(remote("git-pull", Lucide::ArrowDownToLine, count(t("Pull"), git.behind), t("Pull"), Remote::Pull))
             .child(remote(
                 "git-push",
                 Lucide::ArrowUpFromLine,
                 push_label,
-                if git.has_upstream { "Push" } else { "Push this branch to origin for the first time" },
+                if git.has_upstream { t("Push") } else { t("Push this branch to origin for the first time") },
                 Remote::Push,
             ));
 
@@ -526,7 +543,7 @@ impl GitPanel {
             .overflow_y_scroll()
             .children(staged)
             .children(changes)
-            .when(clean, |d| d.child(div().p_3().text_sm().text_color(muted).child("No changes. The working tree is clean.")));
+            .when(clean, |d| d.child(div().p_3().text_sm().text_color(muted).child(t("No changes. The working tree is clean."))));
         if self.graph.read(cx).collapsed() {
             return v_flex().size_full().child(div().flex_1().min_h_0().child(lists)).child(self.graph.clone()).into_any_element();
         }

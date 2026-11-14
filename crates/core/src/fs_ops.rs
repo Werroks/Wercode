@@ -2,15 +2,16 @@
 //! path the way a shell wants it.
 
 use std::path::{Path, PathBuf};
+use crate::i18n::{t, tf};
 
 /// Gives a file or folder a new name in the same folder. Refuses a name that
 /// is taken, so nothing is ever overwritten.
 pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     let name = new_name.trim();
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
-        return Err("That is not a name a file can have.".into());
+        return Err(t("That is not a name a file can have.").into());
     }
-    let parent = path.parent().ok_or("This cannot be renamed.")?;
+    let parent = path.parent().ok_or(t("This cannot be renamed."))?;
     let target = parent.join(name);
     if target == path {
         return Ok(target);
@@ -18,15 +19,15 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     // Changing only the case of a name is fine where names ignore case.
     let same_file = path.to_string_lossy().to_lowercase() == target.to_string_lossy().to_lowercase();
     if target.exists() && !same_file {
-        return Err(format!("{name} already exists."));
+        return Err(tf("{name} already exists.", &[("name", &name)]));
     }
-    std::fs::rename(path, &target).map_err(|e| format!("Could not rename: {e}"))?;
+    std::fs::rename(path, &target).map_err(|e| tf("Could not rename: {error}", &[("error", &e)]))?;
     Ok(target)
 }
 
 /// Moves a file or folder to the system trash. Nothing is deleted for good.
 pub fn trash(path: &Path) -> Result<(), String> {
-    trash::delete(path).map_err(|e| format!("Could not move it to the trash: {e}"))
+    trash::delete(path).map_err(|e| tf("Could not move it to the trash: {error}", &[("error", &e)]))
 }
 
 /// The path as text to type into a shell: relative to the shell's folder when

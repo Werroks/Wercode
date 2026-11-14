@@ -8,6 +8,7 @@ use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use wercode_core::document::{self, Document, Format, LoadError};
+use wercode_core::i18n::{t, tf};
 
 actions!(editor, [Save]);
 
@@ -213,7 +214,7 @@ impl EditorView {
                         this.error = None;
                         then(window, cx);
                     }
-                    Err(e) => this.error = Some(format!("Could not save {}: {e}", this.file_name())),
+                    Err(e) => this.error = Some(tf("Could not save {name}: {error}", &[("name", &this.file_name()), ("error", &e)])),
                 }
                 cx.emit(EditorEvent::Changed);
                 cx.notify();
@@ -237,11 +238,11 @@ impl EditorView {
             bar()
                 .id("editor-changed")
                 .text_color(theme.warning)
-                .child(div().flex_1().min_w_0().child("This file was changed on disk by another program."))
-                .child(Button::new("editor-reload").small().label("Reload from Disk").on_click(cx.listener(
+                .child(div().flex_1().min_w_0().child(t("This file was changed on disk by another program.")))
+                .child(Button::new("editor-reload").small().label(t("Reload from Disk")).on_click(cx.listener(
                     |this, _: &ClickEvent, window, cx| this.reload(window, cx),
                 )))
-                .child(Button::new("editor-keep").small().ghost().label("Keep My Changes").on_click(cx.listener(
+                .child(Button::new("editor-keep").small().ghost().label(t("Keep My Changes")).on_click(cx.listener(
                     |this, _: &ClickEvent, _, cx| {
                         this.changed_on_disk = false;
                         cx.notify();
@@ -270,7 +271,7 @@ impl Render for EditorView {
                     .child(
                         Button::new("editor-open-outside")
                             .small()
-                            .label("Open in the Default App")
+                            .label(t("Open in the Default App"))
                             .on_click(move |_, _, cx| cx.open_with_system(&path)),
                     )
                     .into_any_element()

@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use crate::i18n::{t, tf};
 
 /// What happened to a file, strongest last: a folder shows the strongest
 /// status found inside it.
@@ -207,7 +208,7 @@ fn run(dir: &Path, args: &[&str], paths: &[PathBuf]) -> Result<(), String> {
     if !paths.is_empty() {
         cmd.arg("--").args(paths);
     }
-    let out = cmd.output().map_err(|e| format!("Could not run git: {e}"))?;
+    let out = cmd.output().map_err(|e| tf("Could not run git: {error}", &[("error", &e)]))?;
     if out.status.success() {
         return Ok(());
     }
@@ -218,7 +219,7 @@ fn run(dir: &Path, args: &[&str], paths: &[PathBuf]) -> Result<(), String> {
     } else if !text.is_empty() {
         text
     } else {
-        format!("git {} failed", args.first().copied().unwrap_or_default())
+        tf("git {command} failed", &[("command", &args.first().copied().unwrap_or_default())])
     })
 }
 
@@ -248,7 +249,7 @@ pub fn unstage(dir: &Path, paths: &[PathBuf]) -> Result<(), String> {
 pub fn commit(dir: &Path, message: &str) -> Result<(), String> {
     let message = message.trim();
     if message.is_empty() {
-        return Err("Write a commit message first.".into());
+        return Err(t("Write a commit message first.").into());
     }
     run(dir, &["commit", "--quiet", "-m", message], &[])
 }
@@ -268,11 +269,11 @@ pub fn diff(dir: &Path, path: &Path, staged: bool, untracked: bool) -> Result<St
         }
         cmd.arg("--").arg(path);
     }
-    let out = cmd.stdout(Stdio::piped()).output().map_err(|e| format!("Could not run git: {e}"))?;
+    let out = cmd.stdout(Stdio::piped()).output().map_err(|e| tf("Could not run git: {error}", &[("error", &e)]))?;
     if out.status.success() || (untracked && out.status.code() == Some(1)) {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err("git could not compare this file.".into())
+        Err(t("git could not compare this file.").into())
     }
 }
 
@@ -321,7 +322,7 @@ pub fn switch(dir: &Path, branch: &str) -> Result<(), String> {
 pub fn create_branch(dir: &Path, name: &str) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("Write a name for the branch first.".into());
+        return Err(t("Write a name for the branch first.").into());
     }
     run(dir, &["switch", "--quiet", "-c", name], &[])
 }

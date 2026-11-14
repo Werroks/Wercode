@@ -15,6 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::{file_icons, fs_ops, fs_tree};
 use wercode_core::git::{FileStatus, RepoStatus};
+use wercode_core::i18n::{t, tf};
 
 /// Upper bound on entries shown at once. Only open folders are read, so this
 /// is reached by opening very many of them, or one with thousands of files.
@@ -71,11 +72,11 @@ fn terminal_editor() -> Option<String> {
 
 fn reveal_label() -> &'static str {
     if cfg!(windows) {
-        "Reveal in File Explorer"
+        t("Reveal in File Explorer")
     } else if cfg!(target_os = "macos") {
-        "Reveal in Finder"
+        t("Reveal in Finder")
     } else {
-        "Show in File Manager"
+        t("Show in File Manager")
     }
 }
 
@@ -268,13 +269,13 @@ impl FilesPanel {
     /// Asks, then moves the file or folder to the system trash.
     fn delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let title = format!("Move {name} to the trash?");
+        let title = tf("Move {name} to the trash?", &[("name", &name)]);
         let detail = if path.is_dir() {
-            "The folder and everything in it will be moved. You can bring it back from the trash."
+            t("The folder and everything in it will be moved. You can bring it back from the trash.")
         } else {
-            "You can bring it back from the trash."
+            t("You can bring it back from the trash.")
         };
-        let answer = window.prompt(PromptLevel::Warning, &title, Some(detail), &["Move to Trash", "Cancel"], cx);
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(detail), &[t("Move to Trash"), t("Cancel")], cx);
         cx.spawn(async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
@@ -360,7 +361,7 @@ impl FilesPanel {
                 self.select_next = Some(path.to_string_lossy().into_owned().into());
                 self.refresh(cx);
             }
-            Err(e) => self.error = Some(format!("Could not create {name}: {e}")),
+            Err(e) => self.error = Some(tf("Could not create {name}: {error}", &[("name", &name), ("error", &e)])),
         }
         cx.notify();
     }
@@ -391,7 +392,7 @@ impl FilesPanel {
                     .ghost()
                     .xsmall()
                     .icon(Icon::new(Lucide::FilePlus))
-                    .tooltip("New file")
+                    .tooltip(t("New file"))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.start_create(Naming::File, window, cx)
                     })),
@@ -401,7 +402,7 @@ impl FilesPanel {
                     .ghost()
                     .xsmall()
                     .icon(Icon::new(Lucide::FolderPlus))
-                    .tooltip("New folder")
+                    .tooltip(t("New folder"))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.start_create(Naming::Folder, window, cx)
                     })),
@@ -411,7 +412,7 @@ impl FilesPanel {
                     .ghost()
                     .xsmall()
                     .icon(Icon::new(Lucide::RefreshCw))
-                    .tooltip("Refresh")
+                    .tooltip(t("Refresh"))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.refresh(cx))),
             )
             .child(
@@ -419,7 +420,7 @@ impl FilesPanel {
                     .ghost()
                     .xsmall()
                     .icon(Icon::new(Lucide::ChevronsDownUp))
-                    .tooltip("Collapse all folders")
+                    .tooltip(t("Collapse all folders"))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.collapse_all(cx))),
             )
     }
@@ -427,12 +428,12 @@ impl FilesPanel {
     fn render_name_field(&self, kind: Naming, dir: &Path, cx: &mut Context<Self>) -> impl IntoElement {
         let place = dir.strip_prefix(&self.root).ok().filter(|p| !p.as_os_str().is_empty());
         let label = match (kind, place) {
-            (Naming::File, None) => "New file".to_string(),
-            (Naming::Folder, None) => "New folder".to_string(),
-            (Naming::File, Some(p)) => format!("New file in {}", p.display()),
-            (Naming::Folder, Some(p)) => format!("New folder in {}", p.display()),
-            (Naming::Rename, Some(p)) => format!("Rename {}", p.display()),
-            (Naming::Rename, None) => "Rename".to_string(),
+            (Naming::File, None) => t("New file").to_string(),
+            (Naming::Folder, None) => t("New folder").to_string(),
+            (Naming::File, Some(p)) => tf("New file in {folder}", &[("folder", &p.display())]),
+            (Naming::Folder, Some(p)) => tf("New folder in {folder}", &[("folder", &p.display())]),
+            (Naming::Rename, Some(p)) => tf("Rename {name}", &[("name", &p.display())]),
+            (Naming::Rename, None) => t("Rename").to_string(),
         };
         v_flex()
             .px_2()
@@ -536,29 +537,29 @@ impl Render for FilesPanel {
                             })
                         };
                         menu.when(folder, |menu| {
-                            menu.item(item("New File\u{2026}", |this, path, window, cx| {
+                            menu.item(item(t("New File\u{2026}"), |this, path, window, cx| {
                                 this.start_naming(Naming::File, path, window, cx)
                             }))
-                            .item(item("New Folder\u{2026}", |this, path, window, cx| {
+                            .item(item(t("New Folder\u{2026}"), |this, path, window, cx| {
                                 this.start_naming(Naming::Folder, path, window, cx)
                             }))
                             .separator()
                         })
-                        .item(item("Insert Path into Terminal", |_, path, _, cx| cx.emit(FilesEvent::Insert(path))))
+                        .item(item(t("Insert Path into Terminal"), |_, path, _, cx| cx.emit(FilesEvent::Insert(path))))
                         .when(!folder && editor.is_some(), |menu| {
-                            menu.item(item("Open in Terminal Editor", |_, path, _, cx| {
+                            menu.item(item(t("Open in Terminal Editor"), |_, path, _, cx| {
                                 cx.emit(FilesEvent::OpenInTerminal(path))
                             }))
                         })
                         .separator()
-                        .item(item("Copy Path", |this, path, _, cx| this.copy_path(&path, false, cx)))
-                        .item(item("Copy Relative Path", |this, path, _, cx| this.copy_path(&path, true, cx)))
+                        .item(item(t("Copy Path"), |this, path, _, cx| this.copy_path(&path, false, cx)))
+                        .item(item(t("Copy Relative Path"), |this, path, _, cx| this.copy_path(&path, true, cx)))
                         .item(item(reveal_label(), |_, path, _, cx| cx.reveal_path(&path)))
                         .separator()
-                        .item(item("Rename\u{2026}", |this, path, window, cx| {
+                        .item(item(t("Rename\u{2026}"), |this, path, window, cx| {
                             this.start_naming(Naming::Rename, path, window, cx)
                         }))
-                        .item(item("Move to Trash", |this, path, window, cx| this.delete(path, window, cx)))
+                        .item(item(t("Move to Trash"), |this, path, window, cx| this.delete(path, window, cx)))
                     })
                     .size_full(),
                 ),
@@ -570,7 +571,7 @@ impl Render for FilesPanel {
                         .py_1()
                         .text_xs()
                         .text_color(muted)
-                        .child(format!("Showing the first {MAX_ENTRIES} entries")),
+                        .child(tf("Showing the first {count} entries", &[("count", &MAX_ENTRIES)])),
                 )
             })
     }

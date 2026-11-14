@@ -24,6 +24,7 @@ use crate::diff::DiffView;
 use crate::editor::{EditorEvent, EditorView};
 use crate::panel::DraggedPath;
 use crate::theme::AppState;
+use wercode_core::i18n::{t, tf, tn};
 
 const TAB_BAR_HEIGHT: f32 = 36.0;
 /// Thickness of the strip between two panes that can be grabbed.
@@ -795,12 +796,12 @@ impl TerminalArea {
             self.remove_tab(id, window, cx);
             return;
         }
-        let title = format!("Save changes to {}?", editor.read(cx).file_name());
+        let title = tf("Save changes to {name}?", &[("name", &editor.read(cx).file_name())]);
         let answer = window.prompt(
             PromptLevel::Warning,
             &title,
-            Some("Your changes will be lost if you do not save them."),
-            &["Save", "Don't Save", "Cancel"],
+            Some(t("Your changes will be lost if you do not save them.")),
+            &[t("Save"), t("Don't Save"), t("Cancel")],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| match answer.await {
@@ -949,7 +950,7 @@ impl TerminalArea {
                                         .ghost()
                                         .xsmall()
                                         .icon(IconName::Close)
-                                        .tooltip("Close this terminal")
+                                        .tooltip(t("Close this terminal"))
                                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                             this.request_close(CloseTarget::Pane(id), window, cx);
                                         })),
@@ -1110,9 +1111,9 @@ impl TerminalArea {
             Group::Terminals => false,
         };
         let close = if on_file {
-            button("close-file", IconName::Close, "Close this file (Ctrl+Shift+W)")
+            button("close-file", IconName::Close, t("Close this file (Ctrl+Shift+W)"))
         } else {
-            button("close-pane", IconName::Close, "Close this terminal (Ctrl+Shift+W)")
+            button("close-pane", IconName::Close, t("Close this terminal (Ctrl+Shift+W)"))
         };
         let close = close.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| match group {
             Group::All => this.close_active(window, cx),
@@ -1128,7 +1129,7 @@ impl TerminalArea {
             }
         }));
         let new_tab = div().px_2().flex_none().child(
-            button("new-tab", IconName::Plus, "New terminal (Ctrl+Shift+T)")
+            button("new-tab", IconName::Plus, t("New terminal (Ctrl+Shift+T)"))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_tab(window, cx))),
         );
         h_flex()
@@ -1154,14 +1155,14 @@ impl TerminalArea {
                     .child(close)
                     .when(!on_file, |d| {
                         d.child(
-                            button("split-right", IconName::PanelRight, "Split right (Ctrl+Shift+D)").on_click(
+                            button("split-right", IconName::PanelRight, t("Split right (Ctrl+Shift+D)")).on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.split_active(Axis::Horizontal, window, cx)
                                 }),
                             ),
                         )
                         .child(
-                            button("split-down", IconName::PanelBottom, "Split down (Ctrl+Shift+E)").on_click(
+                            button("split-down", IconName::PanelBottom, t("Split down (Ctrl+Shift+E)")).on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.split_active(Axis::Vertical, window, cx)
                                 }),
@@ -1170,7 +1171,7 @@ impl TerminalArea {
                     })
                     .when(group == Group::Files, |d| {
                         d.child(
-                            button("toggle-terminal", IconName::PanelBottom, "Show or hide the terminal (Ctrl+Shift+J)")
+                            button("toggle-terminal", IconName::PanelBottom, t("Show or hide the terminal (Ctrl+Shift+J)"))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     if this.terminal_hidden || this.shown(true).is_none() {
                                         this.toggle_terminal(window, cx);
@@ -1182,7 +1183,7 @@ impl TerminalArea {
                     })
                     .when(group == Group::Terminals && has_files, |d| {
                         d.child(
-                            button("hide-terminal", IconName::ChevronDown, "Hide the terminal (Ctrl+Shift+J)").on_click(
+                            button("hide-terminal", IconName::ChevronDown, t("Hide the terminal (Ctrl+Shift+J)")).on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| this.hide_terminal(window, cx)),
                             ),
                         )
@@ -1264,11 +1265,12 @@ impl TerminalArea {
 
     fn render_confirm(&self, busy: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let text = if busy == 1 {
-            "A program is still running in this terminal. Closing it will stop the program.".to_string()
-        } else {
-            format!("Programs are still running in {busy} terminals. Closing them will stop the programs.")
-        };
+        let text = tn(
+            busy as u64,
+            "A program is still running in this terminal. Closing it will stop the program.",
+            "Programs are still running in {n} terminals. Closing them will stop the programs.",
+            &[],
+        );
         div()
             .id("confirm-close")
             .track_focus(&self.confirm_focus)
@@ -1297,18 +1299,18 @@ impl TerminalArea {
                     .border_color(theme.border)
                     .bg(theme.popover)
                     .text_color(theme.popover_foreground)
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Close terminal?"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(t("Close terminal?")))
                     .child(div().text_sm().text_color(theme.muted_foreground).child(text))
                     .child(
                         h_flex()
                             .justify_end()
                             .gap_2()
-                            .child(Button::new("confirm-cancel").small().label("Cancel").on_click(
+                            .child(Button::new("confirm-cancel").small().label(t("Cancel")).on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.answer_confirm(false, window, cx)
                                 }),
                             ))
-                            .child(Button::new("confirm-close").small().danger().label("Close").on_click(
+                            .child(Button::new("confirm-close").small().danger().label(t("Close")).on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.answer_confirm(true, window, cx)
                                 }),

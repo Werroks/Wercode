@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::git::FileStatus;
+use crate::i18n::{t, tf};
 
 /// A branch, remote branch or tag that points at a commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,9 +137,9 @@ pub fn commit_files(dir: &Path, commit: &Commit) -> Result<Vec<CommitFile>, Stri
         Some(parent) => cmd.args(["diff", "--no-color", "--name-status", "-z", parent, &commit.hash]),
         None => cmd.args(["diff-tree", "-r", "--root", "--no-commit-id", "--name-status", "-z", &commit.hash]),
     };
-    let out = cmd.output().map_err(|e| format!("Could not run git: {e}"))?;
+    let out = cmd.output().map_err(|e| tf("Could not run git: {error}", &[("error", &e)]))?;
     if !out.status.success() {
-        return Err("git could not list the files of this commit.".into());
+        return Err(t("git could not list the files of this commit.").into());
     }
     Ok(parse_name_status(&String::from_utf8_lossy(&out.stdout)))
 }
@@ -173,11 +174,11 @@ pub fn commit_diff(dir: &Path, hash: &str, parent: Option<&str>, path: &Path) ->
         // The first commit: everything in it is new.
         None => cmd.args(["show", "--no-color", "--no-ext-diff", "--format=", hash]),
     };
-    let out = cmd.arg("--").arg(path).output().map_err(|e| format!("Could not run git: {e}"))?;
+    let out = cmd.arg("--").arg(path).output().map_err(|e| tf("Could not run git: {error}", &[("error", &e)]))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err("git could not show this change.".into())
+        Err(t("git could not show this change.").into())
     }
 }
 

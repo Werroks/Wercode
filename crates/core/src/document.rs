@@ -3,6 +3,7 @@
 
 use std::path::Path;
 use std::time::SystemTime;
+use crate::i18n::{t, tf};
 
 /// Files above this size are not opened in the editor.
 pub const MAX_SIZE: u64 = 20 * 1024 * 1024;
@@ -39,9 +40,9 @@ impl LoadError {
     /// The sentence shown in place of the editor.
     pub fn message(&self) -> String {
         match self {
-            LoadError::TooLarge => "This file is larger than 20 MB and is not opened in the editor.".into(),
-            LoadError::NotText => "This file is not UTF-8 text, so it cannot be shown here.".into(),
-            LoadError::Io(e) => format!("Could not read the file: {e}"),
+            LoadError::TooLarge => t("This file is larger than 20 MB and is not opened in the editor.").into(),
+            LoadError::NotText => t("This file is not UTF-8 text, so it cannot be shown here.").into(),
+            LoadError::Io(e) => tf("Could not read the file: {error}", &[("error", e)]),
         }
     }
 }

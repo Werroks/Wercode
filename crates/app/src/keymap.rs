@@ -15,6 +15,7 @@ use crate::workspace::{
     CommandPalette, NewWindow, OpenFolder, OpenSettings, QuickOpen, ShowFiles, ShowGit, ShowSearch, SwitchBranch,
     SwitchProject, TogglePanel,
 };
+use wercode_core::i18n::tf;
 
 /// A command that can have a shortcut.
 pub struct Shortcut {
@@ -103,7 +104,7 @@ pub fn apply(cx: &mut App) {
     let mut problems: Vec<String> = overrides
         .keys()
         .filter(|name| !all.iter().any(|s| s.command == name.as_str()))
-        .map(|name| format!("[keys] names a command that does not exist: {name}"))
+        .map(|name| tf("[keys] names a command that does not exist: {name}", &[("name", name)]))
         .collect();
 
     let mut wanted: Vec<(String, usize)> = Vec::new();
@@ -116,7 +117,10 @@ pub fn apply(cx: &mut App) {
             if is_shortcut(&key, cx) {
                 wanted.push((key, index));
             } else {
-                problems.push(format!("[keys] has a shortcut that cannot be read: {key} (for {})", shortcut.command));
+                problems.push(tf(
+                    "[keys] has a shortcut that cannot be read: {key} (for {command})",
+                    &[("key", &key), ("command", &shortcut.command)],
+                ));
             }
         }
     }

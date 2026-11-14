@@ -9,6 +9,7 @@ pub mod fs_ops;
 pub mod fs_tree;
 pub mod git;
 pub mod history;
+pub mod i18n;
 pub mod links;
 pub mod osc;
 pub mod process;

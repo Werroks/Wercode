@@ -14,6 +14,7 @@ use wercode_core::shell::{self, Found};
 
 use crate::theme::{self, AppState};
 use crate::update;
+use wercode_core::i18n::{Language, t, tf};
 
 const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=32.0;
 
@@ -115,16 +116,16 @@ impl SettingsView {
         );
         let (said, failed) = match &status {
             update::Status::Off => {
-                ("Updates come with installed releases. This copy was built from source.".to_string(), false)
+                (t("Updates come with installed releases. This copy was built from source.").to_string(), false)
             }
             update::Status::Idle => (String::new(), false),
-            update::Status::Checking => ("Checking\u{2026}".to_string(), false),
-            update::Status::UpToDate => ("Wercode is up to date.".to_string(), false),
-            update::Status::Downloading(version) => (format!("Downloading version {version}\u{2026}"), false),
+            update::Status::Checking => (t("Checking\u{2026}").to_string(), false),
+            update::Status::UpToDate => (t("Wercode is up to date.").to_string(), false),
+            update::Status::Downloading(version) => (tf("Downloading version {version}\u{2026}", &[("version", version)]), false),
             update::Status::Ready(version) => {
-                (format!("Version {version} is ready. It is installed when Wercode restarts."), false)
+                (tf("Version {version} is ready. It is installed when Wercode restarts.", &[("version", version)]), false)
             }
-            update::Status::Failed(error) => (format!("Could not update: {error}"), true),
+            update::Status::Failed(error) => (tf("Could not update: {error}", &[("error", error)]), true),
         };
         let ready = matches!(status, update::Status::Ready(_));
         let control = v_flex()
@@ -137,7 +138,7 @@ impl SettingsView {
                         Button::new("settings-check-updates")
                             .small()
                             .outline()
-                            .label("Check Now")
+                            .label(t("Check Now"))
                             .disabled(off || busy || ready)
                             .on_click(|_: &ClickEvent, _, cx| update::check(true, cx)),
                     )
@@ -146,7 +147,7 @@ impl SettingsView {
                             Button::new("settings-restart-update")
                                 .small()
                                 .primary()
-                                .label("Restart to Update")
+                                .label(t("Restart to Update"))
                                 .on_click(|_: &ClickEvent, _, cx| update::restart(cx)),
                         )
                     }),
@@ -154,9 +155,9 @@ impl SettingsView {
             .when(!said.is_empty(), |d| {
                 d.child(div().id("settings-update-status").text_xs().text_color(if failed { danger } else { muted }).child(said))
             });
-        let note = format!(
-            "Wercode {}. New versions download in the background and are installed when Wercode restarts.",
-            wercode_core::update::VERSION
+        let note = tf(
+            "Wercode {version}. New versions download in the background and are installed when Wercode restarts.",
+            &[("version", &wercode_core::update::VERSION)],
         );
         h_flex()
             .w_full()
@@ -166,7 +167,7 @@ impl SettingsView {
                 v_flex()
                     .w(px(190.))
                     .flex_none()
-                    .child(div().text_sm().child("Automatic updates"))
+                    .child(div().text_sm().child(t("Automatic updates")))
                     .child(div().text_xs().text_color(muted).child(note)),
             )
             .child(div().flex_1().min_w_0().child(control))
@@ -218,7 +219,7 @@ impl Render for SettingsView {
         let shells = h_flex()
             .flex_wrap()
             .gap_1()
-            .child(Self::choice("settings-shell-auto", "Automatic", auto).on_click(cx.listener(
+            .child(Self::choice("settings-shell-auto", t("Automatic"), auto).on_click(cx.listener(
                 |this, _: &ClickEvent, _, cx| {
                     this.change(cx, |s| {
                         s.shell = "auto".into();
@@ -247,8 +248,24 @@ impl Render for SettingsView {
         };
         let sides = h_flex()
             .gap_1()
-            .child(side("settings-side-left", "Left", "left", !on_right))
-            .child(side("settings-side-right", "Right", "right", on_right));
+            .child(side("settings-side-left", t("Left"), "left", !on_right))
+            .child(side("settings-side-right", t("Right"), "right", on_right));
+
+        // Each language by its own name, so it can be found whatever is shown now.
+        let chosen = Language::from_code(&settings.language);
+        let languages = h_flex()
+            .flex_wrap()
+            .gap_1()
+            .child(Self::choice("settings-language-auto", t("Automatic"), chosen.is_none()).on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| this.change(cx, |s| s.language = "auto".into()),
+            )))
+            .children(Language::ALL.into_iter().enumerate().map(|(index, language)| {
+                Self::choice(("settings-language", index), language.native_name(), chosen == Some(language)).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.change(cx, |s| s.language = language.code().into())
+                    }),
+                )
+            }));
 
         let below = settings.terminal_below();
         let layout = |id: &'static str, label: &'static str, value: &'static str, chosen: bool| {
@@ -257,8 +274,8 @@ impl Render for SettingsView {
         };
         let layouts = h_flex()
             .gap_1()
-            .child(layout("settings-layout-tabs", "One row of tabs", "tabs", !below))
-            .child(layout("settings-layout-below", "Terminal below files", "terminal_below", below));
+            .child(layout("settings-layout-tabs", t("One row of tabs"), "tabs", !below))
+            .child(layout("settings-layout-below", t("Terminal below files"), "terminal_below", below));
 
         let this = cx.entity().downgrade();
         let switch = |id: &'static str, on: bool, set: fn(&mut Settings, bool)| {
@@ -311,13 +328,13 @@ impl Render for SettingsView {
                     .py_3()
                     .border_b_1()
                     .border_color(border)
-                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Settings"))
+                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child(t("Settings")))
                     .child(
                         Button::new("settings-close")
                             .ghost()
                             .xsmall()
                             .icon(IconName::Close)
-                            .tooltip("Close (Esc)")
+                            .tooltip(t("Close (Esc)"))
                             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SettingsEvent::Close))),
                     ),
             )
@@ -329,37 +346,43 @@ impl Render for SettingsView {
                     .overflow_y_scroll()
                     .p_4()
                     .gap_4()
-                    .child(Self::row("Colour scheme", "", schemes, cx))
-                    .child(Self::row("Font size", "Text in the terminal.", font_size, cx))
                     .child(Self::row(
-                        "Font",
-                        "A monospaced font installed on this computer. Press Enter to apply.",
+                        t("Language"),
+                        t("Automatic follows the language of this computer."),
+                        languages,
+                        cx,
+                    ))
+                    .child(Self::row(t("Colour scheme"), "", schemes, cx))
+                    .child(Self::row(t("Font size"), t("Text in the terminal."), font_size, cx))
+                    .child(Self::row(
+                        t("Font"),
+                        t("A monospaced font installed on this computer. Press Enter to apply."),
                         Input::new(&self.font).small(),
                         cx,
                     ))
-                    .child(Self::row("Shell", "Used by terminals opened from now on.", shells, cx))
-                    .child(Self::row("Side panel", "Where files, search and git sit.", sides, cx))
+                    .child(Self::row(t("Shell"), t("Used by terminals opened from now on."), shells, cx))
+                    .child(Self::row(t("Side panel"), t("Where files, search and git sit."), sides, cx))
                     .child(Self::row(
-                        "Layout",
-                        "Files and terminals as tabs of one row, or files above a terminal panel.",
+                        t("Layout"),
+                        t("Files and terminals as tabs of one row, or files above a terminal panel."),
                         layouts,
                         cx,
                     ))
                     .child(Self::row(
-                        "Blinking cursor",
+                        t("Blinking cursor"),
                         "",
                         switch("settings-blink", settings.cursor_blink, |s, on| s.cursor_blink = on),
                         cx,
                     ))
                     .child(Self::row(
-                        "Confirm closing",
-                        "Ask before closing a terminal that is still running a program.",
+                        t("Confirm closing"),
+                        t("Ask before closing a terminal that is still running a program."),
                         switch("settings-confirm", settings.confirm_close, |s, on| s.confirm_close = on),
                         cx,
                     ))
                     .child(Self::row(
-                        "Copy on select",
-                        "Selecting text in a terminal copies it.",
+                        t("Copy on select"),
+                        t("Selecting text in a terminal copies it."),
                         switch("settings-copy", settings.copy_on_select, |s, on| s.copy_on_select = on),
                         cx,
                     ))
@@ -371,9 +394,9 @@ impl Render for SettingsView {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_sm().child("Keyboard shortcuts"))
+                            .child(div().text_sm().child(t("Keyboard shortcuts")))
                             .child(div().text_xs().text_color(muted).child(
-                                "To change one, add its name to the [keys] table of settings.toml, for example \"terminal.new_tab\" = \"ctrl-shift-y\". An empty value removes the shortcut.",
+                                t("To change one, add its name to the [keys] table of settings.toml, for example \"terminal.new_tab\" = \"ctrl-shift-y\". An empty value removes the shortcut."),
                             )),
                     )
                     .children(
@@ -401,7 +424,7 @@ impl Render for SettingsView {
                                 .text_color(muted)
                                 .child(file.to_string_lossy().into_owned()),
                         )
-                        .child(Button::new("settings-open-file").small().outline().label("Edit settings.toml").on_click(
+                        .child(Button::new("settings-open-file").small().outline().label(t("Edit settings.toml")).on_click(
                             cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(SettingsEvent::OpenFile(file.clone()))),
                         )),
                 )

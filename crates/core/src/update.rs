@@ -19,6 +19,7 @@ use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
+use crate::i18n::{t, tf};
 
 /// GitHub sends this address to the manifest of the latest release.
 pub const MANIFEST_URL: &str = "https://github.com/Werroks/Wercode/releases/latest/download/latest.json";
@@ -92,7 +93,7 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 /// file for `platform`.
 pub fn newer_release(manifest: &str, current: &str, platform: &str) -> Result<Option<Release>, String> {
     let manifest: Manifest =
-        serde_json::from_str(manifest).map_err(|e| format!("the release manifest could not be read: {e}"))?;
+        serde_json::from_str(manifest).map_err(|e| tf("the release manifest could not be read: {error}", &[("error", &e)]))?;
     if !is_newer(&manifest.version, current) {
         return Ok(None);
     }
@@ -123,19 +124,19 @@ fn curl() -> Command {
 
 fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
     let out = cmd.output().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => "curl was not found; it is needed to download updates".to_string(),
-        _ => format!("curl could not start: {e}"),
+        std::io::ErrorKind::NotFound => t("curl was not found; it is needed to download updates").to_string(),
+        _ => tf("curl could not start: {error}", &[("error", &e)]),
     })?;
     if out.status.success() {
         return Ok(out.stdout);
     }
     let said = String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("curl: ").to_string();
-    Err(if said.is_empty() { "the download failed".to_string() } else { said })
+    Err(if said.is_empty() { t("the download failed").to_string() } else { said })
 }
 
 /// Asks whether there is a release newer than this build.
 pub fn check() -> Result<Option<Release>, String> {
-    let platform = platform().ok_or("there are no updates for this platform")?;
+    let platform = platform().ok_or(t("there are no updates for this platform"))?;
     let body = run(curl().args(["--max-time", "60"]).arg(MANIFEST_URL))?;
     newer_release(&String::from_utf8_lossy(&body), VERSION, platform)
 }
@@ -156,7 +157,7 @@ pub fn verify(file: &Path, expected: &str) -> Result<(), String> {
     if actual == expected.to_ascii_lowercase() {
         Ok(())
     } else {
-        Err("the downloaded file is damaged (its checksum does not match)".to_string())
+        Err(t("the downloaded file is damaged (its checksum does not match)").to_string())
     }
 }
 
@@ -195,7 +196,7 @@ pub enum Staged {
 /// Downloads a release, checks it and gets it ready to put in place.
 pub fn download(release: &Release) -> Result<Staged, String> {
     let dir = download_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| tf("could not make {folder}: {error}", &[("folder", &dir.display()), ("error", &e)]))?;
     let name = release.url.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("wercode-update");
     let file = dir.join(name);
     run(curl().args(["--max-time", "1800", "--output"]).arg(&file).arg(&release.url))?;
@@ -204,7 +205,7 @@ pub fn download(release: &Release) -> Result<Staged, String> {
     if cfg!(windows) {
         Ok(Staged::Installer(file))
     } else if cfg!(target_os = "macos") {
-        let bundle = installed_bundle(&exe).ok_or("Wercode is not running from Wercode.app")?;
+        let bundle = installed_bundle(&exe).ok_or(t("Wercode is not running from Wercode.app"))?;
         stage_bundle(&file, &bundle)
     } else {
         stage_executable(&file, &exe.canonicalize().unwrap_or(exe))
@@ -220,7 +221,7 @@ fn installed_bundle(exe: &Path) -> Option<PathBuf> {
 /// Unpacks a `.tar.gz` with the system `tar`, which Windows 10 has as well.
 fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(into);
-    std::fs::create_dir_all(into).map_err(|e| format!("could not make {}: {e}", into.display()))?;
+    std::fs::create_dir_all(into).map_err(|e| tf("could not make {folder}: {error}", &[("folder", &into.display()), ("error", &e)]))?;
     let out = Command::new("tar")
         .arg("-xzf")
         .arg(archive)
@@ -228,11 +229,11 @@ fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
         .arg(into)
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("tar could not start: {e}"))?;
+        .map_err(|e| tf("tar could not start: {error}", &[("error", &e)]))?;
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("the update could not be unpacked: {}", String::from_utf8_lossy(&out.stderr).trim()))
+        Err(tf("the update could not be unpacked: {error}", &[("error", &String::from_utf8_lossy(&out.stderr).trim())]))
     }
 }
 
@@ -244,7 +245,7 @@ pub fn stage_bundle(archive: &Path, installed: &Path) -> Result<Staged, String> 
     unpack(archive, &into)?;
     let new = into.join("Wercode.app");
     if !new.join("Contents").is_dir() {
-        return Err("the update does not contain Wercode.app".into());
+        return Err(t("the update does not contain Wercode.app").into());
     }
     Ok(Staged::Bundle { new, old: installed.to_path_buf() })
 }
@@ -257,7 +258,7 @@ pub fn stage_executable(archive: &Path, installed: &Path) -> Result<Staged, Stri
     unpack(archive, &into)?;
     let new = into.join("wercode").join("wercode");
     if !new.is_file() {
-        return Err("the update does not contain the wercode executable".into());
+        return Err(t("the update does not contain the wercode executable").into());
     }
     Ok(Staged::Executable { new, old: installed.to_path_buf() })
 }
@@ -272,15 +273,15 @@ pub fn apply(staged: &Staged, relaunch: bool) -> Result<(), String> {
             if relaunch {
                 cmd.arg("/RELAUNCH=1");
             }
-            cmd.spawn().map(drop).map_err(|e| format!("the installer could not start: {e}"))
+            cmd.spawn().map(drop).map_err(|e| tf("the installer could not start: {error}", &[("error", &e)]))
         }
         Staged::Bundle { new, old } => {
             let parked = old.with_file_name(".Wercode-old.app");
             let _ = std::fs::remove_dir_all(&parked);
-            std::fs::rename(old, &parked).map_err(|e| format!("could not move {}: {e}", old.display()))?;
+            std::fs::rename(old, &parked).map_err(|e| tf("could not move {file}: {error}", &[("file", &old.display()), ("error", &e)]))?;
             if let Err(e) = std::fs::rename(new, old) {
                 let _ = std::fs::rename(&parked, old);
-                return Err(format!("could not put the new Wercode.app in place: {e}"));
+                return Err(tf("could not put the new Wercode.app in place: {error}", &[("error", &e)]));
             }
             let _ = std::fs::remove_dir_all(&parked);
             if relaunch {
@@ -295,7 +296,7 @@ pub fn apply(staged: &Staged, relaunch: bool) -> Result<(), String> {
                 let _ = std::fs::set_permissions(new, std::fs::Permissions::from_mode(0o755));
             }
             // A rename replaces the file in one step; the running program keeps the old one open.
-            std::fs::rename(new, old).map_err(|e| format!("could not replace {}: {e}", old.display()))?;
+            std::fs::rename(new, old).map_err(|e| tf("could not replace {file}: {error}", &[("file", &old.display()), ("error", &e)]))?;
             if relaunch {
                 Command::new(old).spawn().map_err(|e| e.to_string())?;
             }

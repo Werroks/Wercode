@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Global, Hsla, rgb};
 use wercode_core::config::Settings;
+use wercode_core::i18n::{self, Language};
 use wercode_core::theme::{Appearance, Rgb, Theme as Scheme};
 
 pub struct AppState {
@@ -23,6 +24,15 @@ pub fn hsla(c: Rgb) -> Hsla {
 /// Installs the scheme: our own roles for custom drawing, and the matching
 /// colours for the component library so both look like one app.
 pub fn apply(settings: Settings, cx: &mut App) {
+    // Tests compare English texts; "auto" there would follow the machine running them.
+    let language = if cfg!(test) && Language::from_code(&settings.language).is_none() {
+        Language::English
+    } else {
+        i18n::resolve(&settings.language)
+    };
+    i18n::set_language(language);
+    gpui_kit::component::set_locale(language.library_locale());
+
     let scheme = wercode_core::theme::load(&settings.theme);
     let mode = match scheme.appearance {
         Appearance::Dark => ThemeMode::Dark,

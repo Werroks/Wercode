@@ -38,8 +38,10 @@ Command palette,shell,should,yes,yes,Ctrl+Shift+P; 26 commands; covered by a UI 
 Quick open file by fuzzy name,shell,should,yes,yes,Ctrl+Shift+K (plain Ctrl+P belongs to the shell) or File: Go to File in the palette; letters in order; the file name counts for more than the folders; ignored files are left out; at most 100000 files are listed
 Configurable keybindings,settings,should,yes,partial,the [keys] table of settings.toml: command name = shortcut or a list of them; an empty value removes the shortcut; the settings screen lists the names with their current shortcuts and says what could not be read; no editing on the screen itself; a hand-edited file is read when the settings screen opens
 Recent workspaces list,workspace,should,yes,yes,in the title switcher and on the welcome screen
+Releases and installers,release,must,yes,yes,a tag v* builds a per-user Windows installer (Inno Setup; Start menu; optional desktop icon; Open with Wercode in the folder menu); a universal macOS Wercode.app as dmg and tar.gz; a Linux tar.gz with install.sh and a menu entry; latest.json and SHA256SUMS.txt; not signed yet
+Automatic updates,release,must,yes,yes,every 4 hours through the system curl; SHA-256 checked; installed when Wercode quits or at once with Restart to update in the status bar; switch and Check Now in the settings; Help: Check for Updates in the palette; builds from source never update; the Windows installer waits for Wercode to quit
 Word-level diff highlighting,git,could,yes,no,
-Commit history / graph,git,could,yes,no,
+Commit history / graph,git,must,yes,yes,GRAPH section under the changes in the git panel with a border to drag; lanes and dots in colours like VS Code; the checked-out commit has a ring; branch and tag badges; author; a card with hash and time on hover; a click lists the commit's files and a click on a file opens what it changed in a tab; folds away; 200 commits and Show More; follows new commits, fetches and pulls; covered by a UI test
 Stage individual hunks,git,could,yes,no,
 Git worktrees switcher,git,could,yes,no,useful for parallel CLI agents
 Custom themes from file,settings,could,yes,no,

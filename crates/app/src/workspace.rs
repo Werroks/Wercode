@@ -314,6 +314,13 @@ impl Workspace {
                         .terminals
                         .update(cx, |area, cx| area.open_diff(root, path, staged, untracked, window, cx));
                 }
+                GitPanelEvent::OpenCommitDiff { path, hash, parent } => {
+                    let Some(project) = &this.project else { return };
+                    let (root, path, hash, parent) = (project.root.clone(), path.clone(), hash.clone(), parent.clone());
+                    project
+                        .terminals
+                        .update(cx, |area, cx| area.open_commit_diff(root, path, hash, parent, window, cx));
+                }
             }),
             // A fetch, pull or push shows in the status bar while it runs.
             cx.observe(&changes, |_, _, cx| cx.notify()),
@@ -2071,6 +2078,76 @@ mod tests {
         press(cx, f.window, &["enter"]);
         assert_eq!((status(cx).staged().count(), status(cx).unstaged().count()), (1, 0));
         assert_eq!(activity(cx), RemoteActivity::Idle);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn the_history_lists_commits_and_shows_what_one_changed(cx: &mut TestAppContext) {
+        use std::process::Command;
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = project_dir("history");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "trunk"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "First"]);
+        // A side branch merged back makes a second lane.
+        git(&["switch", "-q", "-c", "side"]);
+        std::fs::write(repo.join("b.txt"), "side\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "Side work"]);
+        git(&["switch", "-q", "trunk"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "Second"]);
+        git(&["merge", "-q", "--no-ff", "-m", "Merge side", "side"]);
+
+        let f = open(cx, "history");
+        press(cx, f.window, &["ctrl-shift-g"]);
+        let panel = f.workspace.read_with(cx, |w, _| w.changes()).unwrap();
+        let graph = panel.read_with(cx, |p, _| p.graph());
+        let click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+            cx.update_window(f.window, |_, window, cx| window.click(id, cx)).unwrap();
+            cx.run_until_parked();
+        };
+        wait_until(cx, "the history", |cx| graph.read_with(cx, |g, _| g.subjects().len() == 4));
+        let subjects = graph.read_with(cx, |g, _| g.subjects());
+        assert_eq!(subjects[0], "Merge side");
+        assert_eq!(subjects.last().map(String::as_str), Some("First"));
+        assert_eq!(graph.read_with(cx, |g, _| g.rows().iter().map(|r| r.width()).max()), Some(2));
+
+        // "Second" changed a.txt: its file opens as a tab of what changed.
+        let second = subjects.iter().position(|s| s == "Second").unwrap();
+        click(cx, ("graph-commit", second).into());
+        wait_until(cx, "the commit's files", |cx| graph.read_with(cx, |g, _| g.open_files() == Some(1)));
+        click(cx, ("graph-file", 0usize).into());
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let diff = area.read_with(cx, |a, _| a.active_diff()).expect("a tab of what the commit changed");
+        wait_until(cx, "the patch", |cx| diff.read_with(cx, |d, cx| d.counts(cx)) == Some((1, 0)));
+        assert!(diff.read_with(cx, |d, _| d.label()).starts_with("a.txt ("));
+        // The same file of the same commit is the same tab.
+        click(cx, ("graph-file", 0usize).into());
+        assert_eq!(area.read_with(cx, |a, _| a.tab_count()), 2);
+
+        // A new commit shows at the top without asking.
+        std::fs::write(repo.join("c.txt"), "three\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "Third"]);
+        f.workspace.update(cx, |w, cx| w.refresh_git(cx));
+        wait_until(cx, "the new commit", |cx| graph.read_with(cx, |g, _| g.subjects().first().map(String::as_str) == Some("Third")));
+
+        // The header folds the history away and back.
+        click(cx, "graph-header".into());
+        assert!(graph.read_with(cx, |g, _| g.collapsed()));
+        click(cx, "graph-header".into());
+        assert!(!graph.read_with(cx, |g, _| g.collapsed()));
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

@@ -426,10 +426,39 @@ impl TerminalArea {
     /// The repository or the files changed: tabs of changes read them again.
     pub fn refresh_diffs(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
-            if let Body::Diff(diff) = &tab.body {
+            // What a commit changed stays the same.
+            if let Body::Diff(diff) = &tab.body
+                && !diff.read(cx).is_commit()
+            {
                 diff.update(cx, |diff, cx| diff.reload(cx));
             }
         }
+    }
+
+    /// Shows what a commit changed in a file, in a tab of its own.
+    pub fn open_commit_diff(
+        &mut self,
+        root: PathBuf,
+        path: PathBuf,
+        hash: String,
+        parent: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.tabs.iter().position(|t| match &t.body {
+            Body::Diff(diff) => diff.read(cx).shows_commit(&path, &hash),
+            _ => false,
+        });
+        let index = match open {
+            Some(index) => index,
+            None => {
+                let diff = cx.new(|cx| DiffView::of_commit(root, path, hash, parent, cx));
+                let id = self.id();
+                self.tabs.push(Tab { id, body: Body::Diff(diff) });
+                self.tabs.len() - 1
+            }
+        };
+        self.select_tab(index, window, cx);
     }
 
     fn restore(&mut self, layout: &Layout, window: &mut Window, cx: &mut Context<Self>) {

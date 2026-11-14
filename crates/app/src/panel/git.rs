@@ -6,6 +6,7 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::resizable::{resizable_panel, v_resizable};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -13,6 +14,7 @@ use wercode_core::git::{self, Change, FileStatus, RepoStatus};
 use wercode_core::{file_icons, fs_ops};
 
 use super::files::status_color;
+use super::graph::{GraphEvent, GraphView};
 
 actions!(
     git,
@@ -36,6 +38,8 @@ pub enum GitPanelEvent {
     Open(PathBuf),
     /// A file in one of the lists was clicked: show what changed in it.
     OpenDiff { path: PathBuf, staged: bool, untracked: bool },
+    /// A file of a commit in the history was clicked.
+    OpenCommitDiff { path: PathBuf, hash: String, parent: Option<String> },
 }
 
 /// The commands that talk to the remote.
@@ -87,7 +91,9 @@ pub struct GitPanel {
     busy: bool,
     error: Option<String>,
     activity: RemoteActivity,
-    _subscription: Subscription,
+    /// The history under the changes.
+    graph: Entity<GraphView>,
+    _subscriptions: [Subscription; 3],
 }
 
 impl EventEmitter<GitPanelEvent> for GitPanel {}
@@ -103,6 +109,16 @@ impl GitPanel {
                     this.commit(window, cx);
                 }
             });
+        let graph = cx.new(|_| GraphView::new(root.clone()));
+        let opened = cx.subscribe(&graph, |_, _, event: &GraphEvent, cx| match event {
+            GraphEvent::OpenDiff { path, hash, parent } => cx.emit(GitPanelEvent::OpenCommitDiff {
+                path: path.clone(),
+                hash: hash.clone(),
+                parent: parent.clone(),
+            }),
+        });
+        // Folding the history away changes how the panel is split.
+        let folded = cx.observe(&graph, |_, _, cx| cx.notify());
         Self {
             root,
             git: None,
@@ -110,7 +126,8 @@ impl GitPanel {
             busy: false,
             error: None,
             activity: RemoteActivity::Idle,
-            _subscription: subscription,
+            graph,
+            _subscriptions: [subscription, opened, folded],
         }
     }
 
@@ -132,6 +149,7 @@ impl GitPanel {
     }
 
     pub fn set_git(&mut self, git: Option<Arc<RepoStatus>>, cx: &mut Context<Self>) {
+        self.graph.update(cx, |graph, cx| graph.set_git(git.as_deref(), cx));
         self.git = git;
         cx.notify();
     }
@@ -487,16 +505,34 @@ impl Render for GitPanel {
                         d.child(div().id("git-error").text_xs().text_color(danger).child(error))
                     }),
             )
-            .child(
-                v_flex()
-                    .id("git-changes")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(staged)
-                    .children(changes)
-                    .when(clean, |d| d.child(note("No changes. The working tree is clean."))),
-            )
+            .child(div().flex_1().min_h_0().child(self.render_lists(staged, changes, clean, cx)))
+            .into_any_element()
+    }
+}
+
+impl GitPanel {
+    /// The changes above, the history below, with a border to drag between them.
+    fn render_lists(
+        &self,
+        staged: Option<AnyElement>,
+        changes: Option<AnyElement>,
+        clean: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let lists = v_flex()
+            .id("git-changes")
+            .size_full()
+            .overflow_y_scroll()
+            .children(staged)
+            .children(changes)
+            .when(clean, |d| d.child(div().p_3().text_sm().text_color(muted).child("No changes. The working tree is clean.")));
+        if self.graph.read(cx).collapsed() {
+            return v_flex().size_full().child(div().flex_1().min_h_0().child(lists)).child(self.graph.clone()).into_any_element();
+        }
+        v_resizable("git-split")
+            .child(resizable_panel().child(lists))
+            .child(resizable_panel().size(px(300.)).size_range(px(60.)..px(4000.)).child(self.graph.clone()))
             .into_any_element()
     }
 }
@@ -517,6 +553,10 @@ impl GitPanel {
 
     pub fn message_text(&self, cx: &App) -> String {
         self.message.read(cx).value().to_string()
+    }
+
+    pub fn graph(&self) -> Entity<GraphView> {
+        self.graph.clone()
     }
 
     pub fn message_focused(&self, window: &Window, cx: &App) -> bool {

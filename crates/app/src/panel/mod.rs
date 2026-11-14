@@ -1,5 +1,6 @@
 pub mod files;
 pub mod git;
+pub mod graph;
 pub mod search;
 
 pub use files::{DraggedPath, FilesEvent, FilesPanel};

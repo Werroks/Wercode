@@ -22,15 +22,20 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   shell lookup, PTY terminal, links, git status, file listing, finding a file
   by name, reading and
   writing documents, project search, watching the folder for changes,
-  dropping what the program that started Wercode left in its environment.
+  dropping what the program that started Wercode left in its environment,
+  commit history and its graph (`history`), updates (`update`).
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
-  `panel/` (file tree, search, git panel), `editor.rs` (a file in a tab),
+  `panel/` (file tree, search, git panel, `graph.rs` for the history),
+  `editor.rs` (a file in a tab), `update.rs` (checking and installing updates),
   `diff.rs` (the changes to a file in a tab),
   `settings.rs` (the settings screen), `keymap.rs` (every shortcut, and the
   user's own from `[keys]`), `assets.rs` (bundled icons), `theme.rs`.
 - `assets/themes/*.toml` — built-in colour schemes, compiled in.
 - `docs/` — planning notes: `features.csv`, `build-log.md`, `architecture.md`.
+- `packaging/` — the Windows installer script, the macOS bundle and the Linux
+  archive, and `manifest.py` for `latest.json`. `.github/workflows/release.yml`
+  runs them for a tag `v<version>`; the tag must match `Cargo.toml`.
 - `tools/drive.ps1` — Windows-only helper for checking the running window. Not shipped.
 
 ## Commands
@@ -77,5 +82,8 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   with `key:` and virtual key codes; switch the window to the English layout
   first (`WM_INPUTLANGCHANGEREQUEST` with `LoadKeyboardLayout("00000409")`),
   or the letters come out in the user's layout.
+- Only builds with `WERCODE_RELEASE` set at compile time (the release
+  workflow) update themselves. To release: raise `version` in `Cargo.toml`,
+  commit, push, then push the tag `v<version>`.
 - After finishing a feature, update `docs/features.csv` and
   `docs/build-log.md`.

@@ -22,10 +22,14 @@ jobs:
       - name: Linux packages
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev libx11-dev libx11-xcb-dev libfontconfig1-dev libfreetype6-dev \
-            libasound2-dev libssl-dev libvulkan-dev pkg-config
+          # A mirror that does not answer leaves the package lists empty; try again.
+          for attempt in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y \
+              libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-dev libx11-xcb-dev \
+              libfontconfig1-dev libfreetype6-dev libasound2-dev libssl-dev libvulkan-dev pkg-config && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep 20
+          done
       - name: Build
         run: cargo build --workspace --locked
       # The window tests need a display and a GPU; the core tests run everywhere.

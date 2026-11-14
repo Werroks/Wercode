@@ -8189,7 +8189,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wercode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -8200,7 +8200,7 @@ dependencies = [
 
 [[package]]
 name = "wercode-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",

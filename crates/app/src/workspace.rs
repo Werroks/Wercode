@@ -33,6 +33,7 @@ use crate::term::{
     TerminalArea, ToggleTerminal,
 };
 use crate::theme::AppState;
+use crate::update::{self, CheckForUpdates, CloseForUpdate};
 
 actions!(
     workspace,
@@ -158,6 +159,7 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Git: Fetch", Box::new(git_panel::Fetch)),
         ("Git: Commit", Box::new(git_panel::Commit)),
         ("Git: Stage All Changes", Box::new(git_panel::StageAll)),
+        ("Help: Check for Updates", Box::new(CheckForUpdates)),
     ]
 }
 
@@ -223,6 +225,8 @@ pub struct Workspace {
     state_path: Option<PathBuf>,
     save_task: Option<Task<()>>,
     _bounds: Subscription,
+    /// A download or a waiting update shows in the status bar.
+    _updates: Subscription,
 }
 
 impl Workspace {
@@ -243,6 +247,7 @@ impl Workspace {
             window.defer(cx, |window, _| window.set_window_title("Wercode"));
         }
         let bounds = cx.observe_window_bounds(window, |this, window, cx| this.remember_window(window, cx));
+        let updates = cx.observe_global::<update::Updater>(|_, cx| cx.notify());
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |this, cx| this.should_close(window, cx)).unwrap_or(true)
@@ -262,6 +267,7 @@ impl Workspace {
             state_path,
             save_task: None,
             _bounds: bounds,
+            _updates: updates,
         };
         this.save_recent();
         this
@@ -556,7 +562,9 @@ impl Workspace {
                         window.remove_window();
                     });
                 }
-                _ => {}
+                _ => {
+                    let _ = cx.update(|_, cx| update::restart_cancelled(cx));
+                }
             })
             .detach();
             return false;
@@ -574,6 +582,8 @@ impl Workspace {
                         this.closing = true;
                         window.remove_window();
                     });
+                } else {
+                    let _ = cx.update(|_, cx| update::restart_cancelled(cx));
                 }
             })
             .detach();
@@ -1412,6 +1422,7 @@ impl Workspace {
     /// the worst thing true about the working tree.
     fn render_status(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = project.changes.read(cx).activity();
+        let update = update::status_bar(cx).map(|status| self.render_update(status, cx).into_any_element());
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
         let item = || h_flex().flex_none().gap_1().items_center();
@@ -1521,6 +1532,7 @@ impl Workspace {
                 )
             })
             .child(div().flex_1())
+            .children(update)
             .child(
                 div()
                     .id("status-palette")
@@ -1530,6 +1542,31 @@ impl Workspace {
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_palette(window, cx)))
                     .child("Commands  Ctrl+Shift+P"),
             )
+    }
+
+    /// A download in progress, an update waiting for a restart, or the answer
+    /// to a check asked for by hand.
+    fn render_update(&self, status: update::Status, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let item = h_flex().id("status-update").test_support().flex_none().gap_1().items_center().px_1().rounded_sm();
+        match status {
+            update::Status::Ready(version) => item
+                .text_color(theme.link)
+                .hover(|s| s.bg(theme.secondary_hover))
+                .child(Icon::new(IconName::ArrowDown).xsmall())
+                .child(format!("Restart to update to {version}"))
+                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| update::restart(cx))),
+            update::Status::Downloading(version) => item
+                .child(Icon::new(Lucide::RefreshCw).xsmall())
+                .child(format!("Downloading Wercode {version}\u{2026}")),
+            update::Status::Checking => item.child("Checking for updates\u{2026}"),
+            update::Status::UpToDate => item.child("Wercode is up to date"),
+            update::Status::Failed(_) => item
+                .text_color(theme.danger)
+                .child(Icon::new(IconName::TriangleAlert).xsmall())
+                .child("Could not check for updates"),
+            update::Status::Idle | update::Status::Off => item,
+        }
     }
 
     fn render_body(&self, project: &Project, cx: &mut Context<Self>) -> AnyElement {
@@ -1592,6 +1629,17 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &git_panel::Commit, window, cx| this.git_commit(window, cx)))
             .on_action(cx.listener(|this, _: &git_panel::StageAll, window, cx| this.git_stage_all(window, cx)))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| {
+                this.palette = None;
+                update::check(true, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CloseForUpdate, window, cx| {
+                if this.should_close(window, cx) {
+                    this.closing = true;
+                    window.remove_window();
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewWindow, _, cx| this.new_window(cx)))
             .on_action(cx.listener(|this, _: &SwitchProject, _, cx| {
                 this.palette = None;

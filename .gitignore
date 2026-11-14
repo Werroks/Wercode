@@ -6,3 +6,4 @@ target/
 screens/
 # Local working plan.
 PLAN.md
+dist/

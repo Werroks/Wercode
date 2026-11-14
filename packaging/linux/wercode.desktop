@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Wercode
+GenericName=Terminal
+Comment=A terminal with files and git next to it
+Exec=wercode %F
+Icon=wercode
+Terminal=false
+Categories=Development;System;TerminalEmulator;
+Keywords=terminal;shell;git;
+StartupNotify=true

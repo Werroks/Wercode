@@ -13,6 +13,7 @@ use wercode_core::config::Settings;
 use wercode_core::shell::{self, Found};
 
 use crate::theme::{self, AppState};
+use crate::update;
 
 const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=32.0;
 
@@ -30,6 +31,7 @@ pub struct SettingsView {
     shells: Vec<Found>,
     error: Option<String>,
     _subscription: Subscription,
+    _updates: Subscription,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -59,6 +61,7 @@ impl SettingsView {
             shells: shell::available(),
             error: None,
             _subscription: subscription,
+            _updates: cx.observe_global::<update::Updater>(|_, cx| cx.notify()),
         }
     }
 
@@ -96,6 +99,79 @@ impl SettingsView {
             .child(div().flex_1().min_w_0().child(control))
     }
 
+    /// Automatic updates, a button to look now, and what the last look found.
+    fn render_updates(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let (muted, danger) = (theme.muted_foreground, theme.danger);
+        let status = update::status(cx);
+        let off = status == update::Status::Off;
+        let busy = matches!(status, update::Status::Checking | update::Status::Downloading(_));
+        let this = cx.entity().downgrade();
+        let switch = Switch::new("settings-auto-update").checked(settings.auto_update).disabled(off).on_click(
+            move |on: &bool, _, cx| {
+                let on = *on;
+                let _ = this.update(cx, |this, cx| this.change(cx, |s| s.auto_update = on));
+            },
+        );
+        let (said, failed) = match &status {
+            update::Status::Off => {
+                ("Updates come with installed releases. This copy was built from source.".to_string(), false)
+            }
+            update::Status::Idle => (String::new(), false),
+            update::Status::Checking => ("Checking\u{2026}".to_string(), false),
+            update::Status::UpToDate => ("Wercode is up to date.".to_string(), false),
+            update::Status::Downloading(version) => (format!("Downloading version {version}\u{2026}"), false),
+            update::Status::Ready(version) => {
+                (format!("Version {version} is ready. It is installed when Wercode restarts."), false)
+            }
+            update::Status::Failed(error) => (format!("Could not update: {error}"), true),
+        };
+        let ready = matches!(status, update::Status::Ready(_));
+        let control = v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(switch)
+                    .child(
+                        Button::new("settings-check-updates")
+                            .small()
+                            .outline()
+                            .label("Check Now")
+                            .disabled(off || busy || ready)
+                            .on_click(|_: &ClickEvent, _, cx| update::check(true, cx)),
+                    )
+                    .when(ready, |d| {
+                        d.child(
+                            Button::new("settings-restart-update")
+                                .small()
+                                .primary()
+                                .label("Restart to Update")
+                                .on_click(|_: &ClickEvent, _, cx| update::restart(cx)),
+                        )
+                    }),
+            )
+            .when(!said.is_empty(), |d| {
+                d.child(div().id("settings-update-status").text_xs().text_color(if failed { danger } else { muted }).child(said))
+            });
+        let note = format!(
+            "Wercode {}. New versions download in the background and are installed when Wercode restarts.",
+            wercode_core::update::VERSION
+        );
+        h_flex()
+            .w_full()
+            .gap_4()
+            .items_start()
+            .child(
+                v_flex()
+                    .w(px(190.))
+                    .flex_none()
+                    .child(div().text_sm().child("Automatic updates"))
+                    .child(div().text_xs().text_color(muted).child(note)),
+            )
+            .child(div().flex_1().min_w_0().child(control))
+    }
+
     /// A button of a group in which exactly one is chosen.
     fn choice(id: impl Into<ElementId>, label: impl Into<SharedString>, chosen: bool) -> Button {
         let button = Button::new(id).small().label(label);
@@ -108,6 +184,7 @@ impl Render for SettingsView {
         let state = cx.global::<AppState>();
         let settings = state.settings.clone();
         let path = state.settings_path.clone();
+        let updates = self.render_updates(&settings, cx);
         let theme = cx.theme();
         let (muted, border, danger) = (theme.muted_foreground, theme.border, theme.danger);
 
@@ -286,6 +363,7 @@ impl Render for SettingsView {
                         switch("settings-copy", settings.copy_on_select, |s, on| s.copy_on_select = on),
                         cx,
                     ))
+                    .child(updates)
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().id("settings-error").text_xs().text_color(danger).child(error))
                     })

@@ -53,6 +53,9 @@ pub struct Settings {
     /// How files and terminals share the window: "tabs" puts them in one row
     /// of tabs, "terminal_below" puts files above a terminal panel.
     pub layout: String,
+    /// Look for new versions now and then, download them in the background
+    /// and install them when Wercode restarts.
+    pub auto_update: bool,
     /// Shortcuts that replace the built-in ones, by command name:
     /// `"terminal.new_tab" = "ctrl-shift-y"`. Written by hand in the `[keys]`
     /// table; the settings screen lists the names.
@@ -89,6 +92,7 @@ impl Default for Settings {
             panel_width: 300.0,
             panel_side: "left".into(),
             layout: "tabs".into(),
+            auto_update: true,
             keys: BTreeMap::new(),
         }
     }

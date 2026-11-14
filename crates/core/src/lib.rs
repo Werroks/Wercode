@@ -16,4 +16,5 @@ pub mod shell;
 pub mod state;
 pub mod terminal;
 pub mod theme;
+pub mod update;
 pub mod watch;

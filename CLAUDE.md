@@ -28,11 +28,14 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   writing documents, project search, watching the folder for changes,
   dropping what the program that started Wercode left in its environment,
   commit history and its graph (`history`), updates (`update`), the
-  languages of the interface (`i18n`, with `locales/`).
+  languages of the interface (`i18n`, with `locales/`), language servers
+  for code checks (`lsp`: finding and running them, the protocol, what they
+  report).
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
   `panel/` (file tree, search, git panel, `graph.rs` for the history),
   `editor.rs` (a file in a tab), `update.rs` (checking and installing updates),
+  `lsp.rs` (the shared language servers), `panel/problems.rs` (their list),
   `diff.rs` (the changes to a file in a tab),
   `settings.rs` (the settings screen), `keymap.rs` (every shortcut, and the
   user's own from `[keys]`), `assets.rs` (bundled icons), `theme.rs`.
@@ -90,5 +93,11 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 - Only builds with `WERCODE_RELEASE` set at compile time (the release
   workflow) update themselves. To release: raise `version` in `Cargo.toml`,
   commit, push, then push the tag `v<version>`.
+- Tests that need a language server run the test binary itself as one
+  (`core::lsp::fake`): a plain `#[test]` calls `fake::serve()` when an
+  environment variable is set, and the spec starts the binary with
+  `fake::test_args(<that test's path>)`. No real server is needed in CI.
+- The editor component clears its underlines on every edit; `EditorView`
+  puts the last known problems back once typing pauses.
 - After finishing a feature, update `docs/features.csv` and
   `docs/build-log.md`.

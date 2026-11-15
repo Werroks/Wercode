@@ -23,9 +23,12 @@ use wercode_core::state::{self, Layout, State};
 use wercode_core::watch::{self, Watch};
 
 use crate::editor::Save;
+use crate::lsp::RestartLanguageServers;
 use crate::panel::git as git_panel;
+use crate::panel::problems::severity_icon;
 use crate::panel::{
-    FilesEvent, FilesPanel, GitPanel, GitPanelEvent, Remote, RemoteActivity, SearchEvent, SearchPanel,
+    FilesEvent, FilesPanel, GitPanel, GitPanelEvent, ProblemsEvent, ProblemsPanel, Remote, RemoteActivity,
+    SearchEvent, SearchPanel,
 };
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::term::{
@@ -35,6 +38,7 @@ use crate::term::{
 use crate::theme::AppState;
 use crate::update::{self, CheckForUpdates, CloseForUpdate};
 use wercode_core::i18n::{t, tf, tn};
+use wercode_core::lsp::{ProjectGuard, Severity, Status};
 
 actions!(
     workspace,
@@ -49,7 +53,8 @@ actions!(
         NewWindow,
         OpenSettings,
         SwitchBranch,
-        QuickOpen
+        QuickOpen,
+        ShowProblems
     ]
 );
 
@@ -110,6 +115,7 @@ pub enum PanelKind {
     Files,
     Search,
     Git,
+    Problems,
 }
 
 impl PanelKind {
@@ -118,6 +124,7 @@ impl PanelKind {
             PanelKind::Files => "files",
             PanelKind::Search => "search",
             PanelKind::Git => "git",
+            PanelKind::Problems => "problems",
         }
     }
 
@@ -125,6 +132,7 @@ impl PanelKind {
         match name {
             "search" => PanelKind::Search,
             "git" => PanelKind::Git,
+            "problems" => PanelKind::Problems,
             _ => PanelKind::Files,
         }
     }
@@ -152,6 +160,8 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("View: Show Files"), Box::new(ShowFiles)),
         (t("Search: Find in Files"), Box::new(ShowSearch)),
         (t("View: Show Git"), Box::new(ShowGit)),
+        (t("View: Show Problems"), Box::new(ShowProblems)),
+        (t("Language Servers: Restart"), Box::new(RestartLanguageServers)),
         (t("Window: New Window"), Box::new(NewWindow)),
         (t("Project: Open Folder\u{2026}"), Box::new(OpenFolder)),
         (t("Project: Switch to Recent\u{2026}"), Box::new(SwitchProject)),
@@ -173,9 +183,12 @@ struct Project {
     files: Entity<FilesPanel>,
     search: Entity<SearchPanel>,
     changes: Entity<GitPanel>,
+    problems: Entity<ProblemsPanel>,
     /// `None` outside a repository, and until the first read finishes.
     git: Option<Arc<RepoStatus>>,
-    _subscriptions: [Subscription; 5],
+    /// Keeps the language servers of the project running.
+    _servers: Option<ProjectGuard>,
+    _subscriptions: [Subscription; 6],
     _git_poll: Task<()>,
     /// Reports files changed by other programs. `None` when the system would
     /// not watch the folder; the git poll then still notices new files.
@@ -230,6 +243,8 @@ pub struct Workspace {
     _bounds: Subscription,
     /// A download or a waiting update shows in the status bar.
     _updates: Subscription,
+    /// What the language servers report shows in the status bar.
+    _checks: Option<Subscription>,
 }
 
 impl Workspace {
@@ -251,6 +266,7 @@ impl Workspace {
         }
         let bounds = cx.observe_window_bounds(window, |this, window, cx| this.remember_window(window, cx));
         let updates = cx.observe_global::<update::Updater>(|_, cx| cx.notify());
+        let checks = crate::lsp::checker(cx).map(|checker| cx.observe(&checker, |_, _, cx| cx.notify()));
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |this, cx| this.should_close(window, cx)).unwrap_or(true)
@@ -271,6 +287,7 @@ impl Workspace {
             save_task: None,
             _bounds: bounds,
             _updates: updates,
+            _checks: checks,
         };
         this.save_recent();
         this
@@ -282,6 +299,8 @@ impl Workspace {
         let files = cx.new(|cx| FilesPanel::new(root.clone(), window, cx));
         let search = cx.new(|cx| SearchPanel::new(root.clone(), window, cx));
         let changes = cx.new(|cx| GitPanel::new(root.clone(), window, cx));
+        let problems = cx.new(|cx| ProblemsPanel::new(root.clone(), cx));
+        let servers = crate::lsp::project(&root, cx);
         let subscriptions = [
             cx.subscribe_in(&files, window, |this, _, event, window, cx| {
                 let Some(project) = &this.project else { return };
@@ -303,6 +322,11 @@ impl Workspace {
             }),
             cx.subscribe_in(&search, window, |this, _, event, window, cx| match event {
                 SearchEvent::Open { path, line, column } => {
+                    this.open_file(path.clone(), Some((*line, *column)), window, cx)
+                }
+            }),
+            cx.subscribe_in(&problems, window, |this, _, event, window, cx| match event {
+                ProblemsEvent::Open { path, line, column } => {
                     this.open_file(path.clone(), Some((*line, *column)), window, cx)
                 }
             }),
@@ -370,7 +394,9 @@ impl Workspace {
             files,
             search,
             changes,
+            problems,
             git: None,
+            _servers: servers,
             _subscriptions: subscriptions,
             _git_poll: git_poll,
             _watch: watch,
@@ -689,6 +715,11 @@ impl Workspace {
     #[cfg(test)]
     fn search(&self) -> Entity<SearchPanel> {
         self.project.as_ref().unwrap().search.clone()
+    }
+
+    #[cfg(test)]
+    fn problems(&self) -> Entity<ProblemsPanel> {
+        self.project.as_ref().unwrap().problems.clone()
     }
 
     #[cfg(test)]
@@ -1415,6 +1446,7 @@ impl Workspace {
             PanelKind::Files => project.files.clone().into_any_element(),
             PanelKind::Search => project.search.clone().into_any_element(),
             PanelKind::Git => project.changes.clone().into_any_element(),
+            PanelKind::Problems => project.problems.clone().into_any_element(),
         };
 
         v_flex()
@@ -1435,9 +1467,128 @@ impl Workspace {
                         t("Search (Ctrl+Shift+F)"),
                         PanelKind::Search,
                     ))
-                    .child(tab("panel-git", Icon::new(Lucide::GitBranch), t("Git (Ctrl+Shift+G)"), PanelKind::Git)),
+                    .child(tab("panel-git", Icon::new(Lucide::GitBranch), t("Git (Ctrl+Shift+G)"), PanelKind::Git))
+                    .child(tab(
+                        "panel-problems",
+                        Icon::new(IconName::TriangleAlert),
+                        t("Problems (Ctrl+Shift+M)"),
+                        PanelKind::Problems,
+                    )),
             )
             .child(div().flex_1().min_h_0().child(body))
+    }
+
+    /// Errors and warnings in the project, while a language server checks
+    /// it or something is reported. A click shows the list.
+    fn render_checks(&self, project: &Project, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let checker = crate::lsp::checker(cx)?;
+        let servers = checker.read(cx).servers().clone();
+        let (errors, warnings) = servers.counts(&project.root);
+        if errors + warnings == 0 && !servers.is_checking(&project.root) {
+            return None;
+        }
+        let theme = cx.theme();
+        let (muted, hover) = (theme.muted_foreground, theme.secondary_hover);
+        let count = |severity: Severity, n: usize| {
+            let icon = if n > 0 { severity_icon(severity, cx) } else { severity_icon(severity, cx).text_color(muted) };
+            h_flex().gap_1().items_center().child(icon.xsmall()).child(n.to_string())
+        };
+        Some(
+            h_flex()
+                .id("status-problems")
+                .test_support()
+                .flex_none()
+                .gap_2()
+                .px_1()
+                .rounded_sm()
+                .hover(|s| s.bg(hover))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    if !(this.panel_open && this.panel == PanelKind::Problems) {
+                        this.show_panel(PanelKind::Problems, window, cx);
+                    }
+                }))
+                .child(count(Severity::Error, errors))
+                .child(count(Severity::Warning, warnings))
+                .into_any_element(),
+        )
+    }
+
+    /// The language server of the file that is showing: what it is doing,
+    /// or how to install one when there is none.
+    fn render_server(&self, project: &Project, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let checker = crate::lsp::checker(cx)?;
+        let path = project.terminals.read(cx).shown_file(cx)?;
+        let report = checker.read(cx).servers().report(&path)?;
+        let theme = cx.theme();
+        let (hover, link, danger) = (theme.secondary_hover, theme.link, theme.danger);
+        let item = h_flex().id("status-server").test_support().flex_none().gap_1().items_center().px_1();
+        let action = |id: &'static str, label: &'static str| {
+            div().id(id).test_support().px_1().rounded_sm().text_color(link).hover(|s| s.bg(hover)).child(label)
+        };
+        let text = |text: String| div().max_w(px(420.)).truncate().child(text);
+
+        if let Some(command) = report.install {
+            let install = action("status-server-install", t("Install")).on_click(cx.listener(
+                move |this, _: &ClickEvent, window, cx| this.run_in_terminal(&command, window, cx),
+            ));
+            return Some(
+                item.child(Icon::new(Lucide::Info).xsmall())
+                    .child(text(tf("No language server for {language}", &[("language", &report.language)])))
+                    .child(install)
+                    .into_any_element(),
+            );
+        }
+        // The one worth telling about: a failure, then work, then the rest.
+        let rank = |status: &Status| match status {
+            Status::Failed(_) => 0,
+            Status::Busy(_) => 1,
+            Status::Starting => 2,
+            Status::Ready => 3,
+            Status::Missing => 4,
+        };
+        let Some((name, status)) = report.servers.iter().min_by_key(|(_, status)| rank(status)) else {
+            let none = tf("No language server for {language}", &[("language", &report.language)]);
+            return Some(item.child(Icon::new(Lucide::Info).xsmall()).child(text(none)).into_any_element());
+        };
+        let spinner = || Icon::new(Lucide::LoaderCircle).xsmall();
+        Some(match status {
+            Status::Starting => {
+                item.child(spinner()).child(text(tf("{name}: starting", &[("name", name)]))).into_any_element()
+            }
+            Status::Busy(work) => item
+                .child(spinner())
+                .child(text(tf("{name}: {activity}", &[("name", name), ("activity", work)])))
+                .into_any_element(),
+            Status::Ready | Status::Missing => {
+                item.child(Icon::new(Lucide::CircleCheck).xsmall()).child(text(name.clone())).into_any_element()
+            }
+            Status::Failed(detail) => {
+                let said = if detail.is_empty() {
+                    tf("{name} stopped", &[("name", name)])
+                } else {
+                    tf("{name} stopped: {error}", &[("name", name), ("error", detail)])
+                };
+                let restart = action("status-server-restart", t("Restart")).on_click(cx.listener(
+                    |_, _: &ClickEvent, _, cx| {
+                        if let Some(checker) = crate::lsp::checker(cx) {
+                            checker.read(cx).servers().restart();
+                        }
+                    },
+                ));
+                item.text_color(danger)
+                    .child(Icon::new(IconName::TriangleAlert).xsmall())
+                    .child(text(said))
+                    .child(restart)
+                    .into_any_element()
+            }
+        })
+    }
+
+    /// Runs a command, such as installing a language server, in a new terminal tab.
+    fn run_in_terminal(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminals) = self.project.as_ref().map(|p| p.terminals.clone()) else { return };
+        terminals.update(cx, |area, cx| area.run_in_new_tab(command, window, cx));
+        cx.notify();
     }
 
     /// Branch, unpushed commits and changes. The branch takes the colour of
@@ -1445,6 +1596,8 @@ impl Workspace {
     fn render_status(&self, project: &Project, cx: &mut Context<Self>) -> impl IntoElement {
         let activity = project.changes.read(cx).activity();
         let update = update::status_bar(cx).map(|status| self.render_update(status, cx).into_any_element());
+        let checks = self.render_checks(project, cx);
+        let server = self.render_server(project, cx);
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
         let item = || h_flex().flex_none().gap_1().items_center();
@@ -1552,7 +1705,9 @@ impl Workspace {
                         }),
                 )
             })
+            .children(checks)
             .child(div().flex_1())
+            .children(server)
             .children(update)
             .child(
                 div()
@@ -1641,6 +1796,17 @@ impl Render for Workspace {
                 this.show_panel(PanelKind::Search, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowGit, window, cx| this.show_panel(PanelKind::Git, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowProblems, window, cx| {
+                this.palette = None;
+                this.show_panel(PanelKind::Problems, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RestartLanguageServers, _, cx| {
+                this.palette = None;
+                if let Some(checker) = crate::lsp::checker(cx) {
+                    checker.read(cx).servers().restart();
+                }
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_action(cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)))
             .on_action(cx.listener(|this, _: &git_panel::Pull, window, cx| this.git_remote(Remote::Pull, window, cx)))
@@ -2201,6 +2367,112 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("one")).unwrap();
         normalize(&dir.join("one"))
+    }
+
+    /// The test binary plays a language server: started again with this
+    /// variable set, the test below talks the protocol on its streams.
+    const FAKE_SERVER: &str = "WERCODE_FAKE_LANGUAGE_SERVER";
+
+    #[test]
+    fn fake_language_server() {
+        if std::env::var_os(FAKE_SERVER).is_some() {
+            wercode_core::lsp::fake::serve();
+        }
+    }
+
+    /// Opens a window on `project_dir(name)` with checking set up: a server
+    /// for Rust that calls `bad` an error and `meh` a warning, and a server
+    /// for Python that is not installed.
+    fn open_checked(cx: &mut TestAppContext, name: &str) -> Fixture {
+        use wercode_core::lsp::{Program, Spec, fake};
+        cx.executor().allow_parking();
+        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let fake = Spec {
+            name: "fake".into(),
+            programs: vec![Program {
+                program: exe,
+                args: fake::test_args("workspace::tests::fake_language_server"),
+                env: vec![(FAKE_SERVER.into(), "1".into())],
+            }],
+            probe: None,
+            languages: vec!["rust"],
+            markers: vec![],
+            install: None,
+            offer: true,
+        };
+        let missing = Spec {
+            name: "missing".into(),
+            programs: vec![Program { program: "wercode-no-such-server".into(), args: vec![], env: vec![] }],
+            languages: vec!["python"],
+            install: Some("echo install-it".into()),
+            ..fake.clone()
+        };
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::apply(Settings::default(), cx);
+            crate::lsp::init_with(vec![fake, missing], cx);
+        });
+        open(cx, name)
+    }
+
+    #[gpui_kit::test]
+    async fn language_servers_underline_count_and_list_problems(cx: &mut TestAppContext) {
+        let root = project_dir("lsp");
+        let file = root.join("main.rs");
+        let script = root.join("tool.py");
+        std::fs::write(&file, "fn main() {}\nlet x = bad;\nmeh\n").unwrap();
+        std::fs::write(&script, "print()\n").unwrap();
+        let f = open_checked(cx, "lsp");
+        let checker = cx.update(|cx| crate::lsp::checker(cx).unwrap());
+        let servers = checker.read_with(cx, |c, _| c.servers().clone());
+
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(file.clone(), None, window, cx));
+        })
+        .unwrap();
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let editor = area.read_with(cx, |a, cx| a.editor_for(&file, cx)).unwrap();
+        wait_until(cx, "the underlines", |cx| editor.read_with(cx, |e, cx| e.underlined(cx)).len() == 2);
+        assert_eq!(editor.read_with(cx, |e, cx| e.underlined(cx)), ["bad word", "weak word"]);
+        assert_eq!(servers.counts(&root), (1, 1));
+
+        // The counts in the status bar open the list; a problem in it opens its line.
+        cx.update_window(f.window, |_, window, cx| window.click("status-problems", cx)).unwrap();
+        assert_eq!(f.workspace.read_with(cx, |w, _| (w.panel_open, w.panel)), (true, PanelKind::Problems));
+        cx.run_until_parked();
+        let problems = f.workspace.read_with(cx, |w, _| w.problems());
+        assert_eq!(problems.read_with(cx, |p, _| p.listed()), (1, 2));
+        cx.update_window(f.window, |_, window, cx| window.click(("problems-row", 1usize), cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(area.read_with(cx, |a, cx| a.shown_file(cx)), Some(file.clone()));
+
+        // Fixing the text clears the underline once typing pauses.
+        cx.update_window(f.window, |_, window, cx| {
+            editor.update(cx, |e, cx| e.replace_all("bad", "good", window, cx));
+        })
+        .unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        wait_until(cx, "the error to go", |cx| editor.read_with(cx, |e, cx| e.underlined(cx)) == ["weak word"]);
+        wait_until(cx, "the list to follow", |cx| problems.read_with(cx, |p, _| p.listed()) == (1, 1));
+
+        // A language without a server offers to install one in a terminal.
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(script.clone(), None, window, cx));
+        })
+        .unwrap();
+        wait_until(cx, "the offer to install", |cx| {
+            cx.update(|_| servers.report(&script)).is_some_and(|r| r.install.is_some())
+        });
+        let tabs = area.read_with(cx, |a, _| a.tab_count());
+        cx.update_window(f.window, |_, window, cx| window.click("status-server-install", cx)).unwrap();
+        assert_eq!(area.read_with(cx, |a, _| a.tab_count()), tabs + 1);
+
+        // Turned off in the settings, nothing is underlined or counted.
+        cx.update(|cx| crate::theme::change_settings(cx, |s| s.language_servers = false)).unwrap();
+        wait_until(cx, "the underlines to go", |cx| editor.read_with(cx, |e, cx| e.underlined(cx)).is_empty());
+        assert_eq!(servers.counts(&root), (0, 0));
+        servers.stop_all(std::time::Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&f.dir);
     }
 
     #[gpui_kit::test]

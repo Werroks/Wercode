@@ -3,17 +3,23 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use wercode_core::document::{self, Document, Format, LoadError};
 use wercode_core::i18n::{t, tf};
+use wercode_core::lsp::{Problem, Servers, Severity};
+
+use crate::lsp::CheckerEvent;
 
 actions!(editor, [Save]);
 
 /// How often an open file is checked for changes made by other programs.
 const DISK_POLL: Duration = Duration::from_secs(1);
+/// Typing reaches the language servers this long after the last key.
+const TYPING_PAUSE: Duration = Duration::from_millis(300);
 
 /// The shortcut for saving is bound with the others, in `keymap`.
 pub fn init(_: &mut App) {}
@@ -25,6 +31,8 @@ pub enum EditorEvent {
 
 pub struct EditorView {
     path: PathBuf,
+    /// The project the file was opened from; language servers work in it.
+    root: PathBuf,
     state: Entity<EditorState>,
     focus: FocusHandle,
     format: Format,
@@ -39,7 +47,14 @@ pub struct EditorView {
     error: Option<String>,
     /// Where to put the cursor once the text has arrived (0-based line, column).
     pending_position: Option<(u32, u32)>,
+    /// The language servers, unless checking is not set up (in some tests).
+    servers: Option<Servers>,
+    /// The servers have been told the file is open.
+    opened: bool,
+    /// Sends the text to the servers once typing pauses.
+    send_task: Option<Task<()>>,
     _subscription: Subscription,
+    _checks: Option<Subscription>,
     _watch: Task<()>,
 }
 
@@ -52,16 +67,30 @@ impl Focusable for EditorView {
 }
 
 impl EditorView {
-    pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(path: PathBuf, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let language = document::language(&path);
         let state = cx.new(|cx| EditorState::new(window, cx).language(language));
         let subscription = cx.subscribe(&state, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) && this.loaded && !this.dirty {
+            if !matches!(event, InputEvent::Change) || !this.loaded {
+                return;
+            }
+            this.text_changed(cx);
+            if !this.dirty {
                 this.dirty = true;
                 cx.emit(EditorEvent::Changed);
                 cx.notify();
             }
         });
+        let checker = crate::lsp::checker(cx);
+        let checks = checker.as_ref().map(|checker| {
+            cx.subscribe(checker, |this, _, event: &CheckerEvent, cx| {
+                let CheckerEvent::Problems(path) = event;
+                if *path == this.path {
+                    this.show_problems(cx);
+                }
+            })
+        });
+        let servers = checker.map(|checker| checker.read(cx).servers().clone());
         let watch = cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(DISK_POLL).await;
@@ -74,6 +103,7 @@ impl EditorView {
         });
         let mut this = Self {
             path,
+            root,
             state,
             focus: cx.focus_handle(),
             format: Format::default(),
@@ -84,7 +114,11 @@ impl EditorView {
             problem: None,
             error: None,
             pending_position: None,
+            servers,
+            opened: false,
+            send_task: None,
             _subscription: subscription,
+            _checks: checks,
             _watch: watch,
         };
         this.reload(window, cx);
@@ -97,7 +131,12 @@ impl EditorView {
 
     /// The file was renamed or moved; this tab now belongs to its new path.
     pub fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(servers) = self.servers.as_ref().filter(|_| self.opened) {
+            servers.close(&self.path);
+            servers.open(&self.root, &path, self.state.read(cx).value().to_string());
+        }
         self.path = path;
+        self.show_problems(cx);
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -163,6 +202,17 @@ impl EditorView {
                     }
                 });
                 self.loaded = true;
+                if let Some(servers) = &self.servers {
+                    // The editor's own copy: its lines are what the servers count in.
+                    let text = self.state.read(cx).value().to_string();
+                    if self.opened {
+                        servers.change(&self.path, text);
+                    } else {
+                        servers.open(&self.root, &self.path, text);
+                        self.opened = true;
+                    }
+                }
+                self.show_problems(cx);
             }
             Err(error) => {
                 self.modified = document::modified(&self.path);
@@ -212,6 +262,10 @@ impl EditorView {
                         this.dirty = false;
                         this.changed_on_disk = false;
                         this.error = None;
+                        this.send_text(cx);
+                        if let Some(servers) = this.servers.as_ref().filter(|_| this.opened) {
+                            servers.saved(&this.path);
+                        }
                         then(window, cx);
                     }
                     Err(e) => this.error = Some(tf("Could not save {name}: {error}", &[("name", &this.file_name()), ("error", &e)])),
@@ -221,6 +275,43 @@ impl EditorView {
             });
         })
         .detach();
+    }
+
+    /// Sends the text to the language servers once typing pauses.
+    fn text_changed(&mut self, cx: &mut Context<Self>) {
+        if self.servers.is_none() || !self.opened {
+            return;
+        }
+        self.send_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TYPING_PAUSE).await;
+            let _ = this.update(cx, |this, cx| this.send_text(cx));
+        }));
+    }
+
+    fn send_text(&mut self, cx: &mut Context<Self>) {
+        self.send_task = None;
+        let Some(servers) = self.servers.as_ref().filter(|_| self.opened) else { return };
+        servers.change(&self.path, self.state.read(cx).value().to_string());
+        // The editor drops the underlines with each edit. The last ones stand
+        // until the servers answer: one with nothing new to say says nothing.
+        self.show_problems(cx);
+    }
+
+    /// Underlines what the language servers say about the file.
+    fn show_problems(&mut self, cx: &mut Context<Self>) {
+        let Some(servers) = &self.servers else { return };
+        if !self.loaded {
+            return;
+        }
+        let problems = servers.problems(&self.path);
+        self.state.update(cx, |state, cx| {
+            let text = state.text().clone();
+            if let Some(set) = state.diagnostics_mut() {
+                set.reset(&text);
+                set.extend(problems.iter().map(diagnostic));
+            }
+            cx.notify();
+        });
     }
 
     fn render_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -250,6 +341,45 @@ impl EditorView {
                 )))
                 .into_any_element(),
         )
+    }
+}
+
+impl Drop for EditorView {
+    fn drop(&mut self) {
+        if let Some(servers) = self.servers.as_ref().filter(|_| self.opened) {
+            servers.close(&self.path);
+        }
+    }
+}
+
+/// A problem as the editor shows it: a wavy line, and the message when the
+/// pointer rests on it.
+fn diagnostic(problem: &Problem) -> Diagnostic {
+    let (mut start, mut end) = ((problem.line, problem.column), (problem.end_line, problem.end_column));
+    // A problem at a point, such as a missing semicolon, still needs a
+    // character to underline: the one before it, or at a line start the next.
+    if start == end {
+        if start.1 > 0 {
+            start.1 -= 1;
+        } else {
+            end.1 += 1;
+        }
+    }
+    let message = match &problem.code {
+        Some(code) => format!("{} ({code})", problem.message),
+        None => problem.message.clone(),
+    };
+    let severity = match problem.severity {
+        Severity::Error => DiagnosticSeverity::Error,
+        Severity::Warning => DiagnosticSeverity::Warning,
+        Severity::Info => DiagnosticSeverity::Info,
+        Severity::Hint => DiagnosticSeverity::Hint,
+    };
+    let diagnostic = Diagnostic::new(Position::new(start.0, start.1)..Position::new(end.0, end.1), message)
+        .with_severity(severity);
+    match &problem.source {
+        Some(source) => diagnostic.with_source(source.clone()),
+        None => diagnostic,
     }
 }
 
@@ -293,6 +423,12 @@ impl Render for EditorView {
 impl EditorView {
     pub fn text(&self, cx: &App) -> String {
         self.state.read(cx).value().to_string()
+    }
+
+    /// The messages of the underlined problems, from the top down.
+    pub fn underlined(&self, cx: &App) -> Vec<String> {
+        let state = self.state.read(cx);
+        state.diagnostics().map(|set| set.iter().map(|d| d.message.to_string()).collect()).unwrap_or_default()
     }
 
     pub fn changed_on_disk(&self) -> bool {

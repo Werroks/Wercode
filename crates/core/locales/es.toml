@@ -12,7 +12,9 @@
 "BRANCHES" = "RAMAS"
 "Cancel" = "Cancelar"
 "CHANGES" = "CAMBIOS"
+"Check code" = "Comprobar el código"
 "Check Now" = "Buscar ahora"
+"Checking code is turned off in the settings." = "La comprobación del código está desactivada en la configuración."
 "Checking for updates…" = "Buscando actualizaciones…"
 "Checking…" = "Buscando…"
 "clean" = "limpio"
@@ -58,6 +60,7 @@
 "Downloading version {version}…" = "Descargando la versión {version}…"
 "Downloading Wercode {version}…" = "Descargando Wercode {version}…"
 "Edit settings.toml" = "Editar settings.toml"
+"Errors and warnings appear here once a language server checks a file you open." = "Los errores y advertencias aparecen aquí cuando un servidor de lenguaje revisa un archivo que abres."
 "Fetch" = "Recuperar"
 "Fetch failed" = "Error al recuperar"
 "Fetch from all remotes" = "Recuperar de todos los remotos"
@@ -85,10 +88,12 @@
 "Help: Check for Updates" = "Ayuda: Buscar actualizaciones"
 "Hide the terminal (Ctrl+Shift+J)" = "Ocultar el terminal (Ctrl+Shift+J)"
 "Insert Path into Terminal" = "Insertar ruta en el terminal"
+"Install" = "Instalar"
 "just now" = "ahora mismo"
 "Keep My Changes" = "Conservar mis cambios"
 "Keyboard shortcuts" = "Atajos de teclado"
 "Language" = "Idioma"
+"Language Servers: Restart" = "Servidores de lenguaje: reiniciar"
 "Layout" = "Disposición"
 "Left" = "Izquierda"
 "Match case" = "Coincidir mayúsculas y minúsculas"
@@ -112,6 +117,8 @@
 "No file matches" = "Ningún archivo coincide"
 "No files changed." = "No cambió ningún archivo."
 "No git repository" = "Sin repositorio git"
+"No language server for {language}" = "No hay servidor de lenguaje para {language}"
+"No problems found." = "No se encontraron problemas."
 "No results." = "Sin resultados."
 "Not a valid pattern: {error}" = "Patrón no válido: {error}"
 "not published" = "sin publicar"
@@ -123,6 +130,7 @@
 "Open in the Default App" = "Abrir con la aplicación predeterminada"
 "Open the file" = "Abrir el archivo"
 "Preferences: Settings" = "Preferencias: Configuración"
+"Problems (Ctrl+Shift+M)" = "Problemas (Ctrl+Mayús+M)"
 "Process exited" = "El proceso terminó"
 "Process exited with code {code}" = "El proceso terminó con el código {code}"
 "Programs are still running in {n} terminals. Closing the window will stop them." = { one = "Aún se ejecuta un programa en un terminal. Cerrar la ventana lo detendrá.", other = "Aún se ejecutan programas en {n} terminales. Cerrar la ventana los detendrá." }
@@ -145,6 +153,7 @@
 "Rename" = "Cambiar nombre"
 "Rename {name}" = "Cambiar el nombre de {name}"
 "Rename…" = "Cambiar nombre…"
+"Restart" = "Reiniciar"
 "Restart to Update" = "Reiniciar y actualizar"
 "Restart to update to {version}" = "Reiniciar para actualizar a {version}"
 "Reveal in File Explorer" = "Mostrar en el Explorador de archivos"
@@ -210,6 +219,7 @@
 "Toggle side panel (Ctrl+Shift+B)" = "Mostrar u ocultar el panel lateral (Ctrl+Shift+B)"
 "Type a command…" = "Escriba un comando…"
 "Type a file name…" = "Escriba un nombre de archivo…"
+"Underline errors and warnings in open files, using the language servers installed on this computer." = "Subrayar errores y advertencias en los archivos abiertos con los servidores de lenguaje instalados en este equipo."
 "Unstage" = "Quitar de preparados"
 "Unstage all" = "Quitar todo de preparados"
 "Updates come with installed releases. This copy was built from source." = "Las actualizaciones llegan a las versiones instaladas. Esta copia se compiló desde el código fuente."
@@ -218,6 +228,7 @@
 "Version {version} is ready. It is installed when Wercode restarts." = "La versión {version} está lista. Se instalará cuando Wercode se reinicie."
 "View: Show Files" = "Ver: Mostrar archivos"
 "View: Show Git" = "Ver: Mostrar git"
+"View: Show Problems" = "Ver: mostrar problemas"
 "View: Toggle Side Panel" = "Ver: Mostrar u ocultar el panel lateral"
 "Wercode is not running from Wercode.app" = "Wercode no se ejecuta desde Wercode.app"
 "Wercode is up to date" = "Wercode está al día"
@@ -235,11 +246,16 @@
 "{name} (changes)" = "{name} (cambios)"
 "{name} (staged)" = "{name} (preparado)"
 "{name} already exists." = "{name} ya existe."
+"{name} stopped" = "{name} se detuvo"
+"{name} stopped: {error}" = "{name} se detuvo: {error}"
+"{name}: starting" = "{name}: iniciando"
+"{name}: {activity}" = "{name}: {activity}"
 "{n} changes" = { one = "{n} cambio", other = "{n} cambios" }
 "{n} commits to pull" = { one = "{n} confirmación por traer", other = "{n} confirmaciones por traer" }
 "{n} commits to push" = { one = "{n} confirmación por enviar", other = "{n} confirmaciones por enviar" }
 "{n} conflicts" = { one = "{n} conflicto", other = "{n} conflictos" }
 "{n} days ago" = { one = "hace {n} día", other = "hace {n} días" }
+"{n} errors" = { one = "{n} error", other = "{n} errores" }
 "{n} files" = { one = "{n} archivo", other = "{n} archivos" }
 "{n} files in {name} have unsaved changes. Switching discards them." = { one = "{n} archivo de {name} tiene cambios sin guardar. Al cambiar se perderán.", other = "{n} archivos de {name} tienen cambios sin guardar. Al cambiar se perderán." }
 "{n} hours ago" = { one = "hace {n} hora", other = "hace {n} horas" }
@@ -247,6 +263,7 @@
 "{n} months ago" = { one = "hace {n} mes", other = "hace {n} meses" }
 "{n} results" = { one = "{n} resultado", other = "{n} resultados" }
 "{n} terminals in {name} are still running a program. Switching closes them." = { one = "{n} terminal de {name} aún ejecuta un programa. Al cambiar se cerrará.", other = "{n} terminales de {name} aún ejecutan programas. Al cambiar se cerrarán." }
+"{n} warnings" = { one = "{n} advertencia", other = "{n} advertencias" }
 "{n} weeks ago" = { one = "hace {n} semana", other = "hace {n} semanas" }
 "{n} years ago" = { one = "hace {n} año", other = "hace {n} años" }
 "{results} in {files}" = "{results} en {files}"

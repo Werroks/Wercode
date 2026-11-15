@@ -6,14 +6,15 @@ use std::rc::Rc;
 use gpui_kit::*;
 
 use crate::editor::Save;
+use crate::lsp::RestartLanguageServers;
 use crate::panel::git::{Commit, Fetch, Pull, Push, StageAll};
 use crate::term::{
     ClosePane, CloseTab, Find, NewTab, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
 };
 use crate::theme::AppState;
 use crate::workspace::{
-    CommandPalette, NewWindow, OpenFolder, OpenSettings, QuickOpen, ShowFiles, ShowGit, ShowSearch, SwitchBranch,
-    SwitchProject, TogglePanel,
+    CommandPalette, NewWindow, OpenFolder, OpenSettings, QuickOpen, ShowFiles, ShowGit, ShowProblems, ShowSearch,
+    SwitchBranch, SwitchProject, TogglePanel,
 };
 use wercode_core::i18n::tf;
 
@@ -43,6 +44,8 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("workspace.toggle_panel", "Workspace", TogglePanel, ["ctrl-shift-b"]),
         shortcut!("workspace.show_files", "Workspace", ShowFiles, []),
         shortcut!("workspace.show_git", "Workspace", ShowGit, ["ctrl-shift-g"]),
+        shortcut!("workspace.show_problems", "Workspace", ShowProblems, ["ctrl-shift-m"]),
+        shortcut!("workspace.restart_language_servers", "Workspace", RestartLanguageServers, []),
         shortcut!("workspace.open_folder", "Workspace", OpenFolder, ["ctrl-shift-o"]),
         shortcut!("workspace.switch_project", "Workspace", SwitchProject, []),
         shortcut!("workspace.switch_branch", "Workspace", SwitchBranch, []),

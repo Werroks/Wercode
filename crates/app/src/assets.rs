@@ -98,6 +98,10 @@ mod tests {
             IconName::ArrowDownToLine,
             IconName::ArrowUpFromLine,
             IconName::Undo2,
+            IconName::CircleX,
+            IconName::Info,
+            IconName::CircleCheck,
+            IconName::LoaderCircle,
         ];
         for icon in used {
             let path = icon.path();

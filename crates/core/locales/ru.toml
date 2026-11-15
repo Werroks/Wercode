@@ -12,7 +12,9 @@
 "BRANCHES" = "ВЕТКИ"
 "Cancel" = "Отмена"
 "CHANGES" = "ИЗМЕНЕНИЯ"
+"Check code" = "Проверка кода"
 "Check Now" = "Проверить сейчас"
+"Checking code is turned off in the settings." = "Проверка кода выключена в настройках."
 "Checking for updates…" = "Проверка обновлений…"
 "Checking…" = "Проверка…"
 "clean" = "чисто"
@@ -58,6 +60,7 @@
 "Downloading version {version}…" = "Загрузка версии {version}…"
 "Downloading Wercode {version}…" = "Загрузка Wercode {version}…"
 "Edit settings.toml" = "Открыть settings.toml"
+"Errors and warnings appear here once a language server checks a file you open." = "Ошибки и предупреждения появятся здесь, когда языковой сервер проверит открытый файл."
 "Fetch" = "Получить"
 "Fetch failed" = "Получить не удалось"
 "Fetch from all remotes" = "Получить изменения со всех удалённых репозиториев"
@@ -85,10 +88,12 @@
 "Help: Check for Updates" = "Справка: проверить обновления"
 "Hide the terminal (Ctrl+Shift+J)" = "Скрыть терминал (Ctrl+Shift+J)"
 "Insert Path into Terminal" = "Вставить путь в терминал"
+"Install" = "Установить"
 "just now" = "только что"
 "Keep My Changes" = "Оставить мои изменения"
 "Keyboard shortcuts" = "Сочетания клавиш"
 "Language" = "Язык"
+"Language Servers: Restart" = "Языковые серверы: перезапустить"
 "Layout" = "Расположение"
 "Left" = "Слева"
 "Match case" = "Учитывать регистр"
@@ -112,6 +117,8 @@
 "No file matches" = "Подходящих файлов нет"
 "No files changed." = "Файлы не изменены."
 "No git repository" = "Нет git-репозитория"
+"No language server for {language}" = "Нет языкового сервера для {language}"
+"No problems found." = "Проблем не найдено."
 "No results." = "Ничего не найдено."
 "Not a valid pattern: {error}" = "Неверный шаблон: {error}"
 "not published" = "не опубликована"
@@ -123,6 +130,7 @@
 "Open in the Default App" = "Открыть в программе по умолчанию"
 "Open the file" = "Открыть файл"
 "Preferences: Settings" = "Параметры: настройки"
+"Problems (Ctrl+Shift+M)" = "Проблемы (Ctrl+Shift+M)"
 "Process exited" = "Процесс завершился"
 "Process exited with code {code}" = "Процесс завершился с кодом {code}"
 "Programs are still running in {n} terminals. Closing the window will stop them." = { one = "В терминале ещё работает программа. Закрытие окна остановит её.", few = "Программы ещё работают в {n} терминалах. Закрытие окна остановит их.", many = "Программы ещё работают в {n} терминалах. Закрытие окна остановит их." }
@@ -145,6 +153,7 @@
 "Rename" = "Переименовать"
 "Rename {name}" = "Переименовать {name}"
 "Rename…" = "Переименовать…"
+"Restart" = "Перезапустить"
 "Restart to Update" = "Перезапустить и обновить"
 "Restart to update to {version}" = "Перезапустить для обновления до {version}"
 "Reveal in File Explorer" = "Показать в Проводнике"
@@ -210,6 +219,7 @@
 "Toggle side panel (Ctrl+Shift+B)" = "Показать или скрыть боковую панель (Ctrl+Shift+B)"
 "Type a command…" = "Введите команду…"
 "Type a file name…" = "Введите имя файла…"
+"Underline errors and warnings in open files, using the language servers installed on this computer." = "Подчёркивать ошибки и предупреждения в открытых файлах с помощью языковых серверов, установленных на этом компьютере."
 "Unstage" = "Убрать из индекса"
 "Unstage all" = "Убрать всё из индекса"
 "Updates come with installed releases. This copy was built from source." = "Обновления приходят в установленные выпуски. Эта копия собрана из исходников."
@@ -218,6 +228,7 @@
 "Version {version} is ready. It is installed when Wercode restarts." = "Версия {version} готова. Она установится при перезапуске Wercode."
 "View: Show Files" = "Вид: показать файлы"
 "View: Show Git" = "Вид: показать git"
+"View: Show Problems" = "Вид: показать проблемы"
 "View: Toggle Side Panel" = "Вид: показать или скрыть боковую панель"
 "Wercode is not running from Wercode.app" = "Wercode запущен не из Wercode.app"
 "Wercode is up to date" = "Wercode обновлён"
@@ -235,11 +246,16 @@
 "{name} (changes)" = "{name} (изменения)"
 "{name} (staged)" = "{name} (в индексе)"
 "{name} already exists." = "{name} уже существует."
+"{name} stopped" = "{name} остановился"
+"{name} stopped: {error}" = "{name} остановился: {error}"
+"{name}: starting" = "{name}: запуск"
+"{name}: {activity}" = "{name}: {activity}"
 "{n} changes" = { one = "{n} изменение", few = "{n} изменения", many = "{n} изменений" }
 "{n} commits to pull" = { one = "{n} коммит к получению", few = "{n} коммита к получению", many = "{n} коммитов к получению" }
 "{n} commits to push" = { one = "{n} коммит к отправке", few = "{n} коммита к отправке", many = "{n} коммитов к отправке" }
 "{n} conflicts" = { one = "{n} конфликт", few = "{n} конфликта", many = "{n} конфликтов" }
 "{n} days ago" = { one = "{n} день назад", few = "{n} дня назад", many = "{n} дней назад" }
+"{n} errors" = { one = "{n} ошибка", few = "{n} ошибки", many = "{n} ошибок" }
 "{n} files" = { one = "{n} файле", few = "{n} файлах", many = "{n} файлах" }
 "{n} files in {name} have unsaved changes. Switching discards them." = { one = "В {name} {n} файл с несохранёнными изменениями. При переключении они пропадут.", few = "В {name} {n} файла с несохранёнными изменениями. При переключении они пропадут.", many = "В {name} {n} файлов с несохранёнными изменениями. При переключении они пропадут." }
 "{n} hours ago" = { one = "{n} час назад", few = "{n} часа назад", many = "{n} часов назад" }
@@ -247,6 +263,7 @@
 "{n} months ago" = { one = "{n} месяц назад", few = "{n} месяца назад", many = "{n} месяцев назад" }
 "{n} results" = { one = "{n} совпадение", few = "{n} совпадения", many = "{n} совпадений" }
 "{n} terminals in {name} are still running a program. Switching closes them." = { one = "В {name} {n} терминал ещё выполняет программу. При переключении он закроется.", few = "В {name} {n} терминала ещё выполняют программы. При переключении они закроются.", many = "В {name} {n} терминалов ещё выполняют программы. При переключении они закроются." }
+"{n} warnings" = { one = "{n} предупреждение", few = "{n} предупреждения", many = "{n} предупреждений" }
 "{n} weeks ago" = { one = "{n} неделю назад", few = "{n} недели назад", many = "{n} недель назад" }
 "{n} years ago" = { one = "{n} год назад", few = "{n} года назад", many = "{n} лет назад" }
 "{results} in {files}" = "{results} в {files}"

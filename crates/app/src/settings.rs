@@ -386,6 +386,12 @@ impl Render for SettingsView {
                         switch("settings-copy", settings.copy_on_select, |s, on| s.copy_on_select = on),
                         cx,
                     ))
+                    .child(Self::row(
+                        t("Check code"),
+                        t("Underline errors and warnings in open files, using the language servers installed on this computer."),
+                        switch("settings-language-servers", settings.language_servers, |s, on| s.language_servers = on),
+                        cx,
+                    ))
                     .child(updates)
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().id("settings-error").text_xs().text_color(danger).child(error))

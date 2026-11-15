@@ -560,7 +560,8 @@ impl TerminalArea {
 
     /// Adds a tab with `path` open in the editor and returns its index.
     fn push_editor(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> usize {
-        let editor = cx.new(|cx| EditorView::new(path, window, cx));
+        let root = self.root_dir.clone();
+        let editor = cx.new(|cx| EditorView::new(path, root, window, cx));
         let subscription = cx.subscribe(&editor, |_, _, _: &EditorEvent, cx| cx.notify());
         self.subscriptions.insert(editor.entity_id(), subscription);
         let id = self.id();
@@ -651,6 +652,13 @@ impl TerminalArea {
         self.select_tab(index, window, cx);
     }
 
+    /// The file whose tab is showing. With one row of tabs that is the
+    /// active tab; with the terminal below, the file above it.
+    pub fn shown_file(&self, cx: &App) -> Option<PathBuf> {
+        let index = if Self::docked(cx) { self.shown(false)? } else { self.active };
+        self.tabs.get(index)?.editor().map(|editor| editor.read(cx).path().to_path_buf())
+    }
+
     /// Opens a new terminal tab and runs `command` in it.
     pub fn run_in_new_tab(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.add_tab(window, cx);
@@ -679,6 +687,12 @@ impl TerminalArea {
             Body::Diff(diff) => Some(diff.clone()),
             _ => None,
         }
+    }
+
+    /// The editor tab of a file, if it is open.
+    #[cfg(test)]
+    pub fn editor_for(&self, path: &Path, cx: &App) -> Option<Entity<EditorView>> {
+        self.tabs.iter().filter_map(|t| t.editor()).find(|e| e.read(cx).path() == path).cloned()
     }
 
     #[cfg(test)]

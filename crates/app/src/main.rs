@@ -5,6 +5,7 @@ mod assets;
 mod diff;
 mod editor;
 mod keymap;
+mod lsp;
 mod panel;
 mod settings;
 mod term;
@@ -49,6 +50,7 @@ fn main() {
         theme::apply(settings, cx);
         theme::set_settings_path(wercode_core::config::settings_path(), cx);
         update::init(cx);
+        lsp::init(cx);
         term::init(cx);
         editor::init(cx);
         workspace::init(cx);

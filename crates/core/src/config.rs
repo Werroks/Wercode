@@ -57,6 +57,9 @@ pub struct Settings {
     /// Look for new versions now and then, download them in the background
     /// and install them when Wercode restarts.
     pub auto_update: bool,
+    /// Check open files with the language servers installed on this
+    /// computer and underline what they report.
+    pub language_servers: bool,
     /// The language of the interface: "auto" follows the computer, or one of
     /// "en", "ru", "de", "es", "zh".
     pub language: String,
@@ -97,6 +100,7 @@ impl Default for Settings {
             panel_side: "left".into(),
             layout: "tabs".into(),
             auto_update: true,
+            language_servers: true,
             language: "auto".into(),
             keys: BTreeMap::new(),
         }

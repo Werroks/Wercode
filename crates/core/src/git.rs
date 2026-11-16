@@ -312,6 +312,38 @@ pub fn branches(dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Branches of the remotes that have no local branch of the same name yet,
+/// as git writes them: `origin/feature`.
+pub fn remote_branches(dir: &Path) -> Vec<String> {
+    let local = branches(dir);
+    output(git(dir).args(["for-each-ref", "--format=%(refname:short)", "refs/remotes"]))
+        .map(|out| {
+            String::from_utf8_lossy(&out)
+                .lines()
+                .filter(|name| match name.split_once('/') {
+                    // `origin/HEAD` only says which branch the remote shows first.
+                    Some((_, branch)) => branch != "HEAD" && !local.iter().any(|l| l == branch),
+                    // A bare `origin` is the same pointer under a short name.
+                    None => false,
+                })
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Makes a local branch that follows a branch of a remote (`origin/feature`
+/// gives `feature`) and switches to it.
+pub fn track(dir: &Path, remote_branch: &str) -> Result<(), String> {
+    run(dir, &["switch", "--quiet", "--track", remote_branch], &[])
+}
+
+/// Deletes a local branch. Git refuses, and says why, when the branch is
+/// checked out or has commits that are nowhere else.
+pub fn delete_branch(dir: &Path, name: &str) -> Result<(), String> {
+    run(dir, &["branch", "--quiet", "-d", name], &[])
+}
+
 /// Checks out an existing local branch. Git refuses when that would
 /// overwrite changes, and says which files.
 pub fn switch(dir: &Path, branch: &str) -> Result<(), String> {
@@ -478,6 +510,21 @@ mod tests {
         assert_eq!(status(&dir).unwrap().ahead, 0);
         fetch(&dir).unwrap();
         pull(&dir).unwrap();
+
+        // A branch that only the remote has is listed, followed and deleted.
+        switch(&dir, "feature/one").unwrap();
+        push(&dir, false).unwrap();
+        switch(&dir, "trunk").unwrap();
+        assert_eq!(remote_branches(&dir), Vec::<String>::new());
+        // Checked out, a branch cannot go; merged and elsewhere, it can.
+        assert!(!delete_branch(&dir, "trunk").unwrap_err().is_empty());
+        delete_branch(&dir, "feature/one").unwrap();
+        assert_eq!(branches(&dir), ["trunk"]);
+        assert_eq!(remote_branches(&dir), ["origin/feature/one"]);
+        track(&dir, "origin/feature/one").unwrap();
+        let s = status(&dir).unwrap();
+        assert_eq!((s.branch.as_deref(), s.has_upstream), (Some("feature/one"), true));
+        assert_eq!(remote_branches(&dir), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&remote);
         let _ = std::fs::remove_dir_all(&dir);
     }

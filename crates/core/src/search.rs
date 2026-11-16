@@ -105,6 +105,51 @@ pub fn search_text(pattern: &Regex, text: &str, limit: usize) -> Vec<Line> {
         .collect()
 }
 
+/// What a replacement across files did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Replaced {
+    /// Files that were rewritten, and matches replaced in them.
+    pub files: usize,
+    pub matches: usize,
+    /// The first file that could not be read or written, and why. The files
+    /// before it are changed, those after it are not.
+    pub failed: Option<(PathBuf, String)>,
+}
+
+/// Replaces every match of `query` in `files` with `with`, writing each file
+/// back in the encoding and with the line endings it had. In a regular
+/// expression `$1` and `${name}` in `with` stand for what the groups matched;
+/// otherwise the text goes in as it is written.
+pub fn replace(query: &Query, with: &str, files: &[PathBuf]) -> Result<Replaced, String> {
+    let pattern = compile(query)?;
+    let mut done = Replaced::default();
+    for path in files {
+        let document = match crate::document::load(path) {
+            Ok(document) => document,
+            Err(error) => {
+                done.failed = Some((path.clone(), error.message()));
+                break;
+            }
+        };
+        let matches = pattern.find_iter(&document.text).filter(|m| !m.is_empty()).count();
+        if matches == 0 {
+            continue;
+        }
+        let text = if query.regex {
+            pattern.replace_all(&document.text, with)
+        } else {
+            pattern.replace_all(&document.text, regex::NoExpand(with))
+        };
+        if let Err(error) = crate::document::save(path, &text, document.format) {
+            done.failed = Some((path.clone(), error));
+            break;
+        }
+        done.files += 1;
+        done.matches += matches;
+    }
+    Ok(done)
+}
+
 /// Searches every file under `root`, calling `found` for each file that has
 /// matches, in the order the files are listed. Setting `cancel` stops it early.
 pub fn search(
@@ -229,5 +274,35 @@ mod tests {
         cancel.store(true, Ordering::Relaxed);
         assert_eq!(search(&root, &query("needle"), &cancel, |_| panic!()).unwrap(), Summary::default());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn replacing_rewrites_the_files_and_keeps_their_line_endings() {
+        let dir = std::env::temp_dir().join(format!("wercode-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (unix, windows, other) = (dir.join("a.txt"), dir.join("b.txt"), dir.join("c.txt"));
+        std::fs::write(&unix, "let old = Old;\nold\n").unwrap();
+        std::fs::write(&windows, "old one\r\nold two\r\n").unwrap();
+        std::fs::write(&other, "nothing here\n").unwrap();
+        let files = [unix.clone(), windows.clone(), other.clone()];
+
+        let query = Query { text: "old".into(), case_sensitive: true, ..Query::default() };
+        let done = replace(&query, "$new", &files).unwrap();
+        assert_eq!((done.files, done.matches, done.failed), (2, 4, None));
+        assert_eq!(std::fs::read_to_string(&unix).unwrap(), "let $new = Old;\n$new\n");
+        assert_eq!(std::fs::read_to_string(&windows).unwrap(), "$new one\r\n$new two\r\n");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "nothing here\n");
+
+        // A regular expression may use what its groups matched.
+        let query = Query { text: r"(\w+) (one|two)".into(), regex: true, ..Query::default() };
+        let done = replace(&query, "$2", &[windows.clone()]).unwrap();
+        assert_eq!((done.files, done.matches), (1, 2));
+        assert_eq!(std::fs::read_to_string(&windows).unwrap(), "$one\r\n$two\r\n");
+
+        // A file that has gone stops the work and is named.
+        let done = replace(&Query { text: "x".into(), ..Query::default() }, "y", &[dir.join("gone.txt")]).unwrap();
+        assert_eq!(done.failed.map(|f| f.0), Some(dir.join("gone.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

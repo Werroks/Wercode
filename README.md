@@ -79,14 +79,15 @@ smaller VS Code.
 
 **Files and editor**
 - File tree with git status colours, `.gitignore` respected, follows the disk live
-- Go to any file by a few letters of its name, search the whole project
+- Go to any file by a few letters of its name, search and replace across the whole project
 - Built-in editor with syntax colours for 20 languages, find and replace, undo
 - Notices when an agent changes an open file and reloads it
 
 **Git**
 - Stage, unstage, commit, discard; push, pull and fetch
 - Commit graph with branches and tags; click a commit to see what it changed
-- Branch, commits to push and pull, and changes in the status bar; switch or create branches
+- Branch, commits to push and pull, and changes in the status bar; switch, create and delete
+  branches, and check out the ones that are only on the remote
 
 **Code checks**
 - Errors and warnings underlined as you type, with the message on hover

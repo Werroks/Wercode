@@ -201,6 +201,8 @@ struct Project {
 struct BranchMenu {
     /// Local branches; empty until git has listed them.
     names: Vec<String>,
+    /// Branches only a remote has, as `origin/name`.
+    remote: Vec<String>,
     /// The name for a new branch.
     input: Entity<InputState>,
     error: Option<String>,
@@ -325,6 +327,8 @@ impl Workspace {
                 SearchEvent::Open { path, line, column } => {
                     this.open_file(path.clone(), Some((*line, *column)), window, cx)
                 }
+                // Git has new changes to show.
+                SearchEvent::Replaced => this.refresh_git(cx),
             }),
             cx.subscribe_in(&problems, window, |this, _, event, window, cx| match event {
                 ProblemsEvent::Open { path, line, column } => {
@@ -417,7 +421,9 @@ impl Workspace {
     fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switcher_open = false;
         self.palette = None;
-        let Some(project) = self.project.as_ref().filter(|p| p.git.is_some()) else { return };
+        if !self.project.as_ref().is_some_and(|p| p.git.is_some()) {
+            return;
+        }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(t("New branch name, then Enter")));
         let subscription = cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -427,15 +433,59 @@ impl Workspace {
         });
         input.update(cx, |input, cx| input.focus(window, cx));
         self.branches =
-            Some(BranchMenu { names: Vec::new(), input, error: None, busy: false, _subscription: subscription });
+            Some(BranchMenu {
+                names: Vec::new(),
+                remote: Vec::new(),
+                input,
+                error: None,
+                busy: false,
+                _subscription: subscription,
+            });
+        self.list_branches(cx);
+        cx.notify();
+    }
+
+    /// Reads the branches for the list that is showing.
+    fn list_branches(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
         let root = project.root.clone();
         cx.spawn(async move |this, cx| {
-            let names = cx.background_executor().spawn(async move { git::branches(&root) }).await;
+            let (names, remote) = cx
+                .background_executor()
+                .spawn(async move { (git::branches(&root), git::remote_branches(&root)) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(menu) = &mut this.branches {
-                    menu.names = names;
+                    (menu.names, menu.remote) = (names, remote);
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Deletes a local branch; the list stays open and shows what is left,
+    /// or what git said against it.
+    fn delete_branch(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
+        let Some(menu) = &mut self.branches else { return };
+        if menu.busy {
+            return;
+        }
+        menu.busy = true;
+        menu.error = None;
+        let root = project.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::delete_branch(&root, &name) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(menu) = &mut this.branches {
+                    menu.busy = false;
+                    menu.error = result.err();
+                }
+                this.list_branches(cx);
+                // The graph draws branch names too.
+                this.refresh_git(cx);
+                cx.notify();
             });
         })
         .detach();
@@ -459,12 +509,22 @@ impl Workspace {
         }
         menu.busy = true;
         menu.error = None;
+        // A branch of a remote gets a local one that follows it.
+        let follow = !create && menu.remote.contains(&name);
         let root = project.root.clone();
         cx.spawn_in(window, async move |this, cx| {
             let dir = root.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { if create { git::create_branch(&dir, &name) } else { git::switch(&dir, &name) } })
+                .spawn(async move {
+                    if create {
+                        git::create_branch(&dir, &name)
+                    } else if follow {
+                        git::track(&dir, &name)
+                    } else {
+                        git::switch(&dir, &name)
+                    }
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
@@ -513,8 +573,43 @@ impl Workspace {
                 .child(Icon::new(Lucide::GitBranch).xsmall().text_color(muted))
                 .child(div().flex_1().min_w_0().truncate().child(name.clone()))
                 .when(is_current, |d| d.child(Icon::new(IconName::Check).xsmall().text_color(muted)))
+                .when(!is_current, |d| {
+                    let gone = name.clone();
+                    d.child(
+                        Button::new(("branch-delete", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(t("Delete Branch"))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                // The row under the button would switch to the branch.
+                                cx.stop_propagation();
+                                this.delete_branch(gone.clone(), window, cx);
+                            })),
+                    )
+                })
         });
-        let rows: Vec<_> = rows.collect();
+        let mut rows: Vec<_> = rows.collect();
+        // After the local ones, what only a remote has: a click brings it here.
+        rows.extend(menu.remote.iter().enumerate().map(|(index, name)| {
+            let target = name.clone();
+            h_flex()
+                .id(("remote-branch", index))
+                .test_support()
+                .w_full()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .text_sm()
+                .text_color(muted)
+                .hover(|s| s.bg(hover))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.change_branch(target.clone(), false, window, cx);
+                }))
+                .child(Icon::new(Lucide::GitBranch).xsmall().text_color(muted))
+                .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+        }));
         self.backdrop("branches-backdrop", cx).child(
             v_flex()
                 .id("branches")
@@ -2174,6 +2269,26 @@ mod tests {
         assert!(f.workspace.read_with(cx, |w, _| w.branches.as_ref().is_some_and(|m| m.error.is_some())));
         press(cx, f.window, &["escape"]);
         assert!(f.workspace.read_with(cx, |w, _| w.branches.is_none()));
+
+        // A branch that is on the remote can be deleted here; the list then
+        // offers the remote's, and a click on that brings it back.
+        click(cx, "status-branch".into());
+        click(cx, ("branch", 0usize).into());
+        assert_eq!(status(cx).branch.as_deref(), Some("feature/one"));
+        click(cx, "git-push".into());
+        click(cx, "status-branch".into());
+        click(cx, ("branch", 1usize).into());
+        assert_eq!(status(cx).branch.as_deref(), Some("trunk"));
+        click(cx, "status-branch".into());
+        let listed = |cx: &mut TestAppContext| {
+            f.workspace.read_with(cx, |w, _| w.branches.as_ref().map(|m| (m.names.clone(), m.remote.clone())).unwrap())
+        };
+        assert_eq!(listed(cx), (vec!["feature/one".to_string(), "trunk".to_string()], vec![]));
+        click(cx, ("branch-delete", 0usize).into());
+        wait_until(cx, "the branch to go", |cx| listed(cx).0 == ["trunk"]);
+        assert_eq!(listed(cx).1, ["origin/feature/one"]);
+        click(cx, ("remote-branch", 0usize).into());
+        assert_eq!(status(cx).branch.as_deref(), Some("feature/one"));
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 
@@ -2604,6 +2719,25 @@ three
         .unwrap();
         wait_until(cx, "the error", |cx| search.read_with(cx, |s, _| s.status_text().is_some()));
         assert!(search.read_with(cx, |s, _| s.status_text()).unwrap().starts_with("Not a valid pattern"));
+
+        // Replace All asks first, then rewrites the files that were found.
+        cx.update_window(f.window, |_, window, cx| window.click("search-regex", cx)).unwrap();
+        cx.update_window(f.window, |_, window, cx| {
+            search.update(cx, |s, cx| {
+                s.write_replacement("pin", window, cx);
+                s.write_query("needle", window, cx);
+            });
+        })
+        .unwrap();
+        wait_until(cx, "the search before replacing", |cx| search.read_with(cx, |s, _| s.found().is_some()));
+        let (files, lines) = search.read_with(cx, |s, _| s.found()).unwrap();
+        cx.update_window(f.window, |_, window, cx| window.click("search-replace-all", cx)).unwrap();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Replace");
+        let said = format!("Replaced {lines} results in {files} files.");
+        wait_until(cx, "the replacement", |cx| search.read_with(cx, |s, _| s.status_text()) == Some(said.clone()));
+        let text = std::fs::read_to_string(root.join("src").join("a.rs")).unwrap();
+        assert!(text.contains("// the pin is here") && !text.contains("needle"), "{text}");
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

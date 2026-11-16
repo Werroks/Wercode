@@ -10,7 +10,9 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::file_icons;
@@ -24,6 +26,8 @@ const ROW_HEIGHT: f32 = 22.0;
 pub enum SearchEvent {
     /// A result was clicked: the file, and the 1-based line and column of the match.
     Open { path: PathBuf, line: u32, column: u32 },
+    /// Files of the project were rewritten.
+    Replaced,
 }
 
 /// One line of the result list.
@@ -44,6 +48,10 @@ enum Toggle {
 pub struct SearchPanel {
     root: PathBuf,
     input: Entity<InputState>,
+    /// What the matches are to be replaced with.
+    replacement: Entity<InputState>,
+    /// What the last replacement did, until the next search.
+    note: Option<String>,
     /// The language the field's hint is in; it follows the settings.
     language: Language,
     options: Query,
@@ -77,9 +85,12 @@ impl SearchPanel {
             InputEvent::PressEnter { .. } => this.start(Duration::ZERO, cx),
             _ => {}
         });
+        let replacement = cx.new(|cx| InputState::new(window, cx).placeholder(t("Replace with")));
         Self {
             root,
             input,
+            replacement,
+            note: None,
             language: i18n::language(),
             options: Query::default(),
             files: Vec::new(),
@@ -108,6 +119,53 @@ impl SearchPanel {
         self.rows.clear();
         self.summary = None;
         self.error = None;
+        self.note = None;
+    }
+
+    /// Asks, then replaces every match in the files that were found with
+    /// what is in the second field. The files change on disk; open ones
+    /// that have no unsaved edits show the new text by themselves.
+    fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.running || self.files.is_empty() {
+            return;
+        }
+        let lines: usize = self.files.iter().map(|f| f.lines.len()).sum();
+        let results = tn(lines as u64, "{n} result", "{n} results", &[]);
+        let files = tn(self.files.len() as u64, "{n} file", "{n} files", &[]);
+        let title = tf("Replace {results} in {files}?", &[("results", &results), ("files", &files)]);
+        let detail = t("The files are changed on disk. This cannot be undone from here.");
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(detail), &[t("Replace"), t("Cancel")], cx);
+        let query = Query { text: self.input.read(cx).value().to_string(), ..self.options.clone() };
+        let with = self.replacement.read(cx).value().to_string();
+        let paths: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let done = cx.background_executor().spawn(async move { search::replace(&query, &with, &paths) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.clear();
+                match done {
+                    Ok(done) => {
+                        let results = tn(done.matches as u64, "{n} result", "{n} results", &[]);
+                        let files = tn(done.files as u64, "{n} file", "{n} files", &[]);
+                        let replaced = tf("Replaced {results} in {files}.", &[("results", &results), ("files", &files)]);
+                        this.note = Some(match done.failed {
+                            Some((path, error)) => {
+                                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                let stopped = tf("Stopped at {name}: {error}", &[("name", &name), ("error", &error)]);
+                                format!("{replaced} {stopped}")
+                            }
+                            None => replaced,
+                        });
+                    }
+                    Err(error) => this.error = Some(error),
+                }
+                cx.emit(SearchEvent::Replaced);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Searches for what is in the field, after `delay`. A search already
@@ -216,6 +274,9 @@ impl SearchPanel {
         if let Some(error) = &self.error {
             return Some(tf("Not a valid pattern: {error}", &[("error", error)]));
         }
+        if let Some(note) = &self.note {
+            return Some(note.clone());
+        }
         let lines: usize = self.files.iter().map(|f| f.lines.len()).sum();
         let results = tn(lines as u64, "{n} result", "{n} results", &[]);
         let files = tn(self.files.len() as u64, "{n} file", "{n} files", &[]);
@@ -299,6 +360,7 @@ impl Render for SearchPanel {
         if self.language != i18n::language() {
             self.language = i18n::language();
             self.input.update(cx, |input, cx| input.set_placeholder(t("Search in files"), window, cx));
+            self.replacement.update(cx, |input, cx| input.set_placeholder(t("Replace with"), window, cx));
         }
         let theme = cx.theme();
         let (muted, danger) = (theme.muted_foreground, theme.danger);
@@ -319,6 +381,17 @@ impl Render for SearchPanel {
         let status = self.status();
         let failed = self.error.is_some();
         let count = self.rows.len();
+        let can_replace = !self.running && !self.files.is_empty();
+        let replace = h_flex()
+            .gap_1()
+            .child(div().flex_1().min_w_0().child(Input::new(&self.replacement).small()))
+            .child(
+                Button::new("search-replace-all")
+                    .small()
+                    .label(t("Replace All"))
+                    .disabled(!can_replace)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.replace_all(window, cx))),
+            );
 
         v_flex()
             .id("search-panel")
@@ -329,6 +402,7 @@ impl Render for SearchPanel {
                     .p_2()
                     .gap_1p5()
                     .child(Input::new(&self.input).small().cleanable(true))
+                    .child(replace)
                     .child(options)
                     .when_some(status, |d, status| {
                         d.child(
@@ -364,6 +438,10 @@ impl SearchPanel {
     /// Files found and matching lines in them, once the search has finished.
     pub fn found(&self) -> Option<(usize, usize)> {
         self.summary.map(|_| (self.files.len(), self.files.iter().map(|f| f.lines.len()).sum()))
+    }
+
+    pub fn write_replacement(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.replacement.update(cx, |input, cx| input.set_value(text.to_string(), window, cx));
     }
 
     pub fn row_count(&self) -> usize {

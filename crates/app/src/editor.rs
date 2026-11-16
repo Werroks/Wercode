@@ -4,17 +4,21 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
+use futures::FutureExt as _;
 use futures::channel::oneshot;
-use gpui_kit::base::input::{DefinitionProvider, Diagnostic, DiagnosticSeverity, HoverProvider, Rope, RopeExt as _};
+use gpui_kit::base::input::{
+    CompletionProvider, DefinitionProvider, Diagnostic, DiagnosticSeverity, HoverProvider, Rope, RopeExt as _,
+};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use wercode_core::document::{self, Document, Format, LoadError};
 use wercode_core::i18n::{t, tf};
-use wercode_core::lsp::{Problem, Servers, Severity, path_from_uri, uri_from_path};
+use wercode_core::lsp::{Edit, Problem, Servers, Severity, Value, path_from_uri, uri_from_path};
 
 use crate::lsp::CheckerEvent;
+use crate::theme::AppState;
 
 actions!(editor, [Save]);
 
@@ -22,6 +26,10 @@ actions!(editor, [Save]);
 const DISK_POLL: Duration = Duration::from_secs(1);
 /// Typing reaches the language servers this long after the last key.
 const TYPING_PAUSE: Duration = Duration::from_millis(300);
+/// How long saving waits for a language server to format the file.
+const FORMAT_WAIT: Duration = Duration::from_secs(2);
+/// The indent asked of a formatter that has no rule of its own.
+const FORMAT_INDENT: u32 = 4;
 
 /// The shortcut for saving is bound with the others, in `keymap`.
 pub fn init(_: &mut App) {}
@@ -109,6 +117,62 @@ impl DefinitionProvider for Asker {
     }
 }
 
+impl CompletionProvider for Asker {
+    fn completions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _: lsp_types::CompletionContext,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<lsp_types::CompletionResponse>> {
+        let at = self.place(text, offset);
+        // The letters of the name typed so far, up to the cursor.
+        let typed = match offset.checked_sub(1).and_then(|before| text.word_range(before)) {
+            Some(word) if word.start < offset => text.slice(word.start..offset).to_string(),
+            _ => String::new(),
+        };
+        let (sender, answer) = oneshot::channel();
+        self.servers.completion(&self.path, at.line, at.character, move |list| {
+            let _ = sender.send(list);
+        });
+        cx.background_executor().spawn(async move {
+            let items = match answer.await.unwrap_or(Value::Null) {
+                Value::Null => Vec::new(),
+                list => match serde_json::from_value(list)? {
+                    lsp_types::CompletionResponse::Array(items) => items,
+                    lsp_types::CompletionResponse::List(list) => list.items,
+                },
+            };
+            Ok(lsp_types::CompletionResponse::Array(matching(items, &typed)))
+        })
+    }
+
+    /// Letters of a name, and the marks after which names follow.
+    fn is_completion_trigger(&self, _: usize, new_text: &str, _: &mut App) -> bool {
+        new_text.chars().last().is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':'))
+    }
+}
+
+/// The suggestions that fit what has been typed, best first. Servers send
+/// everything that could stand at the place and leave the choosing to the
+/// editor: a name fits when it has the typed letters in their order, and
+/// one that starts with them comes before one that only has them inside.
+fn matching(mut items: Vec<lsp_types::CompletionItem>, typed: &str) -> Vec<lsp_types::CompletionItem> {
+    let typed = typed.to_lowercase();
+    let name = |item: &lsp_types::CompletionItem| item.filter_text.as_deref().unwrap_or(&item.label).to_lowercase();
+    items.retain(|item| {
+        let name = name(item);
+        let mut letters = name.chars();
+        typed.chars().all(|wanted| letters.any(|letter| letter == wanted))
+    });
+    // Among equals, the order the server asks for.
+    items.sort_by_cached_key(|item| {
+        (!name(item).starts_with(&typed), item.sort_text.clone().unwrap_or_else(|| item.label.clone()))
+    });
+    items
+}
+
 /// Lets the editor ask the language servers about the file at `path`. A
 /// definition in the same file moves the cursor there; one in another file
 /// is asked for with [`EditorEvent::Open`].
@@ -118,6 +182,7 @@ fn connect(state: &Entity<EditorState>, servers: &Servers, path: &Path, view: We
     state.update(cx, |state, _| {
         let lsp = state.lsp_mut();
         lsp.hover_provider = Some(asker.clone());
+        lsp.completion_provider = Some(asker.clone());
         lsp.definition_provider = Some(asker);
         lsp.show_document = Some(Rc::new(move |place, _, cx| {
             // Not a file (a web page): the editor opens it in the browser.
@@ -349,7 +414,8 @@ impl EditorView {
         }
     }
 
-    /// Writes the text to disk. `then` runs once it is there.
+    /// Saves the file: writes the text to disk, after a language server has
+    /// laid it out if the settings ask for that. `then` runs once it is there.
     pub fn save(
         &mut self,
         then: impl FnOnce(&mut Window, &mut App) + 'static,
@@ -359,6 +425,53 @@ impl EditorView {
         if !self.loaded || self.problem.is_some() {
             return;
         }
+        let wanted = cx.try_global::<AppState>().is_some_and(|state| state.settings.format_on_save);
+        let Some(servers) = self.servers.clone().filter(|_| wanted && self.opened) else {
+            return self.write(then, window, cx);
+        };
+        let before = self.state.read(cx).value().to_string();
+        servers.change(&self.path, before.clone());
+        let (sender, answer) = oneshot::channel();
+        servers.format(&self.path, FORMAT_INDENT, move |edits| {
+            let _ = sender.send(edits);
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            // A server that is slow or gone must not keep the file from being saved.
+            let late = cx.background_executor().timer(FORMAT_WAIT);
+            let edits = futures::select_biased! {
+                edits = answer.fuse() => edits.unwrap_or_default(),
+                _ = late.fuse() => Vec::new(),
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                // The edits are for the text as it was when the server was asked.
+                if this.state.read(cx).value().as_ref() == before {
+                    this.apply(edits, window, cx);
+                }
+                this.write(then, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Changes the text as a language server said to.
+    fn apply(&mut self, mut edits: Vec<Edit>, window: &mut Window, cx: &mut Context<Self>) {
+        if edits.is_empty() {
+            return;
+        }
+        // From the end of the file up, so one edit does not move the places of the next.
+        edits.sort_by(|a, b| b.start.cmp(&a.start));
+        let edits: Vec<lsp_types::TextEdit> =
+            edits.into_iter().map(|edit| lsp_types::TextEdit { range: range(edit.start, edit.end), new_text: edit.text }).collect();
+        self.state.update(cx, |state, cx| state.apply_lsp_edits(&edits, window, cx));
+    }
+
+    /// Writes the text to disk. `then` runs once it is there.
+    fn write(
+        &mut self,
+        then: impl FnOnce(&mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let text = self.state.read(cx).value().to_string();
         let (path, format) = (self.path.clone(), self.format);
         cx.spawn_in(window, async move |this, cx| {
@@ -373,6 +486,11 @@ impl EditorView {
                         this.send_text(cx);
                         if let Some(servers) = this.servers.as_ref().filter(|_| this.opened) {
                             servers.saved(&this.path);
+                        }
+                        // The settings file itself: what was written takes effect now.
+                        let settings = cx.try_global::<AppState>().and_then(|state| state.settings_path.clone());
+                        if settings.as_deref() == Some(this.path.as_path()) {
+                            cx.defer(crate::theme::reload_settings);
                         }
                         then(window, cx);
                     }
@@ -457,6 +575,25 @@ impl Drop for EditorView {
         if let Some(servers) = self.servers.as_ref().filter(|_| self.opened) {
             servers.close(&self.path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matching;
+
+    #[test]
+    fn suggestions_follow_what_is_typed() {
+        let item = |label: &str, sort: &str| lsp_types::CompletionItem {
+            label: label.into(),
+            sort_text: Some(sort.into()),
+            ..Default::default()
+        };
+        let all = || vec![item("self::", "a"), item("transform", "b"), item("forecast", "d"), item("For", "c")];
+        let labels = |typed: &str| matching(all(), typed).into_iter().map(|i| i.label).collect::<Vec<_>>();
+        assert_eq!(labels("for"), ["For", "forecast", "transform"]);
+        assert_eq!(labels(""), ["self::", "transform", "For", "forecast"]);
+        assert!(labels("xyz").is_empty());
     }
 }
 
@@ -550,6 +687,23 @@ impl EditorView {
                 lsp_types::HoverContents::Markup(markup) => Some(markup.value),
                 _ => None,
             }
+        })
+    }
+
+    /// The labels a language server offers to complete with at a 0-based
+    /// line and column.
+    pub fn completions_at(&self, line: u32, column: u32, window: &mut Window, cx: &mut Context<Self>) -> Task<Vec<String>> {
+        let state = self.state.read(cx);
+        let (text, provider) = (state.text().clone(), state.lsp().completion_provider.clone().unwrap());
+        let context = lsp_types::CompletionContext {
+            trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+            trigger_character: None,
+        };
+        let offset = text.position_to_offset(&Position::new(line, column));
+        let asked = provider.completions(&text, offset, context, window, cx);
+        cx.background_executor().spawn(async move {
+            let lsp_types::CompletionResponse::Array(items) = asked.await.unwrap() else { return Vec::new() };
+            items.into_iter().map(|item| item.label).collect()
         })
     }
 

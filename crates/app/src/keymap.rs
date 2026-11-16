@@ -3,14 +3,14 @@
 
 use std::rc::Rc;
 
-use gpui_kit::component::input::GoToDefinition;
+use gpui_kit::component::input::{GoToDefinition, ShowCompletions};
 use gpui_kit::*;
 
 use crate::editor::Save;
 use crate::lsp::RestartLanguageServers;
 use crate::panel::git::{Commit, Fetch, Pull, Push, StageAll};
 use crate::term::{
-    ClosePane, CloseTab, Find, NewTab, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
+    ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
 };
 use crate::theme::AppState;
 use crate::workspace::{
@@ -66,14 +66,20 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("terminal.split_down", "TerminalArea", SplitDown, ["ctrl-shift-e"]),
         shortcut!("terminal.next_tab", "TerminalArea", NextTab, ["ctrl-tab", "ctrl-pagedown"]),
         shortcut!("terminal.previous_tab", "TerminalArea", PrevTab, ["ctrl-shift-tab", "ctrl-pageup"]),
-        shortcut!("terminal.next_pane", "TerminalArea", NextPane, ["ctrl-alt-right", "ctrl-alt-down"]),
-        shortcut!("terminal.previous_pane", "TerminalArea", PrevPane, ["ctrl-alt-left", "ctrl-alt-up"]),
+        // The arrows go to the terminal on that side; round the circle is in the palette.
+        shortcut!("terminal.pane_left", "TerminalArea", PaneLeft, ["ctrl-alt-left"]),
+        shortcut!("terminal.pane_right", "TerminalArea", PaneRight, ["ctrl-alt-right"]),
+        shortcut!("terminal.pane_up", "TerminalArea", PaneUp, ["ctrl-alt-up"]),
+        shortcut!("terminal.pane_down", "TerminalArea", PaneDown, ["ctrl-alt-down"]),
+        shortcut!("terminal.next_pane", "TerminalArea", NextPane, []),
+        shortcut!("terminal.previous_pane", "TerminalArea", PrevPane, []),
         // Ctrl+Shift+F finds in the project's files; S for "search" here.
         shortcut!("terminal.find", "Terminal", Find, ["ctrl-shift-s"]),
         shortcut!("terminal.rename_tab", "TerminalArea", RenameTab, []),
         // Plain Ctrl+S is safe here: the keyboard is in a text editor, not in a shell.
         shortcut!("editor.save", "EditorView", Save, ["ctrl-s"]),
         shortcut!("editor.go_to_definition", "EditorView", GoToDefinition, ["f12"]),
+        shortcut!("editor.show_completions", "EditorView", ShowCompletions, ["ctrl-space"]),
     ]
 }
 

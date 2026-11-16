@@ -22,6 +22,11 @@ actions!(
         PrevTab,
         NextPane,
         PrevPane,
+        /// The keyboard goes to the terminal on that side of this one.
+        PaneLeft,
+        PaneRight,
+        PaneUp,
+        PaneDown,
         /// Shows the terminal and puts the keyboard in it, or puts it away.
         ToggleTerminal,
         /// Looks for text in the output of the terminal with the keyboard.

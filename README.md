@@ -92,6 +92,7 @@ smaller VS Code.
 - Errors and warnings underlined as you type, with the message on hover
 - A Problems panel with everything the checkers found in the project
 - Rest the pointer on a name for its type and documentation; F12 or Ctrl+click goes to its definition
+- Completion as you type (or Ctrl+Space), and formatting when a file is saved if you turn it on
 - Uses the language servers already on your computer (see below)
 
 **Everything else**
@@ -137,7 +138,9 @@ runs the command below in a terminal tab, where you can watch it.
 | TOML | taplo | `cargo install taplo-cli --locked --features lsp` |
 | Ruby | ruby-lsp | `gem install ruby-lsp` |
 
-Checking can be turned off in Settings → **Check code**.
+Checking can be turned off in Settings → **Check code**. **Format on save**, next
+to it, lets the server lay the code out each time you save (for Rust that is
+`rustfmt`: `rustup component add rustfmt`).
 
 ## Keyboard
 
@@ -160,6 +163,8 @@ All of them can be changed in the `[keys]` table of `settings.toml`.
 | Ctrl+Shift+Up / Down | Push / pull |
 | Ctrl+S | Save (in the editor) |
 | F12 or Ctrl+click | Go to definition (in the editor) |
+| Ctrl+Space | Completion (in the editor) |
+| Ctrl+Alt+arrows | Go to the terminal on that side of a split |
 
 ## Build from source
 

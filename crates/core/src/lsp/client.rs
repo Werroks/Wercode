@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::specs::{self, Program, Spec};
-use super::{Hover, Problem, Severity, Shared, Status, Target, path_from_uri, rpc, uri_from_path};
+use super::{Edit, Hover, Problem, Severity, Shared, Status, Target, path_from_uri, rpc, uri_from_path};
 
 /// How long a server may take to finish after it was asked to stop.
 const STOP_WAIT: Duration = Duration::from_secs(2);
@@ -39,6 +39,11 @@ pub(super) enum Command {
 pub(super) enum Question {
     Hover(Box<dyn FnOnce(Option<Hover>) + Send>),
     Definition(Box<dyn FnOnce(Vec<Target>) + Send>),
+    /// What could be typed at the place: the server's answer as it came,
+    /// with the columns in it counted in characters.
+    Completion(Box<dyn FnOnce(Value) + Send>),
+    /// How the whole file should be laid out, indented by `tab_size` spaces.
+    Format { tab_size: u32, reply: Box<dyn FnOnce(Vec<Edit>) + Send> },
 }
 
 impl Question {
@@ -46,6 +51,8 @@ impl Question {
         match self {
             Question::Hover(_) => "textDocument/hover",
             Question::Definition(_) => "textDocument/definition",
+            Question::Completion(_) => "textDocument/completion",
+            Question::Format { .. } => "textDocument/formatting",
         }
     }
 
@@ -53,6 +60,8 @@ impl Question {
         match self {
             Question::Hover(reply) => reply(None),
             Question::Definition(reply) => reply(Vec::new()),
+            Question::Completion(reply) => reply(Value::Null),
+            Question::Format { reply, .. } => reply(Vec::new()),
         }
     }
 }
@@ -189,6 +198,24 @@ fn place(at: &Value, lines: Option<&[&str]>, encoding: Encoding) -> Option<(u32,
     Some((line, column))
 }
 
+/// Rewrites every range inside an answer (`{"start": .., "end": ..}`) to
+/// count columns in characters.
+fn count_in_characters(value: &mut Value, lines: &[&str], encoding: Encoding) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(|item| count_in_characters(item, lines, encoding)),
+        Value::Object(fields) => {
+            let at = |name: &str| fields.get(name).and_then(|at| place(at, Some(lines), encoding));
+            if let (Some(start), Some(end)) = (at("start"), at("end")) {
+                fields.insert("start".into(), json!({"line": start.0, "character": start.1}));
+                fields.insert("end".into(), json!({"line": end.0, "character": end.1}));
+                return;
+            }
+            fields.values_mut().for_each(|field| count_in_characters(field, lines, encoding));
+        }
+        _ => {}
+    }
+}
+
 /// The text of a hover answer, as Markdown.
 fn hover_text(contents: &Value) -> String {
     match contents {
@@ -274,6 +301,8 @@ struct Session {
     /// about where a name is defined.
     hovers: bool,
     defines: bool,
+    completes: bool,
+    formats: bool,
     /// Questions sent to the server and not answered yet, by request, with
     /// the file each is about.
     asked: HashMap<i64, (PathBuf, Question)>,
@@ -317,6 +346,11 @@ impl Session {
                     "publishDiagnostics": {"relatedInformation": false, "codeDescriptionSupport": true},
                     "hover": {"contentFormat": ["markdown", "plaintext"]},
                     "definition": {"linkSupport": true},
+                    "completion": {"completionItem": {
+                        "snippetSupport": false,
+                        "documentationFormat": ["markdown", "plaintext"],
+                    }},
+                    "formatting": {"dynamicRegistration": false},
                 },
                 "workspace": {"workspaceFolders": true, "configuration": false},
                 "window": {"workDoneProgress": true},
@@ -384,6 +418,8 @@ impl Session {
         let can = |name: &str| capabilities[name].as_bool().unwrap_or(capabilities[name].is_object());
         self.hovers = can("hoverProvider");
         self.defines = can("definitionProvider");
+        self.completes = can("completionProvider");
+        self.formats = can("documentFormattingProvider");
         self.notify("initialized", json!({}));
         self.initialized = true;
         self.report_progress();
@@ -480,15 +516,23 @@ impl Session {
         let able = match question {
             Question::Hover(_) => self.hovers,
             Question::Definition(_) => self.defines,
+            Question::Completion(_) => self.completes,
+            Question::Format { .. } => self.formats,
         };
         let Some(doc) = self.docs.get(&path).filter(|_| self.initialized && able) else {
             return question.unanswered();
         };
         let text = doc.text.split('\n').nth(line as usize).unwrap_or_default();
-        let params = json!({
-            "textDocument": {"uri": doc.uri},
-            "position": {"line": line, "character": units(text, column, self.encoding)},
-        });
+        let params = match &question {
+            Question::Format { tab_size, .. } => json!({
+                "textDocument": {"uri": doc.uri},
+                "options": {"tabSize": tab_size, "insertSpaces": true},
+            }),
+            _ => json!({
+                "textDocument": {"uri": doc.uri},
+                "position": {"line": line, "character": units(text, column, self.encoding)},
+            }),
+        };
         let id = self.request(question.method(), params);
         self.asked.insert(id, (path, question));
     }
@@ -517,6 +561,25 @@ impl Session {
                     _ => Vec::new(),
                 };
                 reply(places.into_iter().filter_map(|place| self.target(place)).collect());
+            }
+            Question::Completion(reply) => {
+                let mut answer = result.clone();
+                if let Some(doc) = self.docs.get(path) {
+                    let lines: Vec<&str> = doc.text.split('\n').collect();
+                    count_in_characters(&mut answer, &lines, self.encoding);
+                }
+                reply(answer);
+            }
+            Question::Format { reply, .. } => {
+                let lines: Option<Vec<&str>> = self.docs.get(path).map(|doc| doc.text.split('\n').collect());
+                let edit = |edit: &Value| {
+                    Some(Edit {
+                        start: place(edit["range"].get("start")?, lines.as_deref(), self.encoding)?,
+                        end: place(edit["range"].get("end")?, lines.as_deref(), self.encoding)?,
+                        text: edit["newText"].as_str()?.to_string(),
+                    })
+                };
+                reply(result.as_array().map(|edits| edits.iter().filter_map(edit).collect()).unwrap_or_default());
             }
         }
     }
@@ -659,6 +722,8 @@ fn run(id: usize, spec: Spec, root: PathBuf, sender: Sender<Command>, receiver: 
         failure: None,
         hovers: false,
         defines: false,
+        completes: false,
+        formats: false,
         asked: HashMap::new(),
     };
     session.initialize();
@@ -747,6 +812,16 @@ mod tests {
         assert_eq!(units(line, 5, Encoding::Utf8), 8);
         assert_eq!(units(line, 5, Encoding::Utf32), 5);
         assert_eq!(units("ab", 4, Encoding::Utf16), 4);
+    }
+
+    #[test]
+    fn ranges_in_an_answer_are_counted_in_characters() {
+        let lines = ["let \u{1F600} = x;"];
+        let range = json!({"start": {"line": 0, "character": 6}, "end": {"line": 0, "character": 9}});
+        let mut answer = json!({"items": [{"label": "x", "textEdit": {"range": range, "newText": "x"}}]});
+        count_in_characters(&mut answer, &lines, Encoding::Utf16);
+        let range = &answer["items"][0]["textEdit"]["range"];
+        assert_eq!((range["start"]["character"].as_u64(), range["end"]["character"].as_u64()), (Some(5), Some(8)));
     }
 
     #[test]

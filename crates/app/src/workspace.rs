@@ -2521,6 +2521,31 @@ three
         press(cx, f.window, &["f12"]);
         wait_until(cx, "the cursor on the definition", |cx| editor.read_with(cx, |e, cx| e.cursor(cx)).0 == 0);
 
+        // The server offers names to complete with.
+        let asked = cx
+            .update_window(f.window, |_, window, cx| editor.update(cx, |e, cx| e.completions_at(2, 6, window, cx)))
+            .unwrap();
+        let offered = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let heard = offered.clone();
+        cx.update(|cx| cx.foreground_executor().spawn(async move { *heard.borrow_mut() = Some(asked.await) }).detach());
+        wait_until(cx, "the names to complete with", |_| offered.borrow().is_some());
+        // The cursor is after "na": of fn, name and use only one fits.
+        assert_eq!(offered.borrow_mut().take().unwrap(), ["name"]);
+
+        // With formatting on, saving lays the file out first: here, no spaces at line ends.
+        cx.update(|cx| crate::theme::change_settings(cx, |s| s.format_on_save = true)).unwrap();
+        cx.update_window(f.window, |_, window, cx| {
+            editor.update(cx, |e, cx| {
+                e.replace_all("use name;", "use name;   ", window, cx);
+                e.save(|_, _| {}, window, cx);
+            });
+        })
+        .unwrap();
+        wait_until(cx, "the formatted file on disk", |_| {
+            std::fs::read_to_string(&file).is_ok_and(|text| text.replace("\r\n", "\n") == "fn name() {}\n\nuse name;\n")
+        });
+        assert_eq!(editor.read_with(cx, |e, cx| e.text(cx)), "fn name() {}\n\nuse name;\n");
+
         // A definition in another file opens that file in a tab.
         let shown = cx
             .update_window(f.window, |_, window, cx| crate::editor::EditorView::follow(&editor, &other, 1, 0, window, cx))
@@ -2703,6 +2728,25 @@ three
         assert!(f.workspace.read_with(cx, |w, _| w.settings.is_none()));
         press(cx, f.window, &["ctrl-shift-d"]);
         assert_eq!(f.workspace.read_with(cx, |w, cx| w.pane_count(cx)), 2);
+
+        // The file edited in a tab counts as soon as it is saved.
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(settings_file.clone(), None, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        wait_until(cx, "the settings file in a tab", |cx| area.read_with(cx, |a, cx| a.editor_for(&settings_file, cx)).is_some());
+        let editor = area.read_with(cx, |a, cx| a.editor_for(&settings_file, cx)).unwrap();
+        wait_until(cx, "its text", |cx| editor.read_with(cx, |e, cx| e.text(cx)).contains("scrollback"));
+        cx.update_window(f.window, |_, window, cx| {
+            editor.update(cx, |e, cx| {
+                e.replace_all("scrollback = 500", "scrollback = 700", window, cx);
+                e.save(|_, _| {}, window, cx);
+            });
+        })
+        .unwrap();
+        wait_until(cx, "the saved setting to count", |cx| settings(cx).scrollback == 700);
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

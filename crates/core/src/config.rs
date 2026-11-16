@@ -60,6 +60,9 @@ pub struct Settings {
     /// Check open files with the language servers installed on this
     /// computer and underline what they report.
     pub language_servers: bool,
+    /// Lay out the code by the rules of its language when a file is saved,
+    /// where its language server can.
+    pub format_on_save: bool,
     /// The language of the interface: "auto" follows the computer, or one of
     /// "en", "ru", "de", "es", "zh".
     pub language: String,
@@ -101,6 +104,7 @@ impl Default for Settings {
             layout: "tabs".into(),
             auto_update: true,
             language_servers: true,
+            format_on_save: false,
             language: "auto".into(),
             keys: BTreeMap::new(),
         }

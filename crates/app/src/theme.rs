@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, Global, Hsla, rgb};
+use gpui_kit::{App, Global, Hsla, px, rgb};
 use wercode_core::config::Settings;
 use wercode_core::i18n::{self, Language};
 use wercode_core::theme::{Appearance, Rgb, Theme as Scheme};
@@ -42,6 +42,8 @@ pub fn apply(settings: Settings, cx: &mut App) {
 
     let ui = scheme.ui.clone();
     let mono = settings.font_family.clone();
+    // The editor takes its size from the library's; the terminal reads the setting itself.
+    let mono_size = px(settings.font_size);
     Theme::update(cx, move |t| {
         let c = &mut t.colors;
         c.background = hsla(ui.bg);
@@ -88,6 +90,7 @@ pub fn apply(settings: Settings, cx: &mut App) {
         c.scrollbar_thumb_hover = hsla(ui.border_input);
         c.window_border = hsla(ui.border);
         t.mono_font_family = mono.into();
+        t.mono_font_size = mono_size;
     });
 
     let settings_path = cx.try_global::<AppState>().and_then(|state| state.settings_path.clone());

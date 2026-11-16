@@ -8,7 +8,7 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
-use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::tree::{TreeEvent, TreeItem, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -452,6 +452,7 @@ impl Render for FilesPanel {
         let folders = self.folders.clone();
         let this = cx.entity().downgrade();
         let (menu_owner, menu_folders) = (this.clone(), folders.clone());
+        let root_owner = this.clone();
         let editor = terminal_editor();
 
         v_flex()
@@ -464,7 +465,7 @@ impl Render for FilesPanel {
                 this.child(div().px_3().pb_2().text_xs().text_color(cx.theme().danger).child(error))
             })
             .child(
-                div().flex_1().min_h_0().child(
+                div().id("files-tree").flex_1().min_h_0().child(
                     tree(&self.tree, move |ix, entry, _selected, _window, cx| {
                         // An empty folder has no children, so the tree alone cannot tell.
                         let folder = folders.contains(&entry.item().id);
@@ -562,7 +563,20 @@ impl Render for FilesPanel {
                         .item(item(t("Move to Trash"), |this, path, window, cx| this.delete(path, window, cx)))
                     })
                     .size_full(),
-                ),
+                )
+                // Below the last row there is no entry to act on: new things go to the project folder.
+                .context_menu(move |menu, _, _| {
+                    let item = |label: &'static str, kind: Naming| {
+                        let owner = root_owner.clone();
+                        PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                            let _ = owner.update(cx, |this, cx| {
+                                let root = this.root.clone();
+                                this.start_naming(kind, root, window, cx)
+                            });
+                        })
+                    };
+                    menu.item(item(t("New File\u{2026}"), Naming::File)).item(item(t("New Folder\u{2026}"), Naming::Folder))
+                }),
             )
             .when(self.truncated, |this| {
                 this.child(

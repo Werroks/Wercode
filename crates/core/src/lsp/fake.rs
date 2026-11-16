@@ -4,7 +4,8 @@
 //!
 //! It calls the word `bad` an error and `meh` a warning, wherever they are.
 //! Asked about a word, it says which word it is, and that the word is
-//! defined where the file first has it.
+//! defined where the file first has it. It offers the words of the file to
+//! complete with, and formats by cutting the spaces at the ends of lines.
 
 use std::collections::HashMap;
 use std::io;
@@ -87,6 +88,8 @@ pub fn serve() -> ! {
                     "textDocumentSync": 1,
                     "hoverProvider": true,
                     "definitionProvider": {"workDoneProgress": false},
+                    "completionProvider": {"triggerCharacters": ["."]},
+                    "documentFormattingProvider": true,
                 }});
                 send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
             }
@@ -133,6 +136,29 @@ pub fn serve() -> ! {
                 send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
             }
             Some("textDocument/didClose") => diagnose(&mut out, &params["textDocument"]["uri"], ""),
+            Some("textDocument/completion") => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+                let text = texts.get(uri).map(String::as_str).unwrap_or_default();
+                let mut words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric() && c != '_').collect();
+                words.retain(|word| !word.is_empty());
+                words.sort();
+                words.dedup();
+                let items: Vec<Value> = words.iter().map(|word| json!({"label": word, "kind": 1})).collect();
+                let result = json!({"isIncomplete": false, "items": items});
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            Some("textDocument/formatting") => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+                let text = texts.get(uri).map(String::as_str).unwrap_or_default();
+                let mut edits = Vec::new();
+                for (number, line) in text.split('\n').enumerate() {
+                    let kept = line.trim_end().len();
+                    if kept < line.len() {
+                        edits.push(json!({"range": range(number, line, kept, line.len()), "newText": ""}));
+                    }
+                }
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": edits}));
+            }
             Some("exit") => std::process::exit(0),
             Some(_) if id.is_some() => send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": null})),
             _ => {}

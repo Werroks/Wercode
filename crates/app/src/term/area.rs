@@ -19,7 +19,7 @@ use wercode_core::state::{Layout, PaneLayout, TabLayout};
 
 use super::view::{TerminalView, TerminalViewEvent};
 use super::{
-    ClosePane, CloseTab, Find, NewTab, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
+    ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
     ToggleTerminal,
 };
 use crate::diff::DiffView;
@@ -73,6 +73,26 @@ impl Node {
             Node::Split(split) => {
                 split.first.leaves(out);
                 split.second.leaves(out);
+            }
+        }
+    }
+
+    /// Where each pane sits, as its left, top, right and bottom edge in
+    /// fractions of the space `within`.
+    fn places(&self, within: [f32; 4], out: &mut Vec<(Pane, [f32; 4])>) {
+        match self {
+            Node::Leaf(pane) => out.push((pane.clone(), within)),
+            Node::Split(split) => {
+                let [left, top, right, bottom] = within;
+                let (first, second) = if split.axis == Axis::Horizontal {
+                    let middle = left + (right - left) * split.ratio;
+                    ([left, top, middle, bottom], [middle, top, right, bottom])
+                } else {
+                    let middle = top + (bottom - top) * split.ratio;
+                    ([left, top, right, middle], [left, middle, right, bottom])
+                };
+                split.first.places(first, out);
+                split.second.places(second, out);
             }
         }
     }
@@ -862,6 +882,38 @@ impl TerminalArea {
         cx.notify();
     }
 
+    /// Moves the keyboard to the terminal next to the active one: `across`
+    /// for left and right, `forward` for right and down. Among several
+    /// neighbours on that side, the one most level with this one.
+    fn step_pane(&mut self, across: bool, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.turn_to_terminal(cx);
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Body::Terminals { root, active } = &mut tab.body else { return };
+        let mut places = Vec::new();
+        root.places([0., 0., 1., 1.], &mut places);
+        let Some(&(_, here)) = places.iter().find(|(pane, _)| pane == active) else { return };
+        // Edges along the way (near, far) and across it (low, high).
+        let along = |at: [f32; 4]| if across { (at[0], at[2]) } else { (at[1], at[3]) };
+        let beside = |at: [f32; 4]| if across { (at[1], at[3]) } else { (at[0], at[2]) };
+        let (near, far) = along(here);
+        let (low, high) = beside(here);
+        let level = (low + high) / 2.;
+        let next = places
+            .iter()
+            .filter(|(_, at)| {
+                let touches = if forward { (along(*at).0 - far).abs() < 1e-4 } else { (along(*at).1 - near).abs() < 1e-4 };
+                touches && beside(*at).0 < high - 1e-4 && beside(*at).1 > low + 1e-4
+            })
+            .min_by(|a, b| {
+                let off = |at: [f32; 4]| ((beside(at).0 + beside(at).1) / 2. - level).abs();
+                off(a.1).total_cmp(&off(b.1))
+            });
+        let Some((pane, _)) = next else { return };
+        *active = pane.clone();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     /// Closes a pane or a tab, asking first if that would kill a running program.
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         if let CloseTarget::Tab(id) = target
@@ -1595,6 +1647,26 @@ impl Render for TerminalArea {
                     this.cycle_pane(-1, window, cx);
                 }
             }))
+            .on_action(cx.listener(move |this, _: &PaneLeft, window, cx| {
+                if idle {
+                    this.step_pane(true, false, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &PaneRight, window, cx| {
+                if idle {
+                    this.step_pane(true, true, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &PaneUp, window, cx| {
+                if idle {
+                    this.step_pane(false, false, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &PaneDown, window, cx| {
+                if idle {
+                    this.step_pane(false, true, window, cx);
+                }
+            }))
             .on_action(cx.listener(move |this, _: &ToggleTerminal, window, cx| {
                 if idle {
                     this.toggle_terminal(window, cx);
@@ -1675,6 +1747,19 @@ mod tests {
         // Closing the only pane of a tab closes the tab.
         press(cx, window, &["ctrl-shift-w"]);
         assert_eq!(shape(cx, &area), (1, 0, 3));
+
+        // The arrows go to the terminal on that side: left | top over bottom.
+        let panes = area.read_with(cx, |a, _| a.tabs[0].panes());
+        let active = |cx: &mut TestAppContext| area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().clone());
+        assert_eq!(active(cx), panes[2]);
+        press(cx, window, &["ctrl-alt-up"]);
+        assert_eq!(active(cx), panes[1]);
+        press(cx, window, &["ctrl-alt-up", "ctrl-alt-right"]);
+        assert_eq!(active(cx), panes[1], "nothing above or to the right");
+        press(cx, window, &["ctrl-alt-left"]);
+        assert_eq!(active(cx), panes[0]);
+        press(cx, window, &["ctrl-alt-right", "ctrl-alt-down"]);
+        assert_eq!(active(cx), panes[2]);
 
         // Moving between panes changes which one a close removes.
         let before = area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().entity_id());

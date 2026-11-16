@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+pub use serde_json::Value;
 pub use specs::{Program, Spec, builtin, find_program, language_id, language_name, root_for};
 
 use client::{Command, Question};
@@ -67,6 +68,16 @@ pub struct Target {
     pub column: u32,
     pub end_line: u32,
     pub end_column: u32,
+}
+
+/// A change to the text of a file: what stands between two places is
+/// replaced. Places are 0-based lines and columns in characters, all of them
+/// in the text as it was before any of the changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+    pub text: String,
 }
 
 /// How a server is doing.
@@ -368,6 +379,25 @@ impl Servers {
         self.ask(path, line, column, reply, |answer| answer.is_empty(), |reply| Question::Definition(reply));
     }
 
+    /// Asks what could be typed at a place in an open file. The answer is
+    /// the server's own (a `CompletionList` or a list of `CompletionItem`
+    /// of the protocol), with columns counted in characters; `Null` when
+    /// no server has anything.
+    pub fn completion(&self, path: &Path, line: u32, column: u32, reply: impl FnOnce(Value) + Send + 'static) {
+        let empty = |answer: &Value| {
+            let items = answer.as_array().or_else(|| answer["items"].as_array());
+            items.is_none_or(Vec::is_empty)
+        };
+        self.ask(path, line, column, reply, empty, |reply| Question::Completion(reply));
+    }
+
+    /// Asks how an open file should be laid out, indenting by `tab_size`
+    /// spaces where the language leaves it open. No edits means it is fine
+    /// as it is, or that no server formats this language.
+    pub fn format(&self, path: &Path, tab_size: u32, reply: impl FnOnce(Vec<Edit>) + Send + 'static) {
+        self.ask(path, 0, 0, reply, |answer| answer.is_empty(), move |reply| Question::Format { tab_size, reply });
+    }
+
     /// Asks each server of a file; the first answer that is not empty wins.
     fn ask<T: Default + Send + 'static>(
         &self,
@@ -376,7 +406,7 @@ impl Servers {
         column: u32,
         reply: impl FnOnce(T) + Send + 'static,
         empty: fn(&T) -> bool,
-        question: fn(Box<dyn FnOnce(T) + Send>) -> Question,
+        question: impl Fn(Box<dyn FnOnce(T) + Send>) -> Question,
     ) {
         let state = self.shared.lock();
         let servers: Vec<&Server> = match state.docs.get(path) {
@@ -830,6 +860,18 @@ mod tests {
         // The emoji is two units for the server and one character here.
         let first = Target { path: file.clone(), line: 0, column: 8, end_line: 0, end_column: 12 };
         assert_eq!(found, vec![first]);
+        // What could be typed, and how the file should be laid out.
+        let (asked, lists) = mpsc::channel();
+        servers.completion(&file, 1, 4, move |list| asked.send(list).unwrap());
+        let list = lists.recv_timeout(Duration::from_secs(30)).unwrap();
+        let labels: Vec<&str> = list["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["let", "name", "use"]);
+        servers.change(&file, "let \u{1F600} = name;  \nuse name;\t\n".into());
+        let (asked, edits) = mpsc::channel();
+        servers.format(&file, 4, move |found| asked.send(found).unwrap());
+        let found = edits.recv_timeout(Duration::from_secs(30)).unwrap();
+        let tidy = |line, start, end| Edit { start: (line, start), end: (line, end), text: String::new() };
+        assert_eq!(found, vec![tidy(0, 13, 15), tidy(1, 9, 10)]);
         // A file that is not open has nobody to ask.
         let (asked, places) = mpsc::channel();
         servers.definition(&dir.join("other.rs"), 0, 0, move |found| asked.send(found).unwrap());

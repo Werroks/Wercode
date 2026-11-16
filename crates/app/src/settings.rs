@@ -353,7 +353,7 @@ impl Render for SettingsView {
                         cx,
                     ))
                     .child(Self::row(t("Colour scheme"), "", schemes, cx))
-                    .child(Self::row(t("Font size"), t("Text in the terminal."), font_size, cx))
+                    .child(Self::row(t("Font size"), t("Text in the terminal and in the editor."), font_size, cx))
                     .child(Self::row(
                         t("Font"),
                         t("A monospaced font installed on this computer. Press Enter to apply."),
@@ -390,6 +390,12 @@ impl Render for SettingsView {
                         t("Check code"),
                         t("Underline errors and warnings in open files, using the language servers installed on this computer."),
                         switch("settings-language-servers", settings.language_servers, |s, on| s.language_servers = on),
+                        cx,
+                    ))
+                    .child(Self::row(
+                        t("Format on save"),
+                        t("Lay out the code by the rules of its language when a file is saved, if its language server can."),
+                        switch("settings-format-on-save", settings.format_on_save, |s, on| s.format_on_save = on),
                         cx,
                     ))
                     .child(updates)

@@ -378,7 +378,11 @@ impl Workspace {
             // A fetch, pull or push shows in the status bar while it runs.
             cx.observe(&changes, |_, _, cx| cx.notify()),
             // Tabs opened, closed or split are written down for the next launch.
-            cx.observe(&terminals, |this, _, cx| this.remember_layout(cx)),
+            cx.observe(&terminals, |this, _, cx| {
+                this.remember_layout(cx);
+                // The status bar says things about the file that is showing.
+                cx.notify();
+            }),
         ];
 
         // The watcher reports from its own thread; this brings the news here.
@@ -1860,6 +1864,18 @@ impl Workspace {
         let update = update::status_bar(cx).map(|status| self.render_update(status, cx).into_any_element());
         let checks = self.render_checks(project, cx);
         let server = self.render_server(project, cx);
+        // Who last changed the line under the cursor, and when.
+        let blame = project.terminals.read(cx).shown_blame(cx).map(|blame| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs() as i64);
+            let when = crate::panel::graph::ago_text(wercode_core::history::ago(blame.time, now));
+            let said = tf(
+                "{author}, {when} \u{00b7} {summary}",
+                &[("author", &blame.author), ("when", &when), ("summary", &blame.summary)],
+            );
+            div().id("status-blame").test_support().min_w_0().max_w(px(520.)).truncate().child(said)
+        });
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
         let item = || h_flex().flex_none().gap_1().items_center();
@@ -1969,6 +1985,7 @@ impl Workspace {
             })
             .children(checks)
             .child(div().flex_1())
+            .children(blame)
             .children(server)
             .children(update)
             .child(
@@ -3228,6 +3245,17 @@ four
         let marked = |cx: &mut TestAppContext| editor.read_with(cx, |e, _| e.marked());
         wait_until(cx, "the marks", |cx| marked(cx).len() == 2);
         assert_eq!(marked(cx), [(Kind::Modified, 1, 2), (Kind::Added, 3, 4)]);
+
+        // The status bar says who last changed the line under the cursor.
+        cx.update_window(f.window, |_, window, cx| editor.update(cx, |e, cx| e.go_to(1, None, window, cx))).unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        wait_until(cx, "who wrote the line", |cx| editor.read_with(cx, |e, _| e.blame().is_some()));
+        let blame = editor.read_with(cx, |e, _| e.blame().cloned()).unwrap();
+        assert_eq!((blame.author.as_str(), blame.summary.as_str()), ("t", "First"));
+        // A line that is not committed yet has nobody.
+        cx.update_window(f.window, |_, window, cx| editor.update(cx, |e, cx| e.go_to(4, None, window, cx))).unwrap();
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.blame().cloned()), None);
 
         // Typing moves them once it pauses.
         cx.update_window(f.window, |_, window, cx| {

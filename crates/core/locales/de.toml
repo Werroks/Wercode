@@ -282,3 +282,4 @@
 "{n} weeks ago" = { one = "vor {n} Woche", other = "vor {n} Wochen" }
 "{n} years ago" = { one = "vor {n} Jahr", other = "vor {n} Jahren" }
 "{results} in {files}" = "{results} in {files}"
+"{author}, {when} · {summary}" = "{author}, {when} · {summary}"

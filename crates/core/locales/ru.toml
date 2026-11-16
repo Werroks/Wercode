@@ -282,3 +282,4 @@
 "{n} weeks ago" = { one = "{n} неделю назад", few = "{n} недели назад", many = "{n} недель назад" }
 "{n} years ago" = { one = "{n} год назад", few = "{n} года назад", many = "{n} лет назад" }
 "{results} in {files}" = "{results} в {files}"
+"{author}, {when} · {summary}" = "{author}, {when} · {summary}"

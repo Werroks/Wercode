@@ -682,6 +682,12 @@ impl TerminalArea {
         self.tabs.get(index)?.editor().map(|editor| editor.read(cx).path().to_path_buf())
     }
 
+    /// Who last changed the line under the cursor of the file that is showing.
+    pub fn shown_blame(&self, cx: &App) -> Option<wercode_core::git::Blame> {
+        let index = if Self::docked(cx) { self.shown(false)? } else { self.active };
+        self.tabs.get(index)?.editor()?.read(cx).blame().cloned()
+    }
+
     /// Opens a new terminal tab and runs `command` in it.
     pub fn run_in_new_tab(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.add_tab(window, cx);

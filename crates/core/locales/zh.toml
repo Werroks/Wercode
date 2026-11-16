@@ -283,3 +283,4 @@
 "{n} weeks ago" = "{n} 周前"
 "{n} years ago" = "{n} 年前"
 "{results} in {files}" = "{files}中的 {results}"
+"{author}, {when} · {summary}" = "{author}，{when} · {summary}"

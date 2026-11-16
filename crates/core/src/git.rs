@@ -320,6 +320,48 @@ pub fn committed_text(path: &Path) -> Option<String> {
     crate::document::decode(&bytes).ok().map(|(text, _)| text)
 }
 
+/// Who last changed a line, and in which commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blame {
+    /// Short commit id.
+    pub commit: String,
+    pub author: String,
+    /// When the commit was made, in seconds since 1970.
+    pub time: i64,
+    /// The first line of the commit message.
+    pub summary: String,
+}
+
+/// Reads what `git blame --porcelain` says about one line.
+pub fn parse_blame(text: &str) -> Option<Blame> {
+    let mut lines = text.lines();
+    let commit = lines.next()?.split(' ').next()?;
+    // A line that is in no commit yet is blamed on a commit of zeros.
+    if commit.is_empty() || commit.bytes().all(|b| b == b'0') {
+        return None;
+    }
+    let mut blame = Blame { commit: commit.chars().take(7).collect(), author: String::new(), time: 0, summary: String::new() };
+    for line in lines {
+        if let Some(author) = line.strip_prefix("author ") {
+            blame.author = author.to_string();
+        } else if let Some(time) = line.strip_prefix("author-time ") {
+            blame.time = time.trim().parse().ok()?;
+        } else if let Some(summary) = line.strip_prefix("summary ") {
+            blame.summary = summary.to_string();
+        }
+    }
+    Some(blame)
+}
+
+/// Who last changed a line of a file as it is on disk (0-based). `None`
+/// for a line that is not committed yet, and outside a repository.
+pub fn blame_line(path: &Path, line: u32) -> Option<Blame> {
+    let (dir, name) = (path.parent()?, path.file_name()?);
+    let at = format!("{0},{0}", line + 1);
+    let out = output(git(dir).args(["blame", "--porcelain", "-L", &at, "--"]).arg(name))?;
+    parse_blame(&String::from_utf8_lossy(&out))
+}
+
 /// Branches of the remotes that have no local branch of the same name yet,
 /// as git writes them: `origin/feature`.
 pub fn remote_branches(dir: &Path) -> Vec<String> {
@@ -370,6 +412,27 @@ pub fn create_branch(dir: &Path, name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blame_of_a_line_is_read() {
+        let text = concat!(
+            "7a4ad76f1234567890abcdef1234567890abcdef 3 3 1\n",
+            "author Ada Lovelace\n",
+            "author-mail <ada@example.com>\n",
+            "author-time 1700000000\n",
+            "author-tz +0000\n",
+            "committer Ada Lovelace\n",
+            "summary Count the wind\n",
+            "filename src/a.rs\n",
+            "\tlet wind = 3;\n",
+        );
+        let blame = parse_blame(text).unwrap();
+        assert_eq!(blame.commit, "7a4ad76");
+        assert_eq!((blame.author.as_str(), blame.time, blame.summary.as_str()), ("Ada Lovelace", 1_700_000_000, "Count the wind"));
+        let fresh = "0000000000000000000000000000000000000000 2 2 1\nauthor Not Committed Yet\n";
+        assert_eq!(parse_blame(fresh), None);
+        assert_eq!(parse_blame(""), None);
+    }
 
     #[test]
     fn parses_branch_and_files() {
@@ -493,6 +556,15 @@ mod tests {
         // The committed text of a file, whatever is in the folder now.
         assert_eq!(committed_text(&file).as_deref(), Some("again"));
         assert_eq!(committed_text(&new), None);
+
+        // Who wrote a line: the commit for a committed one, nobody for a new one.
+        let blame = blame_line(&file, 0).unwrap();
+        assert_eq!((blame.summary.as_str(), blame.commit.len()), ("Commit 1", 7));
+        assert!(!blame.author.is_empty() && blame.time > 1_600_000_000);
+        std::fs::write(&file, "again\nfresh\n").unwrap();
+        assert_eq!(blame_line(&file, 1), None);
+        assert_eq!(blame_line(&new, 0), None);
+        discard(&dir, &[file.clone()]).unwrap();
 
         // Branches: list, create, switch; a missing one is an error with git's words.
         assert_eq!(branches(&dir), ["trunk"]);

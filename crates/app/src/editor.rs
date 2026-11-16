@@ -235,6 +235,10 @@ pub struct EditorView {
     marks_task: Option<Task<()>>,
     /// What the marks stand for: the runs of lines that differ from the commit.
     changes: Vec<linediff::Change>,
+    /// The line the cursor is on, and who last changed it, once git has said.
+    blamed: Option<(u32, Option<git::Blame>)>,
+    blame_task: Option<Task<()>>,
+    _cursor: Subscription,
     _subscription: Subscription,
     _checks: Option<Subscription>,
     _watch: Task<()>,
@@ -265,6 +269,8 @@ impl EditorView {
                 cx.notify();
             }
         });
+        // The editor says so whenever the cursor moves, among other things.
+        let cursor = cx.observe(&state, |this, _, cx| this.cursor_moved(cx));
         let checker = crate::lsp::checker(cx);
         let checks = checker.as_ref().map(|checker| {
             cx.subscribe(checker, |this, _, event: &CheckerEvent, cx| {
@@ -308,6 +314,9 @@ impl EditorView {
             marks,
             marks_task: None,
             changes: Vec::new(),
+            blamed: None,
+            blame_task: None,
+            _cursor: cursor,
             _subscription: subscription,
             _checks: checks,
             _watch: watch,
@@ -507,6 +516,9 @@ impl EditorView {
                         this.error = None;
                         this.send_text(cx);
                         this.read_committed(cx);
+                        // The lines on disk are the lines here again.
+                        this.blamed = None;
+                        this.cursor_moved(cx);
                         if let Some(servers) = this.servers.as_ref().filter(|_| this.opened) {
                             servers.saved(&this.path);
                         }
@@ -530,7 +542,46 @@ impl EditorView {
     pub fn git_changed(&mut self, cx: &mut Context<Self>) {
         if self.loaded {
             self.read_committed(cx);
+            self.blamed = None;
+            self.cursor_moved(cx);
         }
+    }
+
+    /// Who last changed the line the cursor is on, for the status bar.
+    /// Nothing while there are unsaved edits: git knows the file on disk,
+    /// and its lines may be other lines by now.
+    pub fn blame(&self) -> Option<&git::Blame> {
+        if self.dirty {
+            return None;
+        }
+        self.blamed.as_ref()?.1.as_ref()
+    }
+
+    /// Asks git about the line the cursor is on, once the cursor rests there.
+    fn cursor_moved(&mut self, cx: &mut Context<Self>) {
+        if !self.loaded || self.problem.is_some() {
+            return;
+        }
+        let line = self.state.read(cx).cursor_position().line;
+        if self.blamed.as_ref().is_some_and(|(known, _)| *known == line) {
+            return;
+        }
+        let had = self.blame().is_some();
+        self.blamed = Some((line, None));
+        if had {
+            cx.emit(EditorEvent::Changed);
+        }
+        let path = self.path.clone();
+        self.blame_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TYPING_PAUSE).await;
+            let blame = cx.background_executor().spawn(async move { git::blame_line(&path, line) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.blamed.as_ref().is_some_and(|(known, _)| *known == line) && blame.is_some() {
+                    this.blamed = Some((line, blame));
+                    cx.emit(EditorEvent::Changed);
+                }
+            });
+        }));
     }
 
     /// Reads the file as the last commit has it, then marks what differs.

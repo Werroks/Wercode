@@ -15,7 +15,7 @@ gpui-kit = { version = "0.9.1", features = [
     "tree-sitter-ruby", "tree-sitter-rust", "tree-sitter-sql", "tree-sitter-toml", "tree-sitter-tsx",
     "tree-sitter-typescript", "tree-sitter-yaml",
 ] }
-wercode-core = { version = "0.2.0", path = "../core" }
+wercode-core = { version = "0.3.0", path = "../core" }
 
 [dev-dependencies]
 gpui-kit = { version = "0.9.1", features = ["test-support"] }

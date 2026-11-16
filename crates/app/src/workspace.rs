@@ -20,6 +20,7 @@ use wercode_core::finder;
 use wercode_core::fs_ops;
 use wercode_core::git::{self, RepoStatus};
 use wercode_core::state::{self, Layout, State};
+use wercode_core::tasks::{self, Task as ProjectTask};
 use wercode_core::watch::{self, Watch};
 
 use crate::editor::Save;
@@ -54,7 +55,11 @@ actions!(
         OpenSettings,
         SwitchBranch,
         QuickOpen,
-        ShowProblems
+        ShowProblems,
+        /// Shows the commands the project describes, to run one in a terminal tab.
+        RunTask,
+        /// Runs again the task that was run last.
+        RerunTask
     ]
 );
 
@@ -163,6 +168,8 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("View: Show Git"), Box::new(ShowGit)),
         (t("View: Show Problems"), Box::new(ShowProblems)),
         (t("Language Servers: Restart"), Box::new(RestartLanguageServers)),
+        (t("Tasks: Run\u{2026}"), Box::new(RunTask)),
+        (t("Tasks: Run the Last One Again"), Box::new(RerunTask)),
         (t("Window: New Window"), Box::new(NewWindow)),
         (t("Project: Open Folder\u{2026}"), Box::new(OpenFolder)),
         (t("Project: Switch to Recent\u{2026}"), Box::new(SwitchProject)),
@@ -223,6 +230,15 @@ struct FileFinder {
     cancel: Arc<AtomicBool>,
 }
 
+/// The list of what the project can run.
+struct TaskList {
+    state: Entity<CommandState>,
+    /// `None` until the project's files have been read.
+    tasks: Option<Vec<ProjectTask>>,
+    /// The tasks that match what is typed, as indexes into `tasks`.
+    shown: Vec<usize>,
+}
+
 pub struct Workspace {
     /// `None` shows the welcome screen.
     project: Option<Project>,
@@ -232,6 +248,9 @@ pub struct Workspace {
     switcher_open: bool,
     palette: Option<Entity<CommandState>>,
     finder: Option<FileFinder>,
+    tasks: Option<TaskList>,
+    /// The command of the task that was run last in this window.
+    last_task: Option<String>,
     branches: Option<BranchMenu>,
     /// The settings screen, while it is showing.
     settings: Option<(Entity<SettingsView>, Subscription)>,
@@ -281,6 +300,8 @@ impl Workspace {
             switcher_open: false,
             palette: None,
             finder: None,
+            tasks: None,
+            last_task: None,
             branches: None,
             settings: None,
             closing: false,
@@ -971,6 +992,7 @@ impl Workspace {
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switcher_open = false;
         self.close_finder_quietly();
+        self.tasks = None;
         let palette = cx.new(|cx| CommandState::new(window, cx));
         palette.update(cx, |palette, cx| palette.focus(window, cx));
         self.palette = Some(palette);
@@ -992,6 +1014,7 @@ impl Workspace {
         self.switcher_open = false;
         self.palette = None;
         self.close_finder_quietly();
+        self.tasks = None;
         let state = cx.new(|cx| CommandState::new(window, cx));
         state.update(cx, |state, cx| {
             state.set_loading(true, window, cx);
@@ -1033,6 +1056,81 @@ impl Workspace {
         }
     }
 
+    /// Shows what the project can run. Its files are read in the background.
+    fn open_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
+        let root = project.root.clone();
+        self.switcher_open = false;
+        self.palette = None;
+        self.close_finder_quietly();
+        self.tasks = None;
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        state.update(cx, |state, cx| {
+            state.set_loading(true, window, cx);
+            state.focus(window, cx);
+        });
+        let mine = state.entity_id();
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx.background_executor().spawn(async move { tasks::discover(&root) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                // The list may have been closed, or closed and opened again.
+                let Some(list) = this.tasks.as_mut().filter(|list| list.state.entity_id() == mine) else { return };
+                let query = list.state.read(cx).query(cx);
+                list.shown = tasks::matches(&found, &query);
+                list.tasks = Some(found);
+                list.state.clone().update(cx, |state, cx| state.set_loading(false, window, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+        self.tasks = Some(TaskList { state, tasks: None, shown: Vec::new() });
+        cx.notify();
+    }
+
+    fn close_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tasks.take().is_some() {
+            self.focus_terminals(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn tasks_query(&mut self, query: &str, cx: &mut Context<Self>) {
+        let Some(list) = &mut self.tasks else { return };
+        if let Some(found) = &list.tasks {
+            list.shown = tasks::matches(found, query);
+            cx.notify();
+        }
+    }
+
+    /// Runs the task in row `row` of the list in a new terminal tab.
+    fn tasks_confirm(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(list) = self.tasks.take() else { return };
+        let command = list
+            .tasks
+            .as_ref()
+            .and_then(|found| found.get(*list.shown.get(row)?))
+            .map(|task| task.command.clone());
+        cx.notify();
+        match command {
+            Some(command) => self.run_task(command, window, cx),
+            None => self.focus_terminals(window, cx),
+        }
+    }
+
+    fn run_task(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_in_terminal(&command, window, cx);
+        self.last_task = Some(command);
+    }
+
+    /// Runs the last task again; before any was run, shows the list.
+    fn rerun_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        match self.last_task.clone() {
+            Some(command) => self.run_task(command, window, cx),
+            None => self.open_tasks(window, cx),
+        }
+    }
+
     fn finder_query(&mut self, query: &str, cx: &mut Context<Self>) {
         let Some(finder) = &mut self.finder else { return };
         if let Some(files) = &finder.files {
@@ -1050,6 +1148,7 @@ impl Workspace {
             .and_then(|files| files.get(*finder.shown.get(row)?))
             .map(|relative| project.root.join(relative));
         self.close_finder_quietly();
+        self.tasks = None;
         cx.notify();
         match path {
             Some(path) => self.open_file(path, None, window, cx),
@@ -1473,6 +1572,65 @@ impl Workspace {
                         })
                         .on_cancel(move |window, cx| {
                             let _ = this.update(cx, |this, cx| this.close_finder(window, cx));
+                        }),
+                ),
+        )
+    }
+
+    fn render_tasks(&self, list: &TaskList, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (border, popover, foreground, muted) =
+            (theme.border, theme.popover, theme.popover_foreground, theme.muted_foreground);
+        let this = cx.entity().downgrade();
+        let (on_query, on_confirm) = (this.clone(), this.clone());
+        let found = list.tasks.as_deref().unwrap_or_default();
+        let items: Vec<CommandItem> = list
+            .shown
+            .iter()
+            .filter_map(|&index| found.get(index))
+            .map(|task| {
+                // The command, then the file that describes it, quieter.
+                let (command, source) = (SharedString::from(task.command.clone()), task.source);
+                CommandItem::new().label(task.command.clone()).child(move |_, _| {
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(div().flex_1().min_w_0().truncate().text_sm().child(command.clone()))
+                        .child(div().flex_none().text_xs().text_color(muted).child(source))
+                })
+            })
+            .collect();
+        self.backdrop("tasks-backdrop", cx).flex().justify_center().items_start().child(
+            div()
+                .id("tasks")
+                .mt(px(72.))
+                .w(px(560.))
+                .max_w(relative(0.9))
+                .h_auto()
+                .rounded_lg()
+                .border_1()
+                .border_color(border)
+                .bg(popover)
+                .text_color(foreground)
+                .shadow_lg()
+                .overflow_hidden()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Command::new(&list.state)
+                        .items(items)
+                        // The list is already the answer to what was typed.
+                        .filterable(false)
+                        .placeholder(t("Type a task name\u{2026}"))
+                        .bordered(false)
+                        .empty(|_, _, _| div().px_3().py_2().text_sm().child(t("No tasks found in this project")))
+                        .on_query(move |query, _, cx| {
+                            let _ = on_query.update(cx, |this, cx| this.tasks_query(query, cx));
+                        })
+                        .on_confirm(move |index, window, cx| {
+                            let _ = on_confirm.update(cx, |this, cx| this.tasks_confirm(index.row, window, cx));
+                        })
+                        .on_cancel(move |window, cx| {
+                            let _ = this.update(cx, |this, cx| this.close_tasks(window, cx));
                         }),
                 ),
         )
@@ -1935,6 +2093,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| {
                 if this.palette.is_some() { this.close_palette(window, cx) } else { this.open_palette(window, cx) }
             }))
+            .on_action(cx.listener(|this, _: &RunTask, window, cx| {
+                if this.tasks.is_some() { this.close_tasks(window, cx) } else { this.open_tasks(window, cx) }
+            }))
+            .on_action(cx.listener(|this, _: &RerunTask, window, cx| this.rerun_task(window, cx)))
             .on_action(cx.listener(|this, a: &Save, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &GoToDefinition, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &ToggleTerminal, window, cx| this.forward(a, window, cx)))
@@ -1955,6 +2117,7 @@ impl Render for Workspace {
             .when(self.switcher_open, |d| d.child(self.render_switcher(cx)))
             .when_some(self.palette.clone(), |d, palette| d.child(self.render_palette(&palette, cx)))
             .when_some(self.finder.as_ref(), |d, finder| d.child(self.render_finder(finder, cx)))
+            .when_some(self.tasks.as_ref(), |d, list| d.child(self.render_tasks(list, cx)))
             .when_some(self.branches.as_ref(), |d, menu| d.child(self.render_branches(menu, cx)))
             .when_some(self.settings.as_ref().map(|(view, _)| view.clone()), |d, view| {
                 d.child(self.render_settings(&view, cx))
@@ -3021,6 +3184,42 @@ three
         .unwrap();
         assert_eq!(f.workspace.read_with(cx, |w, _| w.root()), Some(two.clone()));
         assert_eq!(state::load_from(&f.state_path).recent, vec![two]);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn a_task_of_the_project_runs_in_a_terminal_tab(cx: &mut TestAppContext) {
+        let root = project_dir("tasks");
+        std::fs::write(root.join("package.json"), r#"{"scripts": {"dev": "vite", "lint": "eslint ."}}"#).unwrap();
+        std::fs::write(root.join("Makefile"), "docs:\n\ttrue\n").unwrap();
+        let f = open(cx, "tasks");
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let listed = |cx: &mut TestAppContext| {
+            f.workspace.read_with(cx, |w, _| {
+                let list = w.tasks.as_ref()?;
+                let found = list.tasks.as_ref()?;
+                Some(list.shown.iter().map(|&i| found[i].command.clone()).collect::<Vec<_>>())
+            })
+        };
+
+        press(cx, f.window, &["ctrl-shift-x"]);
+        wait_until(cx, "the list of tasks", |cx| listed(cx).is_some());
+        assert_eq!(listed(cx).unwrap(), ["npm run dev", "npm run lint", "make docs"]);
+        cx.update_window(f.window, |_, window, cx| window.input("lint", cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(listed(cx).unwrap(), ["npm run lint"]);
+        let tabs = area.read_with(cx, |a, _| a.tab_count());
+        press(cx, f.window, &["enter"]);
+        cx.run_until_parked();
+        assert!(f.workspace.read_with(cx, |w, _| w.tasks.is_none()));
+        assert_eq!(area.read_with(cx, |a, _| a.tab_count()), tabs + 1);
+        assert_eq!(f.workspace.read_with(cx, |w, _| w.last_task.clone()).as_deref(), Some("npm run lint"));
+
+        // The last task runs again without the list.
+        press(cx, f.window, &["ctrl-shift-l"]);
+        cx.run_until_parked();
+        assert!(f.workspace.read_with(cx, |w, _| w.tasks.is_none()));
+        assert_eq!(area.read_with(cx, |a, _| a.tab_count()), tabs + 2);
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

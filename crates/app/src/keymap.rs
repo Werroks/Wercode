@@ -14,7 +14,7 @@ use crate::term::{
 };
 use crate::theme::AppState;
 use crate::workspace::{
-    CommandPalette, NewWindow, OpenFolder, OpenSettings, QuickOpen, ShowFiles, ShowGit, ShowProblems, ShowSearch,
+    CommandPalette, NewWindow, OpenFolder, OpenSettings, QuickOpen, RerunTask, RunTask, ShowFiles, ShowGit, ShowProblems, ShowSearch,
     SwitchBranch, SwitchProject, TogglePanel,
 };
 use wercode_core::i18n::tf;
@@ -52,6 +52,9 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("workspace.switch_branch", "Workspace", SwitchBranch, []),
         shortcut!("workspace.new_window", "Workspace", NewWindow, ["ctrl-shift-n"]),
         shortcut!("workspace.settings", "Workspace", OpenSettings, []),
+        // X for "execute"; L for the last one again.
+        shortcut!("workspace.run_task", "Workspace", RunTask, ["ctrl-shift-x"]),
+        shortcut!("workspace.rerun_task", "Workspace", RerunTask, ["ctrl-shift-l"]),
         // Up sends commits away, down brings them in, like the arrows on the buttons.
         shortcut!("git.push", "Workspace", Push, ["ctrl-shift-up"]),
         shortcut!("git.pull", "Workspace", Pull, ["ctrl-shift-down"]),

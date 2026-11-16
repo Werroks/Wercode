@@ -17,6 +17,7 @@ pub mod process;
 pub mod search;
 pub mod shell;
 pub mod state;
+pub mod tasks;
 pub mod terminal;
 pub mod theme;
 pub mod update;

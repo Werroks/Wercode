@@ -76,6 +76,8 @@ smaller VS Code.
 - Tabs you can rename and drag; up to four splits per tab
 - Find in the output, Ctrl+click on links and on `file:line` from compiler output
 - Tabs, splits and each terminal's folder come back after a restart
+- Tasks: the scripts of `package.json`, Cargo and Go commands, `Makefile` targets and `justfile`
+  recipes in one list (Ctrl+Shift+X); the chosen one runs in a new terminal tab
 
 **Files and editor**
 - File tree with git status colours, `.gitignore` respected, follows the disk live
@@ -159,6 +161,7 @@ All of them can be changed in the `[keys]` table of `settings.toml`.
 | Ctrl+Shift+T | New terminal tab |
 | Ctrl+Shift+D / Ctrl+Shift+E | Split right / split down |
 | Ctrl+Shift+S | Find in terminal output |
+| Ctrl+Shift+X / Ctrl+Shift+L | Run a task / run the last task again |
 | Ctrl+Shift+J | Show or hide the terminal (terminal-below layout) |
 | Ctrl+Shift+Enter | Commit |
 | Ctrl+Shift+Up / Down | Push / pull |

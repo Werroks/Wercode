@@ -73,6 +73,7 @@ Move between splits by direction,terminal,should,yes,yes,2026-11-16; Ctrl+Alt+ar
 Menu on the empty space under the file tree,files,should,yes,yes,2026-11-16; New File and New Folder in the project folder; checked in a real window
 Replace across the project,search,should,yes,yes,2026-11-16; a second field and Replace All in the search panel; asks first; every match in the files found is replaced on disk with encoding and line endings kept; $1 works in a regular expression; open files without unsaved edits reload by themselves; covered by tests; the panel checked in a real window
 Remote branches and deleting a branch,git,should,yes,yes,2026-11-16; the branch list shows branches only a remote has (a click makes a local one that follows it) and a cross on local ones (git branch -d so unmerged work is refused with git's words); covered by tests; deleting checked in a real window
+Tasks found in the project and run in a terminal tab,terminal,should,yes,yes,2026-11-16; an idea from Zed; package.json scripts (npm or pnpm or yarn or bun by lock file); cargo run test build check; go run test build; Makefile targets; justfile recipes; Ctrl+Shift+X or Tasks: Run in the palette lists them and typing narrows the list; Enter runs one in a new terminal tab; Ctrl+Shift+L runs the last one again; covered by tests; not looked at in a real window
 AI chat and agent panel,ai,skip,yes,skip,user runs a CLI agent in the terminal
 Tab autocomplete model,ai,skip,yes,skip,Cursor's own model and service
 Cloud agents and handoff,ai,skip,yes,skip,Cursor's infrastructure

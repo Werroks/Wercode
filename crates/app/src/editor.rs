@@ -1,16 +1,18 @@
 //! A file open for editing in a tab next to the terminals.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
+use futures::channel::oneshot;
+use gpui_kit::base::input::{DefinitionProvider, Diagnostic, DiagnosticSeverity, HoverProvider, Rope, RopeExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use wercode_core::document::{self, Document, Format, LoadError};
 use wercode_core::i18n::{t, tf};
-use wercode_core::lsp::{Problem, Servers, Severity};
+use wercode_core::lsp::{Problem, Servers, Severity, path_from_uri, uri_from_path};
 
 use crate::lsp::CheckerEvent;
 
@@ -27,6 +29,106 @@ pub fn init(_: &mut App) {}
 pub enum EditorEvent {
     /// The name or the unsaved mark may have changed.
     Changed,
+    /// Another file is wanted in a tab, at a 1-based line and column: the
+    /// one where a name of this file is defined.
+    Open { path: PathBuf, at: (u32, u32) },
+}
+
+/// Asks the language servers about the code of one file: what is under the
+/// pointer, and where a name is defined.
+struct Asker {
+    servers: Servers,
+    path: PathBuf,
+}
+
+impl Asker {
+    /// The line and column of a place in the text. The servers get the text
+    /// first, in case typing has not paused yet: they answer about what
+    /// they have.
+    fn place(&self, text: &Rope, offset: usize) -> Position {
+        self.servers.change(&self.path, text.to_string());
+        text.offset_to_position(offset)
+    }
+}
+
+fn range(start: (u32, u32), end: (u32, u32)) -> lsp_types::Range {
+    lsp_types::Range::new(Position::new(start.0, start.1), Position::new(end.0, end.1))
+}
+
+impl HoverProvider for Asker {
+    fn hover(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
+        let at = self.place(text, offset);
+        let (sender, answer) = oneshot::channel();
+        self.servers.hover(&self.path, at.line, at.character, move |hover| {
+            let _ = sender.send(hover);
+        });
+        cx.background_executor().spawn(async move {
+            // A server that stopped meanwhile has nothing to say.
+            let Some(hover) = answer.await.ok().flatten() else { return Ok(None) };
+            let contents = lsp_types::MarkupContent { kind: lsp_types::MarkupKind::Markdown, value: hover.text };
+            Ok(Some(lsp_types::Hover {
+                contents: lsp_types::HoverContents::Markup(contents),
+                range: hover.range.map(|(start, end)| range(start, end)),
+            }))
+        })
+    }
+}
+
+impl DefinitionProvider for Asker {
+    fn definitions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<lsp_types::LocationLink>>> {
+        let at = self.place(text, offset);
+        let (sender, answer) = oneshot::channel();
+        self.servers.definition(&self.path, at.line, at.character, move |found| {
+            let _ = sender.send(found);
+        });
+        cx.background_executor().spawn(async move {
+            let found = answer.await.unwrap_or_default();
+            let links = found.into_iter().filter_map(|target| {
+                let name = range((target.line, target.column), (target.end_line, target.end_column));
+                Some(lsp_types::LocationLink {
+                    origin_selection_range: None,
+                    target_uri: uri_from_path(&target.path).parse().ok()?,
+                    target_range: name,
+                    target_selection_range: name,
+                })
+            });
+            Ok(links.collect())
+        })
+    }
+}
+
+/// Lets the editor ask the language servers about the file at `path`. A
+/// definition in the same file moves the cursor there; one in another file
+/// is asked for with [`EditorEvent::Open`].
+fn connect(state: &Entity<EditorState>, servers: &Servers, path: &Path, view: WeakEntity<EditorView>, cx: &mut App) {
+    let asker = Rc::new(Asker { servers: servers.clone(), path: path.to_path_buf() });
+    let own = path.to_path_buf();
+    state.update(cx, |state, _| {
+        let lsp = state.lsp_mut();
+        lsp.hover_provider = Some(asker.clone());
+        lsp.definition_provider = Some(asker);
+        lsp.show_document = Some(Rc::new(move |place, _, cx| {
+            // Not a file (a web page): the editor opens it in the browser.
+            let Some(path) = path_from_uri(place.uri.as_str()) else { return false };
+            if path == own {
+                return false;
+            }
+            let at = place.selection.map_or((1, 1), |range| (range.start.line + 1, range.start.character + 1));
+            view.update(cx, |_, cx| cx.emit(EditorEvent::Open { path, at })).is_ok()
+        }));
+    });
 }
 
 pub struct EditorView {
@@ -91,6 +193,9 @@ impl EditorView {
             })
         });
         let servers = checker.map(|checker| checker.read(cx).servers().clone());
+        if let Some(servers) = &servers {
+            connect(&state, servers, &path, cx.weak_entity(), cx);
+        }
         let watch = cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(DISK_POLL).await;
@@ -134,6 +239,9 @@ impl EditorView {
         if let Some(servers) = self.servers.as_ref().filter(|_| self.opened) {
             servers.close(&self.path);
             servers.open(&self.root, &path, self.state.read(cx).value().to_string());
+        }
+        if let Some(servers) = &self.servers {
+            connect(&self.state, servers, &path, cx.weak_entity(), cx);
         }
         self.path = path;
         self.show_problems(cx);
@@ -429,6 +537,40 @@ impl EditorView {
     pub fn underlined(&self, cx: &App) -> Vec<String> {
         let state = self.state.read(cx);
         state.diagnostics().map(|set| set.iter().map(|d| d.message.to_string()).collect()).unwrap_or_default()
+    }
+
+    /// What the language servers say about the code at a 0-based line and
+    /// column, as the pointer resting there asks.
+    pub fn hover_at(&self, line: u32, column: u32, window: &mut Window, cx: &mut Context<Self>) -> Task<Option<String>> {
+        let state = self.state.read(cx);
+        let (text, provider) = (state.text().clone(), state.lsp().hover_provider.clone().unwrap());
+        let asked = provider.hover(&text, text.position_to_offset(&Position::new(line, column)), window, cx);
+        cx.background_executor().spawn(async move {
+            match asked.await.unwrap()?.contents {
+                lsp_types::HoverContents::Markup(markup) => Some(markup.value),
+                _ => None,
+            }
+        })
+    }
+
+    /// The line and column of the cursor, 0-based.
+    pub fn cursor(&self, cx: &App) -> (u32, u32) {
+        let position = self.state.read(cx).cursor_position();
+        (position.line, position.character)
+    }
+
+    /// Follows a definition the way the editor does once a server has
+    /// named the place.
+    pub fn follow(view: &Entity<Self>, path: &Path, line: u32, column: u32, window: &mut Window, cx: &mut App) -> bool {
+        let show = view.read(cx).state.read(cx).lsp().show_document.clone().unwrap();
+        let name = range((line, column), (line, column));
+        let place = lsp_types::ShowDocumentParams {
+            uri: uri_from_path(path).parse().unwrap(),
+            external: Some(false),
+            take_focus: Some(true),
+            selection: Some(name),
+        };
+        show(&place, window, cx)
     }
 
     pub fn changed_on_disk(&self) -> bool {

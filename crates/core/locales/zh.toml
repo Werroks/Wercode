@@ -61,6 +61,7 @@
 "Downloading version {version}…" = "正在下载版本 {version}…"
 "Downloading Wercode {version}…" = "正在下载 Wercode {version}…"
 "Edit settings.toml" = "编辑 settings.toml"
+"Editor: Go to Definition" = "编辑器：转到定义"
 "Errors and warnings appear here once a language server checks a file you open." = "语言服务器检查你打开的文件后，错误和警告会显示在这里。"
 "Fetch" = "抓取"
 "Fetch failed" = "抓取失败"

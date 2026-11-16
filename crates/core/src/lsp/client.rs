@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::specs::{self, Program, Spec};
-use super::{Problem, Severity, Shared, Status, path_from_uri, rpc, uri_from_path};
+use super::{Hover, Problem, Severity, Shared, Status, Target, path_from_uri, rpc, uri_from_path};
 
 /// How long a server may take to finish after it was asked to stop.
 const STOP_WAIT: Duration = Duration::from_secs(2);
@@ -24,11 +24,37 @@ pub(super) enum Command {
     Change { path: PathBuf, text: String },
     Save { path: PathBuf },
     Close { path: PathBuf },
+    /// Something asked about a place in an open file: a 0-based line and a
+    /// column in characters.
+    Ask { path: PathBuf, line: u32, column: u32, question: Question },
     Stop,
     /// A message from the server.
     Incoming(Value),
     /// The server's output has ended: it exited.
     Ended,
+}
+
+/// What can be asked about a place in a file, with where the answer goes.
+/// Each is answered once, with nothing when the server cannot say.
+pub(super) enum Question {
+    Hover(Box<dyn FnOnce(Option<Hover>) + Send>),
+    Definition(Box<dyn FnOnce(Vec<Target>) + Send>),
+}
+
+impl Question {
+    fn method(&self) -> &'static str {
+        match self {
+            Question::Hover(_) => "textDocument/hover",
+            Question::Definition(_) => "textDocument/definition",
+        }
+    }
+
+    fn unanswered(self) {
+        match self {
+            Question::Hover(reply) => reply(None),
+            Question::Definition(reply) => reply(Vec::new()),
+        }
+    }
 }
 
 pub(super) fn start(
@@ -134,17 +160,58 @@ fn column(line: &str, units: u32, encoding: Encoding) -> u32 {
     chars + units.saturating_sub(used)
 }
 
+/// The column in the server's units of a column in characters.
+fn units(line: &str, column: u32, encoding: Encoding) -> u32 {
+    let mut used = 0;
+    let mut chars = 0;
+    for c in line.chars() {
+        if chars >= column {
+            return used;
+        }
+        used += match encoding {
+            Encoding::Utf8 => c.len_utf8() as u32,
+            Encoding::Utf16 => c.len_utf16() as u32,
+            Encoding::Utf32 => 1,
+        };
+        chars += 1;
+    }
+    used + column.saturating_sub(chars)
+}
+
+/// A position of the protocol as a line and a column in characters.
+fn place(at: &Value, lines: Option<&[&str]>, encoding: Encoding) -> Option<(u32, u32)> {
+    let line = at.get("line")?.as_u64()? as u32;
+    let units = at.get("character")?.as_u64()? as u32;
+    let column = match lines.and_then(|lines| lines.get(line as usize)) {
+        Some(text) => column(text, units, encoding),
+        None => units,
+    };
+    Some((line, column))
+}
+
+/// The text of a hover answer, as Markdown.
+fn hover_text(contents: &Value) -> String {
+    match contents {
+        Value::String(text) => text.trim().to_string(),
+        Value::Array(parts) => {
+            let parts: Vec<String> = parts.iter().map(hover_text).filter(|part| !part.is_empty()).collect();
+            parts.join("\n\n")
+        }
+        Value::Object(part) => {
+            let value = part.get("value").and_then(Value::as_str).unwrap_or_default().trim();
+            match part.get("language").and_then(Value::as_str) {
+                // A piece of code with its language.
+                Some(language) if !value.is_empty() => format!("```{language}\n{value}\n```"),
+                _ => value.to_string(),
+            }
+        }
+        _ => String::new(),
+    }
+}
+
 fn problem(diagnostic: &Value, lines: Option<&[&str]>, encoding: Encoding) -> Option<Problem> {
     let range = diagnostic.get("range")?;
-    let position = |at: &Value| -> Option<(u32, u32)> {
-        let line = at.get("line")?.as_u64()? as u32;
-        let units = at.get("character")?.as_u64()? as u32;
-        let column = match lines.and_then(|lines| lines.get(line as usize)) {
-            Some(text) => column(text, units, encoding),
-            None => units,
-        };
-        Some((line, column))
-    };
+    let position = |at: &Value| place(at, lines, encoding);
     let (line, column) = position(range.get("start")?)?;
     let (end_line, end_column) = position(range.get("end")?)?;
     Some(Problem {
@@ -167,6 +234,12 @@ fn problem(diagnostic: &Value, lines: Option<&[&str]>, encoding: Encoding) -> Op
             _ => None,
         },
     })
+}
+
+/// Whether two paths name one file, as far as the letters tell: Windows does
+/// not tell `C:\Src` from `c:\src`.
+fn same_file(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) { a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) } else { a == b }
 }
 
 /// A file the server has open.
@@ -197,6 +270,13 @@ struct Session {
     progress: HashMap<String, (String, String)>,
     /// Why the server failed, when it answered its start with an error.
     failure: Option<String>,
+    /// The server answers questions about what is under the pointer, and
+    /// about where a name is defined.
+    hovers: bool,
+    defines: bool,
+    /// Questions sent to the server and not answered yet, by request, with
+    /// the file each is about.
+    asked: HashMap<i64, (PathBuf, Question)>,
 }
 
 impl Session {
@@ -235,6 +315,8 @@ impl Session {
                 "textDocument": {
                     "synchronization": {"didSave": true, "dynamicRegistration": false},
                     "publishDiagnostics": {"relatedInformation": false, "codeDescriptionSupport": true},
+                    "hover": {"contentFormat": ["markdown", "plaintext"]},
+                    "definition": {"linkSupport": true},
                 },
                 "workspace": {"workspaceFolders": true, "configuration": false},
                 "window": {"workDoneProgress": true},
@@ -275,6 +357,9 @@ impl Session {
                 if self.shutdown.is_some() && id.as_i64() == self.shutdown {
                     return false;
                 }
+                if let Some((path, question)) = id.as_i64().and_then(|id| self.asked.remove(&id)) {
+                    self.answered(&path, question, &message["result"]);
+                }
             }
             (None, None) => {}
         }
@@ -295,6 +380,10 @@ impl Session {
         };
         let save = &capabilities["textDocumentSync"]["save"];
         self.save_text = save["includeText"].as_bool().unwrap_or(false);
+        // A server says `true`, or describes how it does it.
+        let can = |name: &str| capabilities[name].as_bool().unwrap_or(capabilities[name].is_object());
+        self.hovers = can("hoverProvider");
+        self.defines = can("definitionProvider");
         self.notify("initialized", json!({}));
         self.initialized = true;
         self.report_progress();
@@ -386,6 +475,75 @@ impl Session {
         }
     }
 
+    /// Asks the server about a place in a file it has open.
+    fn ask(&mut self, path: PathBuf, line: u32, column: u32, question: Question) {
+        let able = match question {
+            Question::Hover(_) => self.hovers,
+            Question::Definition(_) => self.defines,
+        };
+        let Some(doc) = self.docs.get(&path).filter(|_| self.initialized && able) else {
+            return question.unanswered();
+        };
+        let text = doc.text.split('\n').nth(line as usize).unwrap_or_default();
+        let params = json!({
+            "textDocument": {"uri": doc.uri},
+            "position": {"line": line, "character": units(text, column, self.encoding)},
+        });
+        let id = self.request(question.method(), params);
+        self.asked.insert(id, (path, question));
+    }
+
+    /// Hands the server's answer to whoever asked.
+    fn answered(&mut self, path: &Path, question: Question, result: &Value) {
+        match question {
+            Question::Hover(reply) => {
+                let text = hover_text(&result["contents"]);
+                if text.is_empty() {
+                    return reply(None);
+                }
+                let lines: Option<Vec<&str>> = self.docs.get(path).map(|doc| doc.text.split('\n').collect());
+                let range = result.get("range").and_then(|range| {
+                    let start = place(range.get("start")?, lines.as_deref(), self.encoding)?;
+                    let end = place(range.get("end")?, lines.as_deref(), self.encoding)?;
+                    Some((start, end))
+                });
+                reply(Some(Hover { text, range }));
+            }
+            Question::Definition(reply) => {
+                // One place, a list of them, or nothing.
+                let places: Vec<&Value> = match result {
+                    Value::Array(places) => places.iter().collect(),
+                    Value::Object(_) => vec![result],
+                    _ => Vec::new(),
+                };
+                reply(places.into_iter().filter_map(|place| self.target(place)).collect());
+            }
+        }
+    }
+
+    /// A place in a file, from a `Location` or a `LocationLink`.
+    fn target(&self, found: &Value) -> Option<Target> {
+        let uri = found.get("uri").or_else(|| found.get("targetUri"))?.as_str()?;
+        let range =
+            found.get("range").or_else(|| found.get("targetSelectionRange")).or_else(|| found.get("targetRange"))?;
+        // Servers write the same address in their own ways (`c%3A` for `C:`).
+        let named = path_from_uri(uri);
+        let same = |path: &Path| named.as_deref().is_some_and(|named| same_file(named, path));
+        let open = self.docs.iter().find(|(path, doc)| doc.uri == uri || same(path));
+        let path = open.map(|(path, _)| path.clone()).or(named.clone())?;
+        // Columns are counted in the text of that file: as the server has
+        // it, or else as it is on disk.
+        let on_disk = match (open, self.encoding) {
+            (None, Encoding::Utf8 | Encoding::Utf16) => std::fs::read_to_string(&path).ok(),
+            _ => None,
+        };
+        let text = open.map(|(_, doc)| doc.text.as_str()).or(on_disk.as_deref());
+        let lines: Option<Vec<&str>> = text.map(|text| text.split('\n').collect());
+        let (line, column) = place(range.get("start")?, lines.as_deref(), self.encoding)?;
+        let (end_line, end_column) = place(range.get("end")?, lines.as_deref(), self.encoding)?;
+        Some(Target { path, line, column, end_line, end_column })
+    }
+
     /// Sends a change to an open file, or holds it until the server is ready.
     fn document(&mut self, command: Command) {
         if !self.initialized {
@@ -426,6 +584,7 @@ impl Session {
                 let Some(doc) = self.docs.remove(&path) else { return };
                 self.notify("textDocument/didClose", json!({"textDocument": {"uri": doc.uri}}));
             }
+            Command::Ask { question, .. } => question.unanswered(),
             Command::Stop | Command::Incoming(_) | Command::Ended => {}
         }
     }
@@ -498,6 +657,9 @@ fn run(id: usize, spec: Spec, root: PathBuf, sender: Sender<Command>, receiver: 
         save_text: false,
         progress: HashMap::new(),
         failure: None,
+        hovers: false,
+        defines: false,
+        asked: HashMap::new(),
     };
     session.initialize();
 
@@ -534,6 +696,7 @@ fn run(id: usize, spec: Spec, root: PathBuf, sender: Sender<Command>, receiver: 
                     break;
                 }
             }
+            Command::Ask { path, line, column, question } => session.ask(path, line, column, question),
             command => {
                 if stopping.is_none() {
                     session.document(command);
@@ -579,6 +742,21 @@ mod tests {
         assert_eq!(column(line, 5, Encoding::Utf32), 5);
         // Past the end of the line, the extra counts as it is.
         assert_eq!(column("ab", 4, Encoding::Utf16), 4);
+        // And back, for what is asked about a place.
+        assert_eq!(units(line, 5, Encoding::Utf16), 6);
+        assert_eq!(units(line, 5, Encoding::Utf8), 8);
+        assert_eq!(units(line, 5, Encoding::Utf32), 5);
+        assert_eq!(units("ab", 4, Encoding::Utf16), 4);
+    }
+
+    #[test]
+    fn hover_answers_become_markdown() {
+        assert_eq!(hover_text(&json!("  plain  ")), "plain");
+        assert_eq!(hover_text(&json!({"kind": "markdown", "value": "**fn** main"})), "**fn** main");
+        assert_eq!(hover_text(&json!({"language": "rust", "value": "fn main()"})), "```rust\nfn main()\n```");
+        let parts = json!([{"language": "go", "value": "var x int"}, "", "docs"]);
+        assert_eq!(hover_text(&parts), "```go\nvar x int\n```\n\ndocs");
+        assert_eq!(hover_text(&Value::Null), "");
     }
 
     #[test]

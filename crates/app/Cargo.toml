@@ -15,6 +15,8 @@ gpui-kit = { version = "0.9.1", features = [
     "tree-sitter-ruby", "tree-sitter-rust", "tree-sitter-sql", "tree-sitter-toml", "tree-sitter-tsx",
     "tree-sitter-typescript", "tree-sitter-yaml",
 ] }
+# The types the editor component takes what language servers say in.
+lsp-types = "0.97.0"
 wercode-core = { version = "0.3.0", path = "../core" }
 
 [dev-dependencies]

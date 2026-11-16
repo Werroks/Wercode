@@ -11,7 +11,7 @@ use futures::channel::mpsc;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{GoToDefinition, Input, InputEvent, InputState};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -156,6 +156,7 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("Terminal: Rename Tab\u{2026}"), Box::new(RenameTab)),
         (t("File: Go to File\u{2026}"), Box::new(QuickOpen)),
         (t("File: Save"), Box::new(Save)),
+        (t("Editor: Go to Definition"), Box::new(GoToDefinition)),
         (t("View: Toggle Side Panel"), Box::new(TogglePanel)),
         (t("View: Show Files"), Box::new(ShowFiles)),
         (t("Search: Find in Files"), Box::new(ShowSearch)),
@@ -1840,6 +1841,7 @@ impl Render for Workspace {
                 if this.palette.is_some() { this.close_palette(window, cx) } else { this.open_palette(window, cx) }
             }))
             .on_action(cx.listener(|this, a: &Save, window, cx| this.forward(a, window, cx)))
+            .on_action(cx.listener(|this, a: &GoToDefinition, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &ToggleTerminal, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &NewTab, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &SplitRight, window, cx| this.forward(a, window, cx)))
@@ -2471,6 +2473,61 @@ mod tests {
         cx.update(|cx| crate::theme::change_settings(cx, |s| s.language_servers = false)).unwrap();
         wait_until(cx, "the underlines to go", |cx| editor.read_with(cx, |e, cx| e.underlined(cx)).is_empty());
         assert_eq!(servers.counts(&root), (0, 0));
+        servers.stop_all(std::time::Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn language_servers_describe_code_and_find_definitions(cx: &mut TestAppContext) {
+        use wercode_core::lsp::Status;
+        let root = project_dir("lsp-ask");
+        let file = root.join("main.rs");
+        let other = root.join("other.rs");
+        std::fs::write(&file, "fn name() {}
+
+use name;
+").unwrap();
+        std::fs::write(&other, "one
+two
+three
+").unwrap();
+        let f = open_checked(cx, "lsp-ask");
+        let checker = cx.update(|cx| crate::lsp::checker(cx).unwrap());
+        let servers = checker.read_with(cx, |c, _| c.servers().clone());
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(file.clone(), None, window, cx));
+        })
+        .unwrap();
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let editor = area.read_with(cx, |a, cx| a.editor_for(&file, cx)).unwrap();
+        wait_until(cx, "the server", |cx| {
+            cx.update(|_| servers.report(&file)).is_some_and(|r| r.servers.first().is_some_and(|s| s.1 == Status::Ready))
+        });
+
+        // The pointer resting on a name asks the server about it.
+        let asked = cx
+            .update_window(f.window, |_, window, cx| editor.update(cx, |e, cx| e.hover_at(2, 5, window, cx)))
+            .unwrap();
+        let said = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let heard = said.clone();
+        cx.update(|cx| cx.foreground_executor().spawn(async move { *heard.borrow_mut() = Some(asked.await) }).detach());
+        wait_until(cx, "what the server says", |_| said.borrow().is_some());
+        assert_eq!(said.borrow_mut().take().unwrap().as_deref(), Some("the word `name`"));
+
+        // F12 on a name moves the cursor to where the file defines it.
+        cx.update_window(f.window, |_, window, cx| editor.update(cx, |e, cx| e.go_to(3, Some(6), window, cx))).unwrap();
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, cx| e.cursor(cx)), (2, 5));
+        press(cx, f.window, &["f12"]);
+        wait_until(cx, "the cursor on the definition", |cx| editor.read_with(cx, |e, cx| e.cursor(cx)).0 == 0);
+
+        // A definition in another file opens that file in a tab.
+        let shown = cx
+            .update_window(f.window, |_, window, cx| crate::editor::EditorView::follow(&editor, &other, 1, 0, window, cx))
+            .unwrap();
+        assert!(shown);
+        cx.run_until_parked();
+        assert_eq!(area.read_with(cx, |a, cx| a.shown_file(cx)), Some(other.clone()));
         servers.stop_all(std::time::Duration::from_secs(5));
         let _ = std::fs::remove_dir_all(&f.dir);
     }

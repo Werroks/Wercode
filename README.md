@@ -17,6 +17,10 @@
   <a href="#license"><img alt="License: MIT or Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue"></a>
 </p>
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="Wercode: an editor above a terminal, with the git panel and the commit graph on the left" width="900">
+</p>
+
 ---
 
 More and more code gets written by an agent running in a terminal: Claude Code,
@@ -87,6 +91,7 @@ smaller VS Code.
 **Code checks**
 - Errors and warnings underlined as you type, with the message on hover
 - A Problems panel with everything the checkers found in the project
+- Rest the pointer on a name for its type and documentation; F12 or Ctrl+click goes to its definition
 - Uses the language servers already on your computer (see below)
 
 **Everything else**
@@ -113,7 +118,8 @@ wercode path/to/project
 ## Code checks (linters)
 
 Wercode talks to **language servers**, the same programs VS Code and Zed use
-for errors, warnings and lint rules. It does not bundle them: it finds the ones
+for errors, warnings and lint rules, for what a name means and for where it
+is defined. It does not bundle them: it finds the ones
 installed on your computer and starts them when you open a file of their
 language. If one is missing, the status bar says so and an **Install** button
 runs the command below in a terminal tab, where you can watch it.
@@ -153,6 +159,7 @@ All of them can be changed in the `[keys]` table of `settings.toml`.
 | Ctrl+Shift+Enter | Commit |
 | Ctrl+Shift+Up / Down | Push / pull |
 | Ctrl+S | Save (in the editor) |
+| F12 or Ctrl+click | Go to definition (in the editor) |
 
 ## Build from source
 

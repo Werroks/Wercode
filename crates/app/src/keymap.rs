@@ -3,6 +3,7 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::input::GoToDefinition;
 use gpui_kit::*;
 
 use crate::editor::Save;
@@ -72,6 +73,7 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("terminal.rename_tab", "TerminalArea", RenameTab, []),
         // Plain Ctrl+S is safe here: the keyboard is in a text editor, not in a shell.
         shortcut!("editor.save", "EditorView", Save, ["ctrl-s"]),
+        shortcut!("editor.go_to_definition", "EditorView", GoToDefinition, ["f12"]),
     ]
 }
 

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 pub use specs::{Program, Spec, builtin, find_program, language_id, language_name, root_for};
 
-use client::Command;
+use client::{Command, Question};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Severity {
@@ -46,6 +46,27 @@ pub struct Problem {
     pub source: Option<String>,
     /// The tool's own name for the rule, such as `E0308` or `unused_imports`.
     pub code: Option<String>,
+}
+
+/// What a server says about the code under the pointer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hover {
+    /// The type, the signature, the documentation: Markdown.
+    pub text: String,
+    /// The piece of code it is about, when the server says: where it starts
+    /// and ends, as 0-based lines and columns in characters.
+    pub range: Option<((u32, u32), (u32, u32))>,
+}
+
+/// A place in a file, such as where a name is defined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub path: PathBuf,
+    /// Where the name starts and ends: 0-based lines, columns in characters.
+    pub line: u32,
+    pub column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
 }
 
 /// How a server is doing.
@@ -330,6 +351,61 @@ impl Servers {
         }
         let Some(doc) = state.docs.remove(path) else { return };
         Self::send(&state, &doc.servers, |_| Command::Close { path: path.to_path_buf() });
+    }
+
+    /// Asks what the servers know about the code at a place in an open file:
+    /// a 0-based line and a column in characters. `reply` is called from
+    /// another thread with the first answer that says something, or with
+    /// `None`. It is dropped uncalled if a server stops before answering.
+    pub fn hover(&self, path: &Path, line: u32, column: u32, reply: impl FnOnce(Option<Hover>) + Send + 'static) {
+        self.ask(path, line, column, reply, |answer| answer.is_none(), |reply| Question::Hover(reply));
+    }
+
+    /// Asks where the name at a place in an open file is defined. `reply`
+    /// is called like the one of [`hover`](Self::hover); no places means
+    /// the servers do not know.
+    pub fn definition(&self, path: &Path, line: u32, column: u32, reply: impl FnOnce(Vec<Target>) + Send + 'static) {
+        self.ask(path, line, column, reply, |answer| answer.is_empty(), |reply| Question::Definition(reply));
+    }
+
+    /// Asks each server of a file; the first answer that is not empty wins.
+    fn ask<T: Default + Send + 'static>(
+        &self,
+        path: &Path,
+        line: u32,
+        column: u32,
+        reply: impl FnOnce(T) + Send + 'static,
+        empty: fn(&T) -> bool,
+        question: fn(Box<dyn FnOnce(T) + Send>) -> Question,
+    ) {
+        let state = self.shared.lock();
+        let servers: Vec<&Server> = match state.docs.get(path) {
+            Some(doc) => state.servers.iter().filter(|s| doc.servers.contains(&s.id)).collect(),
+            None => Vec::new(),
+        };
+        // How many servers have yet to answer, and the reply until it is used.
+        let reply: Box<dyn FnOnce(T) + Send> = Box::new(reply);
+        let waiting = Arc::new(Mutex::new((servers.len(), Some(reply))));
+        for server in &servers {
+            let waiting = waiting.clone();
+            let one: Box<dyn FnOnce(T) + Send> = Box::new(move |answer| {
+                let reply = {
+                    let mut waiting = waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    waiting.0 -= 1;
+                    if empty(&answer) && waiting.0 > 0 { None } else { waiting.1.take() }
+                };
+                if let Some(reply) = reply {
+                    reply(answer);
+                }
+            });
+            // A server that has gone takes the question with it, unanswered.
+            let _ = server.commands.send(Command::Ask { path: path.to_path_buf(), line, column, question: question(one) });
+        }
+        let nobody = servers.is_empty();
+        drop(state);
+        if nobody && let Some(reply) = waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).1.take() {
+            reply(T::default());
+        }
     }
 
     /// Everything the servers say about a file, from the top of the file down.
@@ -737,6 +813,27 @@ mod tests {
         wait(&events, "the server to be missing again", || {
             servers.report(&script).is_some_and(|r| r.install.is_some())
         });
+
+        // What is under the pointer, and where a name is defined.
+        servers.change(&file, "let \u{1F600} = name;\nuse name;\n".into());
+        let (asked, answers) = mpsc::channel();
+        let answer = asked.clone();
+        servers.hover(&file, 1, 5, move |hover| answer.send(hover).unwrap());
+        let hover = answers.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+        assert_eq!(hover, Hover { text: "the word `name`".into(), range: Some(((1, 4), (1, 8))) });
+        let answer = asked.clone();
+        servers.hover(&file, 0, 4, move |hover| answer.send(hover).unwrap());
+        assert_eq!(answers.recv_timeout(Duration::from_secs(30)).unwrap(), None);
+        let (asked, places) = mpsc::channel();
+        servers.definition(&file, 1, 6, move |found| asked.send(found).unwrap());
+        let found = places.recv_timeout(Duration::from_secs(30)).unwrap();
+        // The emoji is two units for the server and one character here.
+        let first = Target { path: file.clone(), line: 0, column: 8, end_line: 0, end_column: 12 };
+        assert_eq!(found, vec![first]);
+        // A file that is not open has nobody to ask.
+        let (asked, places) = mpsc::channel();
+        servers.definition(&dir.join("other.rs"), 0, 0, move |found| asked.send(found).unwrap());
+        assert_eq!(places.recv_timeout(Duration::from_secs(30)).unwrap(), Vec::new());
 
         // Turning checking off forgets everything; on brings it back.
         servers.change(&file, "bad again\n".into());

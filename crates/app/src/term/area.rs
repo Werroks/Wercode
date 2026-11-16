@@ -562,7 +562,10 @@ impl TerminalArea {
     fn push_editor(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> usize {
         let root = self.root_dir.clone();
         let editor = cx.new(|cx| EditorView::new(path, root, window, cx));
-        let subscription = cx.subscribe(&editor, |_, _, _: &EditorEvent, cx| cx.notify());
+        let subscription = cx.subscribe_in(&editor, window, |this, _, event: &EditorEvent, window, cx| match event {
+            EditorEvent::Changed => cx.notify(),
+            EditorEvent::Open { path, at } => this.open_path(path.clone(), Some(at.0), Some(at.1), window, cx),
+        });
         self.subscriptions.insert(editor.entity_id(), subscription);
         let id = self.id();
         self.tabs.push(Tab { id, name: None, body: Body::Editor(editor) });

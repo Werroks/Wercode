@@ -60,6 +60,7 @@
 "Downloading version {version}…" = "Descargando la versión {version}…"
 "Downloading Wercode {version}…" = "Descargando Wercode {version}…"
 "Edit settings.toml" = "Editar settings.toml"
+"Editor: Go to Definition" = "Editor: ir a la definición"
 "Errors and warnings appear here once a language server checks a file you open." = "Los errores y advertencias aparecen aquí cuando un servidor de lenguaje revisa un archivo que abres."
 "Fetch" = "Recuperar"
 "Fetch failed" = "Error al recuperar"

@@ -23,6 +23,7 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 ## Layout
 
 - `crates/core` — no window, tested without a GPU: settings, state, themes, tasks,
+  which lines of a file changed (`linediff`),
   shell lookup, PTY terminal, links, git status, file listing, finding a file
   by name, reading and
   writing documents, project search, watching the folder for changes,

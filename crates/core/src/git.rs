@@ -312,6 +312,14 @@ pub fn branches(dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The text of a file as the last commit has it, with LF line endings.
+/// `None` for a file that is new, not text, or not in a repository.
+pub fn committed_text(path: &Path) -> Option<String> {
+    let (dir, name) = (path.parent()?, path.file_name()?.to_str()?);
+    let bytes = output(git(dir).arg("show").arg(format!("HEAD:./{name}")))?;
+    crate::document::decode(&bytes).ok().map(|(text, _)| text)
+}
+
 /// Branches of the remotes that have no local branch of the same name yet,
 /// as git writes them: `origin/feature`.
 pub fn remote_branches(dir: &Path) -> Vec<String> {
@@ -481,6 +489,10 @@ mod tests {
         discard(&dir, &[file.clone()]).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "again");
         assert!(new.is_file());
+
+        // The committed text of a file, whatever is in the folder now.
+        assert_eq!(committed_text(&file).as_deref(), Some("again"));
+        assert_eq!(committed_text(&new), None);
 
         // Branches: list, create, switch; a missing one is an error with git's words.
         assert_eq!(branches(&dir), ["trunk"]);

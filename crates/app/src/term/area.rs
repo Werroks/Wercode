@@ -690,6 +690,14 @@ impl TerminalArea {
         }
     }
 
+    /// Git has a new commit or another branch: open files count their
+    /// changed lines from it.
+    pub fn git_changed(&mut self, cx: &mut Context<Self>) {
+        for editor in self.tabs.iter().filter_map(|t| t.editor()) {
+            editor.update(cx, |editor, cx| editor.git_changed(cx));
+        }
+    }
+
     /// A file or folder was renamed: tabs of files under the old name follow it.
     pub fn path_renamed(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
         for editor in self.tabs.iter().filter_map(|t| t.editor()) {

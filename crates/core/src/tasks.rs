@@ -31,10 +31,14 @@ fn package_runner(root: &Path) -> &'static str {
 /// The names of the scripts in the text of a `package.json`, by name.
 pub fn package_scripts(text: &str) -> Vec<String> {
     let Ok(serde_json::Value::Object(package)) = serde_json::from_str(text) else { return Vec::new() };
-    match package.get("scripts") {
+    let mut names: Vec<String> = match package.get("scripts") {
         Some(serde_json::Value::Object(scripts)) => scripts.keys().cloned().collect(),
         _ => Vec::new(),
-    }
+    };
+    // The reader keeps the order of the file in some builds and sorts in
+    // others; sorted, the list is the same everywhere.
+    names.sort();
+    names
 }
 
 /// Whether a name can be given to `make` or `just` as it stands.

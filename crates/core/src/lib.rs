@@ -10,6 +10,7 @@ pub mod fs_tree;
 pub mod git;
 pub mod history;
 pub mod i18n;
+pub mod linediff;
 pub mod links;
 pub mod lsp;
 pub mod osc;

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use futures::FutureExt as _;
@@ -10,11 +11,15 @@ use gpui_kit::base::input::{
     CompletionProvider, DefinitionProvider, Diagnostic, DiagnosticSeverity, HoverProvider, Rope, RopeExt as _,
 };
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
+use gpui_kit::component::input::{
+    Editor, EditorState, GutterDecoration, GutterDecorationCollection, InputEvent, Position,
+};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use wercode_core::document::{self, Document, Format, LoadError};
+use wercode_core::git;
 use wercode_core::i18n::{t, tf};
+use wercode_core::linediff::{self, Kind};
 use wercode_core::lsp::{Edit, Problem, Servers, Severity, Value, path_from_uri, uri_from_path};
 
 use crate::lsp::CheckerEvent;
@@ -220,6 +225,16 @@ pub struct EditorView {
     opened: bool,
     /// Sends the text to the servers once typing pauses.
     send_task: Option<Task<()>>,
+    /// The file as the last commit has it; `None` outside a repository and
+    /// for a file git does not know.
+    committed: Option<Arc<String>>,
+    /// The marks next to the line numbers: lines added, changed and removed
+    /// since that commit.
+    marks: GutterDecorationCollection,
+    /// Works the marks out again once typing pauses.
+    marks_task: Option<Task<()>>,
+    /// What the marks stand for: the runs of lines that differ from the commit.
+    changes: Vec<linediff::Change>,
     _subscription: Subscription,
     _checks: Option<Subscription>,
     _watch: Task<()>,
@@ -237,11 +252,13 @@ impl EditorView {
     pub fn new(path: PathBuf, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let language = document::language(&path);
         let state = cx.new(|cx| EditorState::new(window, cx).language(language));
+        let marks = state.update(cx, |state, cx| state.create_gutter_decorations_collection(Vec::new(), cx));
         let subscription = cx.subscribe(&state, |this, _, event: &InputEvent, cx| {
             if !matches!(event, InputEvent::Change) || !this.loaded {
                 return;
             }
             this.text_changed(cx);
+            this.mark_later(cx);
             if !this.dirty {
                 this.dirty = true;
                 cx.emit(EditorEvent::Changed);
@@ -287,6 +304,10 @@ impl EditorView {
             servers,
             opened: false,
             send_task: None,
+            committed: None,
+            marks,
+            marks_task: None,
+            changes: Vec::new(),
             _subscription: subscription,
             _checks: checks,
             _watch: watch,
@@ -375,6 +396,7 @@ impl EditorView {
                     }
                 });
                 self.loaded = true;
+                self.read_committed(cx);
                 if let Some(servers) = &self.servers {
                     // The editor's own copy: its lines are what the servers count in.
                     let text = self.state.read(cx).value().to_string();
@@ -484,6 +506,7 @@ impl EditorView {
                         this.changed_on_disk = false;
                         this.error = None;
                         this.send_text(cx);
+                        this.read_committed(cx);
                         if let Some(servers) = this.servers.as_ref().filter(|_| this.opened) {
                             servers.saved(&this.path);
                         }
@@ -501,6 +524,79 @@ impl EditorView {
             });
         })
         .detach();
+    }
+
+    /// Git has a new commit, or another branch: the marks are counted from it.
+    pub fn git_changed(&mut self, cx: &mut Context<Self>) {
+        if self.loaded {
+            self.read_committed(cx);
+        }
+    }
+
+    /// Reads the file as the last commit has it, then marks what differs.
+    fn read_committed(&mut self, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        cx.spawn(async move |this, cx| {
+            let committed = cx.background_executor().spawn(async move { git::committed_text(&path) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.committed = committed.map(Arc::new);
+                this.mark_changes(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Marks the changed lines again once typing pauses.
+    fn mark_later(&mut self, cx: &mut Context<Self>) {
+        if self.committed.is_none() {
+            return;
+        }
+        self.marks_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TYPING_PAUSE).await;
+            let _ = this.update(cx, |this, cx| this.mark_changes(cx));
+        }));
+    }
+
+    /// Marks the lines that differ from the last commit next to their
+    /// numbers: new ones, changed ones, and where lines were taken out.
+    fn mark_changes(&mut self, cx: &mut Context<Self>) {
+        self.marks_task = None;
+        let Some(committed) = self.committed.clone() else {
+            self.marks.clear(cx);
+            self.changes.clear();
+            return;
+        };
+        let text = self.state.read(cx).text().clone();
+        let theme = cx.theme();
+        let (added, modified, deleted) = (theme.success, theme.warning, theme.danger);
+        let marks = self.marks.clone();
+        self.marks_task = Some(cx.spawn(async move |this, cx| {
+            let compared = text.clone();
+            let changes = cx
+                .background_executor()
+                .spawn(async move { linediff::changes(&committed, &compared.to_string()) })
+                .await;
+            // Where a line starts; past the last line, the end of the text.
+            let offset = |line: u32| {
+                let line = line as usize;
+                if line < text.lines_len() { text.line_start_offset(line) } else { text.len() }
+            };
+            let decorations = changes
+                .iter()
+                .map(|change| {
+                    let color = match change.kind {
+                        Kind::Added => added,
+                        Kind::Modified => modified,
+                        Kind::Deleted => deleted,
+                    };
+                    GutterDecoration::new(offset(change.start)..offset(change.end)).with_color(color)
+                })
+                .collect();
+            let _ = this.update(cx, |this, cx| {
+                this.changes = changes;
+                marks.set(decorations, cx);
+            });
+        }));
     }
 
     /// Sends the text to the language servers once typing pauses.
@@ -705,6 +801,11 @@ impl EditorView {
             let lsp_types::CompletionResponse::Array(items) = asked.await.unwrap() else { return Vec::new() };
             items.into_iter().map(|item| item.label).collect()
         })
+    }
+
+    /// The runs of lines marked next to the line numbers.
+    pub fn marked(&self) -> Vec<(Kind, u32, u32)> {
+        self.changes.iter().map(|change| (change.kind, change.start, change.end)).collect()
     }
 
     /// The line and column of the cursor, 0-based.

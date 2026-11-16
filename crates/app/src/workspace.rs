@@ -859,8 +859,16 @@ impl Workspace {
             (Some(old), Some(new)) => !old.files.keys().eq(new.files.keys()),
             _ => false,
         };
+        let moved = match (&project.git, &status) {
+            (Some(old), Some(new)) => old.head != new.head || old.branch != new.branch,
+            (None, None) => false,
+            _ => true,
+        };
         project.git = status.map(Arc::new);
         let git = project.git.clone();
+        if moved {
+            project.terminals.update(cx, |area, cx| area.git_changed(cx));
+        }
         project.changes.update(cx, |changes, cx| changes.set_git(git.clone(), cx));
         project.files.update(cx, |files, cx| {
             files.set_git(git, cx);
@@ -3184,6 +3192,52 @@ three
         .unwrap();
         assert_eq!(f.workspace.read_with(cx, |w, _| w.root()), Some(two.clone()));
         assert_eq!(state::load_from(&f.state_path).recent, vec![two]);
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn changed_lines_are_marked_next_to_their_numbers(cx: &mut TestAppContext) {
+        use wercode_core::linediff::Kind;
+        let root = project_dir("gutter");
+        let file = root.join("notes.txt");
+        std::fs::write(&file, "one
+two
+three
+").unwrap();
+        let git = |args: &[&str]| {
+            let done = std::process::Command::new("git").arg("-C").arg(&root).args(args).output().unwrap();
+            assert!(done.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&done.stderr));
+        };
+        git(&["init", "-q", "-b", "trunk"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@example.com", "add", "-A"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "First"]);
+        // Since the commit: a line changed and a line added.
+        std::fs::write(&file, "one
+TWO
+three
+four
+").unwrap();
+        let f = open(cx, "gutter");
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(file.clone(), None, window, cx));
+        })
+        .unwrap();
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        wait_until(cx, "the editor", |cx| area.read_with(cx, |a, cx| a.editor_for(&file, cx)).is_some());
+        let editor = area.read_with(cx, |a, cx| a.editor_for(&file, cx)).unwrap();
+        let marked = |cx: &mut TestAppContext| editor.read_with(cx, |e, _| e.marked());
+        wait_until(cx, "the marks", |cx| marked(cx).len() == 2);
+        assert_eq!(marked(cx), [(Kind::Modified, 1, 2), (Kind::Added, 3, 4)]);
+
+        // Typing moves them once it pauses.
+        cx.update_window(f.window, |_, window, cx| {
+            editor.update(cx, |e, cx| e.replace_all("one
+", "", window, cx));
+        })
+        .unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        // Two lines became one changed line; the new line is one higher.
+        wait_until(cx, "the marks after typing", |cx| marked(cx) == [(Kind::Modified, 0, 1), (Kind::Added, 2, 3)]);
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

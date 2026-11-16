@@ -84,6 +84,7 @@ smaller VS Code.
 - Go to any file by a few letters of its name, search and replace across the whole project
 - Built-in editor with syntax colours for 20 languages, find and replace, undo
 - Notices when an agent changes an open file and reloads it
+- Marks next to the line numbers show what changed since the last commit
 
 **Git**
 - Stage, unstage, commit, discard; push, pull and fetch

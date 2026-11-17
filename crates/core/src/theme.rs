@@ -22,6 +22,13 @@ impl Rgb {
         Rgb(d(self.0), d(self.1), d(self.2))
     }
 
+    /// This colour moved `amount` (0 to 1) of the way towards `other`.
+    pub fn mix(self, other: Rgb, amount: f32) -> Rgb {
+        let amount = amount.clamp(0.0, 1.0);
+        let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
+        Rgb(m(self.0, other.0), m(self.1, other.1), m(self.2, other.2))
+    }
+
     pub fn as_u32(self) -> u32 {
         (self.0 as u32) << 16 | (self.1 as u32) << 8 | self.2 as u32
     }
@@ -66,6 +73,20 @@ pub struct Ui {
     pub success: Rgb,
     pub warning: Rgb,
     pub selection: Rgb,
+}
+
+impl Ui {
+    /// The background of the row under the pointer. Lists sit on `surface`
+    /// (the side panel) and on `surface_2` (menus and pop-ups), so it is a
+    /// step past both, towards the text.
+    pub fn hover(&self) -> Rgb {
+        self.surface_2.mix(self.text, 0.10)
+    }
+
+    /// The background of the chosen row: one step further than [`Ui::hover`].
+    pub fn chosen(&self) -> Rgb {
+        self.surface_2.mix(self.text, 0.17)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +148,21 @@ mod tests {
             let t = load(id);
             assert!(!t.name.is_empty(), "{id}");
         }
+    }
+
+    #[test]
+    fn hover_and_chosen_rows_show_on_every_background() {
+        // How far apart two colours are, by the channel that differs most.
+        let apart = |a: Rgb, b: Rgb| [a.0.abs_diff(b.0), a.1.abs_diff(b.1), a.2.abs_diff(b.2)].into_iter().max().unwrap();
+        for id in builtin_ids() {
+            let ui = load(id).ui;
+            for background in [ui.bg, ui.surface, ui.surface_2] {
+                assert!(apart(ui.hover(), background) >= 12, "{id}: hover");
+                assert!(apart(ui.chosen(), background) >= 12, "{id}: chosen");
+            }
+            assert!(apart(ui.hover(), ui.chosen()) >= 6, "{id}: hover and chosen");
+        }
+        assert_eq!(Rgb(0, 100, 200).mix(Rgb(100, 100, 0), 0.5), Rgb(50, 100, 100));
     }
 
     #[test]

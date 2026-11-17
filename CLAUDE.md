@@ -24,7 +24,8 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 
 - `crates/core` — no window, tested without a GPU: settings, state, themes, tasks,
   which lines of a file changed (`linediff`),
-  shell lookup, PTY terminal, links, git status, file listing, finding a file
+  shell lookup, PTY terminal, pictures pasted into it (`pasted`), links, git
+  status, file listing, finding a file
   by name, reading and
   writing documents, project search, watching the folder for changes,
   dropping what the program that started Wercode left in its environment,

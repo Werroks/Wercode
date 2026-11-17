@@ -1709,7 +1709,9 @@ impl Render for TerminalArea {
 #[cfg(test)]
 mod tests {
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, WindowOptions};
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, ClipboardItem, Entity, Image, ImageFormat, TestAppContext, WindowOptions,
+    };
     use wercode_core::config::Settings;
 
     use super::TerminalArea;
@@ -1799,6 +1801,41 @@ mod tests {
         // The centre is never left empty.
         press(cx, window, &["ctrl-shift-q"]);
         assert_eq!(shape(cx, &area), (1, 0, 1));
+    }
+
+    #[gpui_kit::test]
+    async fn a_pasted_picture_is_typed_as_the_path_of_a_png(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, area) = open(cx);
+        // A 1×1 bitmap, the kind a screenshot often is on Windows.
+        let bitmap: Vec<u8> = [
+            &b"BM"[..], &58u32.to_le_bytes(), &[0; 4], &54u32.to_le_bytes(), &40u32.to_le_bytes(),
+            &1i32.to_le_bytes(), &1i32.to_le_bytes(), &1u16.to_le_bytes(), &24u16.to_le_bytes(),
+            &[0; 24], &[0, 0, 255, 0],
+        ]
+        .concat();
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Bmp, bitmap))));
+        press(cx, window, &["ctrl-shift-v"]);
+
+        let screen = |cx: &mut TestAppContext| {
+            area.read_with(cx, |a, cx| a.tabs[0].active_pane().unwrap().read(cx).screen_text())
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let path = loop {
+            cx.run_until_parked();
+            let text = screen(cx);
+            if let Some(start) = text.find("wercode-pasted")
+                && let Some(end) = text[start..].find(".png")
+            {
+                let typed = text[..start + end + 4].rsplit(' ').next().unwrap();
+                break std::path::PathBuf::from(typed.trim_matches('"'));
+            }
+            assert!(std::time::Instant::now() < deadline, "the path never showed: {text:?}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let saved = std::fs::read(&path).unwrap();
+        assert!(saved.starts_with(b"\x89PNG"), "saved as PNG: {}", path.display());
+        let _ = std::fs::remove_file(path);
     }
 
     #[gpui_kit::test]

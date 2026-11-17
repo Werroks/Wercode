@@ -44,6 +44,11 @@ pub fn encode(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     };
 
     let bytes = match key {
+        // Ctrl+Enter is a line feed, as in Windows consoles, and so is
+        // Shift+Enter: Claude Code and other prompts start a new line on it
+        // instead of sending what is typed. A shell still runs the command
+        // (PowerShell reads it as Ctrl+Enter, a new line above).
+        "enter" if (m.control || m.shift) && !m.alt => vec![b'\n'],
         "enter" => with_alt(vec![b'\r']),
         "tab" if m.shift => b"\x1b[Z".to_vec(),
         "tab" => vec![b'\t'],
@@ -139,6 +144,13 @@ mod tests {
         assert_eq!(encode(&ks("c", None, true, false, false), false).unwrap(), [0x03]);
         assert_eq!(encode(&ks("enter", None, false, false, false), false).unwrap(), b"\r");
         assert_eq!(encode(&ks("b", None, false, true, false), false).unwrap(), b"\x1bb");
+    }
+
+    #[test]
+    fn ctrl_or_shift_enter_starts_a_new_line() {
+        assert_eq!(encode(&ks("enter", None, true, false, false), false).unwrap(), b"\n");
+        assert_eq!(encode(&ks("enter", None, false, false, true), false).unwrap(), b"\n");
+        assert_eq!(encode(&ks("enter", None, false, true, false), false).unwrap(), b"\x1b\r");
     }
 
     #[test]

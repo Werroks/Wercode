@@ -5,7 +5,7 @@ Clean environment for the shells,terminal,must,no,yes,marks left by Claude Code 
 Correct VT emulation (colors cursor alt screen mouse),terminal,must,yes,partial,alacritty_terminal; mouse reporting (SGR and legacy) implemented; not hand-tested in vim/htop
 Terminal resize follows window and splitter,terminal,must,yes,yes,PTY resize debounced 60 ms
 Scrollback with mouse wheel,terminal,must,yes,partial,implemented; not hand-tested
-Select copy paste in terminal,terminal,must,yes,partial,implemented; not hand-tested
+Select copy paste in terminal,terminal,must,yes,partial,implemented; a picture on the clipboard (a screenshot) is saved as a PNG in the temporary folder and its path is pasted: Claude Code attaches it as an image; files copied in the file manager are pasted as paths; covered by a UI test; not hand-tested
 Multiple terminal tabs,terminal,must,yes,yes,Ctrl+Shift+T / Ctrl+Tab / middle click closes; covered by UI tests
 New terminal starts in workspace root,terminal,must,yes,yes,
 Choose shell (PowerShell cmd bash zsh WSL),terminal,must,yes,yes,auto-detect; the settings screen lists the shells found on the machine; applies to new terminals; cwd tracking only for PowerShell (and Linux via /proc)
@@ -85,3 +85,5 @@ Extensions and Marketplace,extensions,skip,yes,skip,VS Code ecosystem is not our
 MCP and Secrets settings,settings,skip,yes,skip,
 Accounts teams billing,account,skip,yes,skip,
 Create and manage pull requests,git,skip,yes,skip,use gh in the terminal
+New line in the prompt with Ctrl+Enter or Shift+Enter,terminal,must,yes,yes,user request 2026-11-17; both send a line feed as Windows consoles do for Ctrl+Enter: Claude Code starts a new line instead of sending; a shell still runs the command; PowerShell reads it as Ctrl+Enter (a new line above); covered by a test; not hand-tested
+Visible hover and chosen row in menus and pop-ups,shell,must,yes,yes,user request 2026-11-17; the row under the pointer and the chosen row had the same colour as the pop-up itself (recent projects; palette; menus); now a step towards the text from both panel and pop-up colours in every theme; covered by a core test

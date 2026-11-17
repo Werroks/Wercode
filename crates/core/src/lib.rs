@@ -14,6 +14,7 @@ pub mod linediff;
 pub mod links;
 pub mod lsp;
 pub mod osc;
+pub mod pasted;
 pub mod process;
 pub mod search;
 pub mod shell;

@@ -61,14 +61,16 @@ pub fn apply(settings: Settings, cx: &mut App) {
         c.secondary_hover = hsla(ui.surface_2);
         c.secondary_active = hsla(ui.surface_2);
         c.secondary_foreground = hsla(ui.text);
-        c.accent = hsla(ui.surface_2);
+        // Menus and pop-ups are `surface_2`; the row under the pointer and the
+        // chosen row must stand out from it, not repeat it.
+        c.accent = hsla(ui.chosen());
         c.accent_foreground = hsla(ui.text);
         c.popover = hsla(ui.surface_2);
         c.popover_foreground = hsla(ui.text);
         c.list = hsla(ui.surface);
-        c.list_hover = hsla(ui.surface_2);
-        c.list_active = hsla(ui.surface_2);
-        c.list_active_border = hsla(ui.surface_2);
+        c.list_hover = hsla(ui.hover());
+        c.list_active = hsla(ui.chosen());
+        c.list_active_border = hsla(ui.chosen());
         c.list_even = hsla(ui.surface);
         c.title_bar = hsla(ui.surface);
         c.title_bar_border = hsla(ui.border);

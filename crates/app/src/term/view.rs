@@ -17,7 +17,9 @@ use gpui_kit::*;
 use wercode_core::terminal::{
     CursorKind, Frame, FrameCell, SelectKind, SpawnOptions, TermEvent, Terminal,
 };
+use wercode_core::fs_ops;
 use wercode_core::links::{self, Link, LinkTarget};
+use wercode_core::pasted;
 use wercode_core::theme::Rgb;
 
 use super::mouse::{self, Kind as MouseKind};
@@ -202,6 +204,13 @@ impl TerminalView {
         self.term.as_ref().map(|t| t.size())
     }
 
+    /// Every row on screen run together, so a wrapped line reads as one.
+    #[cfg(test)]
+    pub fn screen_text(&self) -> String {
+        let Some(term) = &self.term else { return String::new() };
+        (0..term.size().1).flat_map(|row| term.row_text(row)).collect()
+    }
+
     /// The shell's working directory, when known.
     pub fn cwd(&self) -> Option<PathBuf> {
         self.term.as_ref().and_then(|t| t.cwd())
@@ -290,12 +299,68 @@ impl TerminalView {
         true
     }
 
+    /// Pastes what the clipboard holds: text as it is; copied files and
+    /// pictures as paths, since a terminal passes only text on.
     fn paste_clipboard(&self, cx: &mut Context<Self>) {
-        let Some(term) = &self.term else { return };
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(term) = self.term.clone() else { return };
+        let Some(item) = cx.read_from_clipboard() else { return };
+        let text: String = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::String(string) => Some(string.text().as_str()),
+                _ => None,
+            })
+            .collect();
+        if !text.is_empty() {
             term.scroll_to_bottom();
             term.paste(&text);
+            return;
         }
+        let cwd = self.cwd();
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::ExternalPaths(files) => {
+                    let paths: Vec<String> =
+                        files.paths().iter().map(|path| fs_ops::for_shell(path, cwd.as_deref())).collect();
+                    term.scroll_to_bottom();
+                    term.paste(&format!("{} ", paths.join(" ")));
+                    return;
+                }
+                ClipboardEntry::Image(picture) => {
+                    self.paste_picture(picture.bytes.clone(), picture.format.extension(), cx);
+                    return;
+                }
+                ClipboardEntry::String(_) => {}
+            }
+        }
+    }
+
+    /// Saves a pasted picture to a file, away from the window's thread, and
+    /// pastes its path. Claude Code and other agents attach a pasted path to
+    /// a picture as the picture.
+    fn paste_picture(&self, bytes: Vec<u8>, extension: &'static str, cx: &mut Context<Self>) {
+        let saving = cx
+            .background_executor()
+            .spawn(async move { pasted::save(&bytes, extension, &pasted::folder()) });
+        cx.spawn(async move |this, cx| {
+            let path = match saving.await {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("wercode: could not save the pasted picture: {error}");
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, _| {
+                let Some(term) = &this.term else { return };
+                term.scroll_to_bottom();
+                // The path alone is the paste, so it is read as a picture; the
+                // space after it is typed, ready for the next words.
+                term.paste(&fs_ops::for_shell(&path, None));
+                term.write(b" ");
+            });
+        })
+        .detach();
     }
 
     /// Opens the field for finding text in the output, with the selected

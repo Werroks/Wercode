@@ -6,6 +6,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -94,6 +95,9 @@ pub struct Modes {
     pub mouse_motion: bool,
     /// Use the SGR encoding (`ESC [ < ...`) rather than the legacy one.
     pub mouse_sgr: bool,
+    /// The Windows console takes key presses in its own encoding
+    /// ([`crate::osc::Win32InputScanner`]).
+    pub win32_input: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +160,8 @@ pub struct Terminal {
     size: Mutex<Size>,
     pid: Option<u32>,
     cwd: Arc<Mutex<Option<PathBuf>>>,
+    /// The Windows console asked for key presses in its own encoding.
+    win32_input: Arc<AtomicBool>,
 }
 
 /// How long the window must stop changing size before the PTY is told.
@@ -197,6 +203,7 @@ impl Terminal {
         let killer = child.clone_killer();
         let pid = child.process_id();
         let cwd = Arc::new(Mutex::new(opts.cwd.clone().filter(|p| p.is_dir())));
+        let win32_input = Arc::new(AtomicBool::new(false));
         let mut reader = pair.master.try_clone_reader().context("pty reader")?;
         let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().context("pty writer")?));
 
@@ -210,11 +217,13 @@ impl Terminal {
             let term = term.clone();
             let notify = notify.clone();
             let cwd = cwd.clone();
+            let win32_input = win32_input.clone();
             std::thread::Builder::new()
                 .name("pty-reader".into())
                 .spawn(move || {
                     let mut parser: ansi::Processor = ansi::Processor::new();
                     let mut osc = crate::osc::CwdScanner::default();
+                    let mut win32 = crate::osc::Win32InputScanner::default();
                     let mut buf = vec![0u8; 64 * 1024];
                     loop {
                         match reader.read(&mut buf) {
@@ -222,6 +231,9 @@ impl Terminal {
                             Ok(n) => {
                                 if let Ok(mut term) = term.lock() {
                                     parser.advance(&mut *term, &buf[..n]);
+                                }
+                                if let Some(on) = win32.feed(&buf[..n]) {
+                                    win32_input.store(on, Ordering::Release);
                                 }
                                 if let Some(dir) = osc.feed(&buf[..n]) {
                                     if let Ok(mut cwd) = cwd.lock() {
@@ -279,6 +291,7 @@ impl Terminal {
             size: Mutex::new(size),
             pid,
             cwd,
+            win32_input,
         })
     }
 
@@ -384,6 +397,7 @@ impl Terminal {
             mouse_drag: m.contains(TermMode::MOUSE_DRAG),
             mouse_motion: m.contains(TermMode::MOUSE_MOTION),
             mouse_sgr: m.contains(TermMode::SGR_MOUSE),
+            win32_input: self.win32_input.load(Ordering::Acquire),
         }
     }
 

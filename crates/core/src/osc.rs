@@ -112,6 +112,42 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Notices the Windows console asking for its own encoding of key presses
+/// (`CSI ? 9001 h`, "win32 input mode") and dropping it again (`CSI ? 9001 l`).
+/// The console under every Windows terminal (ConPTY) asks as it starts. Keys
+/// sent that way reach the program as whole key presses, with Ctrl and Shift,
+/// which a plain byte cannot carry. The emulator ignores the request, so the
+/// bytes are scanned here on their way to it.
+#[derive(Default)]
+pub struct Win32InputScanner {
+    /// The end of the last chunk, for a request split across two.
+    tail: Vec<u8>,
+}
+
+const WIN32_ON: &[u8] = b"\x1b[?9001h";
+const WIN32_OFF: &[u8] = b"\x1b[?9001l";
+
+impl Win32InputScanner {
+    /// Feeds a chunk of output. Returns whether the mode is on after it, if
+    /// the chunk switched it.
+    pub fn feed(&mut self, bytes: &[u8]) -> Option<bool> {
+        let mut joined = std::mem::take(&mut self.tail);
+        joined.extend_from_slice(bytes);
+        let mut found = None;
+        for window in joined.windows(WIN32_ON.len()) {
+            if window == WIN32_ON {
+                found = Some(true);
+            } else if window == WIN32_OFF {
+                found = Some(false);
+            }
+        }
+        // Less than one whole request is kept, so none is counted twice.
+        let keep = joined.len().min(WIN32_ON.len() - 1);
+        self.tail = joined[joined.len() - keep..].to_vec();
+        found
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +174,19 @@ mod tests {
         assert_eq!(s.feed(b"\x1b]0;window title\x07\x1b]9;9;D:\\wo"), None);
         assert_eq!(s.feed(b"rk\x07"), Some(PathBuf::from("D:\\work")));
         assert_eq!(s.feed(b"\x1b[31mred\x1b[0m"), None);
+    }
+
+    #[test]
+    fn the_console_asks_for_win32_input_and_drops_it() {
+        let mut s = Win32InputScanner::default();
+        // What ConPTY writes first, once the cursor position is answered.
+        assert_eq!(s.feed(b"\x1b[6n"), None);
+        assert_eq!(s.feed(b"\x1b[?9001h\x1b[?1004h\x1b[m"), Some(true));
+        assert_eq!(s.feed(b"plain output"), None);
+        // Split across two chunks, and counted once.
+        assert_eq!(s.feed(b"bye\x1b[?90"), None);
+        assert_eq!(s.feed(b"01l"), Some(false));
+        assert_eq!(s.feed(b"\x1b[?25h"), None);
+        assert_eq!(s.feed(b"\x1b[?9001l\x1b[?9001h"), Some(true), "the last one counts");
     }
 }

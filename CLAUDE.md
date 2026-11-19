@@ -86,6 +86,11 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   counts it as matching at the deepest level). The component library binds
   Ctrl+Shift+I to its inspector that way, so `terminal.prompt_box` is bound
   with an empty context too, and the workspace hands it to the terminals.
+- Codex on Windows reads key presses from the console, not bytes: a plain
+  `\n` never reaches it. ConPTY asks for whole key presses as it starts
+  (`ESC[?9001h`, seen by `osc::Win32InputScanner`); keys a byte cannot carry,
+  such as Shift+Enter, go in that form (`term/input.rs`). Try any new key
+  encoding on Claude Code, Codex and PowerShell: they disagree.
 - Shortcuts are bound in `keymap.rs` only, so the user can change them; a new
   command gets a line there, not a `KeyBinding` of its own.
 - In a test module `use super::*` next to `use gpui_kit::*` makes `#[test]`

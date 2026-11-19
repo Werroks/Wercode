@@ -337,7 +337,8 @@ impl TerminalView {
             PromptEvent::Send { text, pictures } => self.send_prompt(text.clone(), pictures.clone(), cx),
             PromptEvent::Key(keystroke) => {
                 let Some(term) = &self.term else { return };
-                if let Some(bytes) = input::encode(keystroke, term.modes().app_cursor) {
+                let modes = term.modes();
+                if let Some(bytes) = input::encode(keystroke, modes.app_cursor, modes.win32_input) {
                     self.send(&bytes, cx);
                 }
             }
@@ -732,7 +733,8 @@ impl TerminalView {
         if self.exit_code.is_some() {
             return;
         }
-        if let Some(bytes) = input::encode(ks, term.modes().app_cursor) {
+        let modes = term.modes();
+        if let Some(bytes) = input::encode(ks, modes.app_cursor, modes.win32_input) {
             self.send(&bytes, cx);
             cx.stop_propagation();
         }
@@ -1252,6 +1254,10 @@ impl Render for TerminalView {
 impl TerminalView {
     pub fn find_is_open(&self) -> bool {
         self.find.is_some()
+    }
+
+    pub fn win32_input(&self) -> bool {
+        self.term.as_ref().is_some_and(|term| term.modes().win32_input)
     }
 
     pub fn prompt(&self) -> Option<Entity<PromptBox>> {

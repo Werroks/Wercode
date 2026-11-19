@@ -72,14 +72,12 @@ smaller VS Code.
 ## What is inside
 
 **Agents in the terminal**
-- Start Claude Code, Codex, Gemini CLI or Aider in a terminal and a **prompt box** opens under it:
-  a real text field where Enter sends, Shift+Enter starts a new line, and Ctrl+V pastes a
-  screenshot that waits as a thumbnail until you send it (the agent gets it as an image)
-- While the box is empty, Enter, the arrows and Esc go to the agent, so you can answer its
-  questions without leaving the box
-- Ctrl+Shift+I opens the box under any terminal; it can be turned off in the settings
-- Screenshots pasted straight into the terminal work too, and so do Ctrl+Enter and Shift+Enter
-  for a new line
+- Claude Code and Codex work right in the terminal, the way they do in Cursor: **Shift+Enter**
+  (or Ctrl+Enter) starts a new line of your message instead of sending it, also on Windows
+- **Ctrl+V pastes a screenshot**: Wercode saves it and hands the agent its path, which Claude
+  Code and Codex attach as `[Image #1]`. Image files dragged onto the terminal work the same way
+- If you prefer a separate text field, Ctrl+Shift+I opens one under the terminal; the settings
+  can open it by itself whenever an agent starts
 
 **Terminal**
 - Your own shell: PowerShell, cmd, Git Bash, WSL, bash, zsh, fish (found automatically)
@@ -171,7 +169,9 @@ All of them can be changed in the `[keys]` table of `settings.toml`.
 | Ctrl+Shift+G | Git panel |
 | Ctrl+Shift+M | Problems |
 | Ctrl+Shift+B | Show or hide the side panel |
-| Ctrl+Shift+I | Prompt box for an agent under the terminal |
+| Shift+Enter or Ctrl+Enter | New line in the prompt of Claude Code, Codex or PowerShell |
+| Ctrl+V | Paste text, or a screenshot as an image for the agent |
+| Ctrl+Shift+I | A separate text field under the terminal, if you want one |
 | Ctrl+Shift+N | New window |
 | Ctrl+Shift+T | New terminal tab |
 | Ctrl+Shift+D / Ctrl+Shift+E | Split right / split down |

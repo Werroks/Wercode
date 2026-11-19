@@ -104,7 +104,6 @@ mod tests {
             IconName::LoaderCircle,
             IconName::AppWindow,
             IconName::Paperclip,
-            IconName::Bot,
             IconName::Heart,
             IconName::Copy,
         ];

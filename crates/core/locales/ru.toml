@@ -292,8 +292,6 @@
 "New window ({keys})" = "Новое окно ({keys})"
 "Open a text field under the terminal when Claude Code, Codex or another agent starts in it. Ctrl+Shift+I opens it in any terminal." = "Открывать поле для текста под терминалом, когда в нём запускается Claude Code, Codex или другой агент. Ctrl+Shift+I открывает его в любом терминале."
 "Prompt box for agents" = "Поле для запроса агенту"
-"Prompt box for an agent" = "Поле для запроса агенту"
-"Prompt box for an agent ({keys})" = "Поле для запроса агенту ({keys})"
 "Remove this picture" = "Убрать эту картинку"
 "Send (Enter)" = "Отправить (Enter)"
 "Send only USDT on TRC-20 to this address; coins sent on another network are lost." = "Отправляйте на этот адрес только USDT в сети TRC-20: монеты, отправленные в другой сети, пропадут."

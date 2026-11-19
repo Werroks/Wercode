@@ -293,8 +293,6 @@
 "New window ({keys})" = "新建窗口（{keys}）"
 "Open a text field under the terminal when Claude Code, Codex or another agent starts in it. Ctrl+Shift+I opens it in any terminal." = "当 Claude Code、Codex 或其他智能体在终端中启动时，在终端下方打开文本框。Ctrl+Shift+I 可在任意终端中打开它。"
 "Prompt box for agents" = "智能体输入框"
-"Prompt box for an agent" = "智能体输入框"
-"Prompt box for an agent ({keys})" = "智能体输入框（{keys}）"
 "Remove this picture" = "移除这张图片"
 "Send (Enter)" = "发送（Enter）"
 "Send only USDT on TRC-20 to this address; coins sent on another network are lost." = "请只向此地址发送 TRC-20 网络上的 USDT；通过其他网络发送的币将会丢失。"

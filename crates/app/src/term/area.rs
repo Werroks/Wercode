@@ -1362,10 +1362,6 @@ impl TerminalArea {
                 this.close_active(window, cx);
             }
         }));
-        let prompt_label: SharedString = match crate::keymap::label_for("terminal.prompt_box", cx) {
-            Some(keys) => tf("Prompt box for an agent ({keys})", &[("keys", &keys)]).into(),
-            None => t("Prompt box for an agent").into(),
-        };
         let area = cx.entity().downgrade();
         let new_tab = h_flex()
             .px_2()
@@ -1409,11 +1405,6 @@ impl TerminalArea {
                     .child(close)
                     .when(!on_file, |d| {
                         d.child(
-                            Button::new("toggle-prompt").ghost().xsmall().icon(IconName::Bot).tooltip(prompt_label.clone()).on_click(cx.listener(
-                                |this, _: &ClickEvent, window, cx| this.toggle_prompt(window, cx),
-                            )),
-                        )
-                        .child(
                             button("split-right", IconName::PanelRight, t("Split right (Ctrl+Shift+D)")).on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.split_active(Axis::Horizontal, window, cx)
@@ -2285,6 +2276,29 @@ two
             assert!(std::time::Instant::now() < deadline, "{what} never happened");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    /// The Windows console takes Shift+Enter as a whole Ctrl+J press, on
+    /// which PowerShell (like Claude Code and Codex) starts a new line of the
+    /// same command instead of running it.
+    #[cfg(windows)]
+    #[gpui_kit::test]
+    async fn shift_enter_continues_the_command_on_a_new_line(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, area) = open(cx);
+        let pane = area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().clone());
+        let screen = |cx: &mut TestAppContext| pane.read_with(cx, |p, _| p.screen_text());
+        wait_until(cx, "the shell asking for the key presses of the console", |cx| {
+            pane.read_with(cx, |p, _| p.win32_input())
+        });
+        wait_until(cx, "the prompt", |cx| screen(cx).contains("PS "));
+        cx.update_window(window, |_, window, cx| window.input("echo one", cx)).unwrap();
+        press(cx, window, &["shift-enter"]);
+        cx.update_window(window, |_, window, cx| window.input("echo two", cx)).unwrap();
+        wait_until(cx, "a second line of the same command", |cx| screen(cx).contains(">> echo two"));
+        let shown = screen(cx);
+        assert!(shown.find("echo one").unwrap() < shown.find(">> echo two").unwrap(), "in order: {shown:?}");
+        assert_eq!(shown.matches("PS ").count(), 1, "nothing ran yet: {shown:?}");
     }
 
     #[gpui_kit::test]

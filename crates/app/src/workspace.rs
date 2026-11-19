@@ -34,7 +34,7 @@ use crate::panel::{
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::term::{
     ClosePane, CloseTab, Find, NewTab, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
-    TerminalArea, ToggleTerminal,
+    TerminalArea, TogglePrompt, ToggleTerminal,
 };
 use crate::theme::AppState;
 use crate::update::{self, CheckForUpdates, CloseForUpdate};
@@ -109,6 +109,17 @@ pub fn normalize(path: &Path) -> PathBuf {
     }
 }
 
+/// Where a new window opens: four fifths of the size of `current`, a step
+/// right of and below its centre, so the window under it still shows.
+fn beside(current: Bounds<Pixels>) -> Bounds<Pixels> {
+    let width = (current.size.width * 0.8).max(px(640.));
+    let height = (current.size.height * 0.8).max(px(400.));
+    let step = px(32.);
+    let x = current.origin.x + (current.size.width - width) / 2. + step;
+    let y = current.origin.y + (current.size.height - height) / 2. + step;
+    Bounds::new(point(x, y), size(width, height))
+}
+
 fn folder_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -159,6 +170,7 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("Terminal: Previous Pane"), Box::new(PrevPane)),
         (t("Terminal: Find\u{2026}"), Box::new(Find)),
         (t("Terminal: Rename Tab\u{2026}"), Box::new(RenameTab)),
+        (t("Terminal: Show or Hide the Prompt Box"), Box::new(TogglePrompt)),
         (t("File: Go to File\u{2026}"), Box::new(QuickOpen)),
         (t("File: Save"), Box::new(Save)),
         (t("Editor: Go to Definition"), Box::new(GoToDefinition)),
@@ -1243,15 +1255,16 @@ impl Workspace {
     }
 
     /// A second window for another project. It starts on the welcome screen,
-    /// a little smaller than the screen so it does not hide this one.
-    fn new_window(&mut self, cx: &mut Context<Self>) {
+    /// smaller than this one and over its middle, so both can be seen.
+    fn new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switcher_open = false;
         self.palette = None;
         cx.notify();
         let state = self.fresh_state();
         // The new window saves where this one does (tests keep that off the real file).
         let state_path = self.state_path.clone();
-        cx.defer(move |cx| open_window(None, state, state_path, None, cx));
+        let bounds = Some(WindowBounds::Windowed(beside(window.bounds())));
+        cx.defer(move |cx| open_window(None, state, state_path, bounds, cx));
     }
 
     /// The saved state with the list of recent projects, and the tabs of the
@@ -1333,6 +1346,19 @@ impl Workspace {
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
             )
             .child(div().flex_1())
+            .child(
+                div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(
+                    Button::new("title-new-window")
+                        .ghost()
+                        .xsmall()
+                        .icon(Lucide::AppWindow)
+                        .tooltip(match crate::keymap::label_for("workspace.new_window", cx) {
+                            Some(keys) => tf("New window ({keys})", &[("keys", &keys)]),
+                            None => t("New window").to_string(),
+                        })
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.new_window(window, cx))),
+                ),
+            )
             .child(
                 div().pr_1().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(
                     Button::new("open-settings")
@@ -1433,7 +1459,7 @@ impl Workspace {
             .rounded_md()
             .text_sm()
             .hover(|s| s.bg(hover))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_window(cx)))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.new_window(window, cx)))
             .child(Icon::new(IconName::Plus).small().text_color(muted))
             .child(t("New window"))
             .child(div().flex_1())
@@ -2106,7 +2132,7 @@ impl Render for Workspace {
                     window.remove_window();
                 }
             }))
-            .on_action(cx.listener(|this, _: &NewWindow, _, cx| this.new_window(cx)))
+            .on_action(cx.listener(|this, _: &NewWindow, window, cx| this.new_window(window, cx)))
             .on_action(cx.listener(|this, _: &SwitchProject, _, cx| {
                 this.palette = None;
                 this.switcher_open = true;
@@ -2136,6 +2162,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, a: &PrevPane, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &Find, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &RenameTab, window, cx| this.forward(a, window, cx)))
+            .on_action(cx.listener(|this, a: &TogglePrompt, window, cx| this.forward(a, window, cx)))
             .child(self.render_title(cx))
             .child(div().flex_1().min_h_0().child(body))
             .children(status)

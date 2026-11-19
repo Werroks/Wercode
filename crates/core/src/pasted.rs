@@ -31,9 +31,7 @@ pub fn save(bytes: &[u8], extension: &str, dir: &Path) -> std::io::Result<PathBu
         "jpg" | "jpeg" => (bytes.to_vec(), "jpg"),
         _ => (to_png(bytes)?, "png"),
     };
-    let path = free_name(dir, extension);
-    std::fs::write(&path, bytes)?;
-    Ok(path)
+    write_new(dir, extension, &bytes)
 }
 
 fn to_png(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -45,17 +43,28 @@ fn to_png(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(png)
 }
 
-/// `image-<milliseconds>.<extension>`, with a number added if two pictures
-/// are pasted within the same millisecond.
-fn free_name(dir: &Path, extension: &str) -> PathBuf {
+/// Writes `bytes` to a new file `image-<milliseconds>.<extension>`, with a
+/// number added if two pictures are pasted within the same millisecond. The
+/// file is created only if it does not exist yet, so two pastes at once (two
+/// windows, two terminals) cannot both take the same name.
+fn write_new(dir: &Path, extension: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write as _;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
-    let mut path = dir.join(format!("image-{stamp}.{extension}"));
-    let mut number = 1;
-    while path.exists() {
-        path = dir.join(format!("image-{stamp}-{number}.{extension}"));
-        number += 1;
+    for number in 0..1000 {
+        let path = match number {
+            0 => dir.join(format!("image-{stamp}.{extension}")),
+            n => dir.join(format!("image-{stamp}-{n}.{extension}")),
+        };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
     }
-    path
+    Err(std::io::Error::other("no free name for the picture"))
 }
 
 fn forget_old(dir: &Path) {

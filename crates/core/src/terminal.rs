@@ -347,6 +347,12 @@ impl Terminal {
         self.pid.is_some_and(crate::process::has_children)
     }
 
+    /// The programs the shell is running, and the ones they started, by name.
+    /// Asks the system, so it is better called away from the window's thread.
+    pub fn running_programs(&self) -> Vec<String> {
+        self.pid.map(crate::process::descendant_names).unwrap_or_default()
+    }
+
     /// The characters of one viewport row, one per column. The second half of
     /// a double-width character is `\0`.
     pub fn row_text(&self, row: usize) -> Vec<char> {

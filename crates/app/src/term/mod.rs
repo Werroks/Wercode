@@ -1,6 +1,7 @@
 pub mod area;
 pub mod input;
 pub mod mouse;
+pub mod prompt;
 pub mod view;
 
 use gpui_kit::{App, KeyBinding, actions};
@@ -33,6 +34,8 @@ actions!(
         Find,
         /// Gives the terminal tab a name of its own.
         RenameTab,
+        /// Opens the box for writing to an agent under the terminal, or closes it.
+        TogglePrompt,
     ]
 );
 

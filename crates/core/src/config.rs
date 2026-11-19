@@ -63,6 +63,9 @@ pub struct Settings {
     /// Lay out the code by the rules of its language when a file is saved,
     /// where its language server can.
     pub format_on_save: bool,
+    /// Open the prompt box under a terminal when Claude Code, Codex or
+    /// another command-line agent starts in it.
+    pub prompt_box: bool,
     /// The language of the interface: "auto" follows the computer, or one of
     /// "en", "ru", "de", "es", "zh".
     pub language: String,
@@ -105,6 +108,7 @@ impl Default for Settings {
             auto_update: true,
             language_servers: true,
             format_on_save: false,
+            prompt_box: true,
             language: "auto".into(),
             keys: BTreeMap::new(),
         }

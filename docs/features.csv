@@ -50,7 +50,7 @@ Stage individual hunks,git,could,yes,no,
 Git worktrees switcher,git,could,yes,no,useful for parallel CLI agents
 Custom themes from file,settings,could,yes,no,later: the user asked to keep it for the future (2026-11-14)
 Sidebar on left option,shell,could,yes,yes,panel_side in settings.toml
-Multiple windows,workspace,could,yes,yes,New window in the project menu and the palette; Ctrl+Shift+N; starts on the welcome screen; all windows are one process
+Multiple windows,workspace,could,yes,yes,New window in the project menu and the palette; Ctrl+Shift+N; a button in the title bar (2026-11-19); starts on the welcome screen smaller than the window it came from and over its middle so both show; all windows are one process; checked in a real window
 Image preview,files,could,yes,no,later: the user asked to keep it for the future (2026-11-14)
 Built-in editor: open edit save with syntax highlight,editor,must,yes,yes,user decision 2026-11-11; the component library editor; Ctrl+S; keeps CRLF and BOM; 20 grammars compiled in
 Editor tabs alongside terminal tabs,editor,must,yes,yes,one tab bar; a file takes a whole tab and does not split
@@ -87,3 +87,5 @@ Accounts teams billing,account,skip,yes,skip,
 Create and manage pull requests,git,skip,yes,skip,use gh in the terminal
 New line in the prompt with Ctrl+Enter or Shift+Enter,terminal,must,yes,yes,user request 2026-11-17; both send a line feed as Windows consoles do for Ctrl+Enter: Claude Code starts a new line instead of sending; a shell still runs the command; PowerShell reads it as Ctrl+Enter (a new line above); covered by a test; not hand-tested
 Visible hover and chosen row in menus and pop-ups,shell,must,yes,yes,user request 2026-11-17; the row under the pointer and the chosen row had the same colour as the pop-up itself (recent projects; palette; menus); now a step towards the text from both panel and pop-up colours in every theme; covered by a core test
+Prompt box for agents under the terminal,terminal,must,yes,yes,user request 2026-11-19; like the input of the Claude Code and Codex panels in Cursor; a text field under a terminal that opens by itself when claude or codex or gemini or aider or another agent runs in it (found among the programs under the shell every 1.2 s or by the title Claude Code gives the window) and goes away with it when empty; Ctrl+Shift+I or the bot button opens it under any terminal; Enter sends (pictures as pasted paths then the text as one paste then Enter); Shift+Enter or Ctrl+Enter is a new line; Ctrl+V or the paperclip adds pictures as thumbnails; files dragged onto the terminal go into it; while empty Enter and the arrows and Tab and Esc and Ctrl+C go to the program; switch in the settings; covered by tests; checked in a real window with Claude Code and Codex
+Support address in the README and the settings,release,could,no,yes,user request 2026-11-19; USDT on TRC-20; a section at the end of the settings with a copy button

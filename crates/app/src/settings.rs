@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::config::Settings;
@@ -17,6 +17,11 @@ use crate::update;
 use wercode_core::i18n::{Language, t, tf};
 
 const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=32.0;
+
+/// Where people who want to support Wercode can send USDT (TRC-20).
+pub const DONATION_ADDRESS: &str = "TVb5SbxLo7kWetAw3Y7n4bdArfsfD1wLRX";
+/// How long the copy button says the address was copied.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub enum SettingsEvent {
     Close,
@@ -31,6 +36,8 @@ pub struct SettingsView {
     schemes: Vec<(&'static str, String)>,
     shells: Vec<Found>,
     error: Option<String>,
+    /// The donation address was just copied; the button says so for a moment.
+    copied: Option<Task<()>>,
     _subscription: Subscription,
     _updates: Subscription,
 }
@@ -61,6 +68,7 @@ impl SettingsView {
             schemes,
             shells: shell::available(),
             error: None,
+            copied: None,
             _subscription: subscription,
             _updates: cx.observe_global::<update::Updater>(|_, cx| cx.notify()),
         }
@@ -173,6 +181,67 @@ impl SettingsView {
             .child(div().flex_1().min_w_0().child(control))
     }
 
+    fn copy_address(&mut self, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(DONATION_ADDRESS.to_string()));
+        self.copied = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_FOR).await;
+            let _ = this.update(cx, |this, cx| {
+                this.copied = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// How to support Wercode: the address for USDT and a button to copy it.
+    fn render_support(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme();
+        let (muted, border, mono) = (theme.muted_foreground, theme.border, theme.mono_font_family.clone());
+        let copied = self.copied.is_some();
+        v_flex()
+            .id("settings-support")
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Icon::new(IconName::Heart).small().text_color(theme.danger))
+                    .child(div().text_sm().child(t("Support Wercode"))),
+            )
+            .child(div().text_xs().text_color(muted).child(t(
+                "Wercode is free and open source. If it saves you time and you want to help it grow, you can send USDT on the TRON network (TRC-20) to this address:",
+            )))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("settings-donation-address")
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(border)
+                            .font_family(mono)
+                            .text_xs()
+                            .truncate()
+                            .child(DONATION_ADDRESS),
+                    )
+                    .child(
+                        Button::new("settings-copy-address")
+                            .small()
+                            .outline()
+                            .icon(if copied { IconName::Check } else { IconName::Copy })
+                            .label(if copied { t("Copied") } else { t("Copy") })
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy_address(cx))),
+                    ),
+            )
+            .child(div().text_xs().text_color(muted).child(t(
+                "Send only USDT on TRC-20 to this address; coins sent on another network are lost.",
+            )))
+    }
+
     /// A button of a group in which exactly one is chosen.
     fn choice(id: impl Into<ElementId>, label: impl Into<SharedString>, chosen: bool) -> Button {
         let button = Button::new(id).small().label(label);
@@ -186,6 +255,7 @@ impl Render for SettingsView {
         let settings = state.settings.clone();
         let path = state.settings_path.clone();
         let updates = self.render_updates(&settings, cx);
+        let support = self.render_support(cx);
         let theme = cx.theme();
         let (muted, border, danger) = (theme.muted_foreground, theme.border, theme.danger);
 
@@ -393,6 +463,12 @@ impl Render for SettingsView {
                         cx,
                     ))
                     .child(Self::row(
+                        t("Prompt box for agents"),
+                        t("Open a text field under the terminal when Claude Code, Codex or another agent starts in it. Ctrl+Shift+I opens it in any terminal."),
+                        switch("settings-prompt-box", settings.prompt_box, |s, on| s.prompt_box = on),
+                        cx,
+                    ))
+                    .child(Self::row(
                         t("Format on save"),
                         t("Lay out the code by the rules of its language when a file is saved, if its language server can."),
                         switch("settings-format-on-save", settings.format_on_save, |s, on| s.format_on_save = on),
@@ -402,6 +478,8 @@ impl Render for SettingsView {
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().id("settings-error").text_xs().text_color(danger).child(error))
                     })
+                    .child(div().flex_none().h(px(1.)).bg(border))
+                    .child(support)
                     .child(div().flex_none().h(px(1.)).bg(border))
                     .child(
                         v_flex()

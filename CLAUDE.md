@@ -32,9 +32,11 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   commit history and its graph (`history`), updates (`update`), the
   languages of the interface (`i18n`, with `locales/`), language servers
   for code checks (`lsp`: finding and running them, the protocol, what they
-  report).
+  report), telling that a terminal runs an AI agent (`agent`, with
+  `process::descendant_names`).
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
-  panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
+  panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view,
+  `prompt.rs` for the box under a terminal that writes to an agent),
   `panel/` (file tree, search, git panel, `graph.rs` for the history),
   `editor.rs` (a file in a tab), `update.rs` (checking and installing updates),
   `lsp.rs` (the shared language servers), `panel/problems.rs` (their list),
@@ -80,6 +82,10 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 - The centre has two layouts (`layout` in the settings): one row of tabs, or
   files above a terminal panel. Both use the same list of tabs in
   `term/area.rs`; anything that picks a tab must work in both.
+- A key binding without a context outranks every binding with one (GPUI
+  counts it as matching at the deepest level). The component library binds
+  Ctrl+Shift+I to its inspector that way, so `terminal.prompt_box` is bound
+  with an empty context too, and the workspace hands it to the terminals.
 - Shortcuts are bound in `keymap.rs` only, so the user can change them; a new
   command gets a line there, not a `KeyBinding` of its own.
 - In a test module `use super::*` next to `use gpui_kit::*` makes `#[test]`

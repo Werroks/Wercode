@@ -10,7 +10,7 @@ use crate::editor::Save;
 use crate::lsp::RestartLanguageServers;
 use crate::panel::git::{Commit, Fetch, Pull, Push, StageAll};
 use crate::term::{
-    ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
+    ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, TogglePrompt, ToggleTerminal,
 };
 use crate::theme::AppState;
 use crate::workspace::{
@@ -23,7 +23,7 @@ use wercode_core::i18n::tf;
 pub struct Shortcut {
     /// The name used in `[keys]`.
     pub command: &'static str,
-    /// The part of the window the shortcut works in.
+    /// The part of the window the shortcut works in; empty for the whole window.
     context: &'static str,
     /// The built-in shortcuts. App shortcuts sit on Ctrl+Shift: plain Ctrl
     /// keys belong to the shell and to the programs running in it.
@@ -79,6 +79,10 @@ pub fn shortcuts() -> Vec<Shortcut> {
         // Ctrl+Shift+F finds in the project's files; S for "search" here.
         shortcut!("terminal.find", "Terminal", Find, ["ctrl-shift-s"]),
         shortcut!("terminal.rename_tab", "TerminalArea", RenameTab, []),
+        // I as in Cursor's Ctrl+I for its agent. Bound for the whole window:
+        // the component library binds Ctrl+Shift+I to its inspector without a
+        // context, and that would outrank a binding inside the terminals.
+        shortcut!("terminal.prompt_box", "", TogglePrompt, ["ctrl-shift-i"]),
         // Plain Ctrl+S is safe here: the keyboard is in a text editor, not in a shell.
         shortcut!("editor.save", "EditorView", Save, ["ctrl-s"]),
         shortcut!("editor.go_to_definition", "EditorView", GoToDefinition, ["f12"]),
@@ -146,7 +150,10 @@ pub fn apply(cx: &mut App) {
         wanted.iter().map(|(key, index)| (key.clone(), all[*index].context, all[*index].command)).collect();
     let previous = cx.try_global::<Applied>().map(|applied| applied.bound.clone());
     if previous.as_ref() != Some(&bound) {
-        let within = |context: &str| KeyBindingContextPredicate::parse(context).ok().map(Rc::new);
+        let within = |context: &str| match context {
+            "" => None,
+            context => KeyBindingContextPredicate::parse(context).ok().map(Rc::new),
+        };
         let mut bindings = Vec::new();
         // Bindings cannot be taken back one by one. An empty binding on top of
         // an old one switches it off; the new ones go on top of that.

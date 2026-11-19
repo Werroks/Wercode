@@ -360,10 +360,11 @@ impl Terminal {
         self.pid.is_some_and(crate::process::has_children)
     }
 
-    /// The programs the shell is running, and the ones they started, by name.
-    /// Asks the system, so it is better called away from the window's thread.
-    pub fn running_programs(&self) -> Vec<String> {
-        self.pid.map(crate::process::descendant_names).unwrap_or_default()
+    /// Who reads the keys typed here, as far as a new line goes. Asks the
+    /// system about the programs under the shell, so it is for a key now and
+    /// then (Shift+Enter), not for every frame.
+    pub fn key_reader(&self) -> crate::process::KeyReader {
+        self.pid.map_or(crate::process::KeyReader::Console, crate::process::key_reader)
     }
 
     /// The characters of one viewport row, one per column. The second half of

@@ -463,12 +463,6 @@ impl Render for SettingsView {
                         cx,
                     ))
                     .child(Self::row(
-                        t("Prompt box for agents"),
-                        t("Open a text field under the terminal when Claude Code, Codex or another agent starts in it. Ctrl+Shift+I opens it in any terminal."),
-                        switch("settings-prompt-box", settings.prompt_box, |s, on| s.prompt_box = on),
-                        cx,
-                    ))
-                    .child(Self::row(
                         t("Format on save"),
                         t("Lay out the code by the rules of its language when a file is saved, if its language server can."),
                         switch("settings-format-on-save", settings.format_on_save, |s, on| s.format_on_save = on),

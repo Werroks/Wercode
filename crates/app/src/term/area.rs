@@ -14,13 +14,13 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use wercode_core::{file_icons, shell};
+use wercode_core::{file_icons, fs_ops, shell};
 use wercode_core::state::{Layout, PaneLayout, TabLayout};
 
 use super::view::{TerminalView, TerminalViewEvent};
 use super::{
     ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
-    TogglePrompt, ToggleTerminal,
+    ToggleTerminal,
 };
 use crate::diff::DiffView;
 use crate::editor::{EditorEvent, EditorView};
@@ -233,7 +233,7 @@ impl Tab {
     /// The keyboard is somewhere in this tab.
     fn has_focus(&self, window: &Window, cx: &App) -> bool {
         match &self.body {
-            Body::Terminals { .. } => self.panes().iter().any(|p| p.read(cx).has_focus(window, cx)),
+            Body::Terminals { .. } => self.panes().iter().any(|p| p.focus_handle(cx).is_focused(window)),
             _ => self.focus_handle(cx).contains_focused(window, cx),
         }
     }
@@ -670,28 +670,9 @@ impl TerminalArea {
         };
         let Some(pane) = self.tabs[index].active_pane().cloned() else { return };
         // Relative to where the shell is, so the line stays short.
-        pane.update(cx, |pane, cx| pane.insert_path(path, window, cx));
+        let text = fs_ops::for_shell(path, pane.read(cx).cwd().as_deref());
+        pane.read(cx).insert_text(&format!("{text} "));
         self.select_tab(index, window, cx);
-    }
-
-    /// Opens or closes the prompt box of the terminal that has the keyboard,
-    /// or of the one showing; starts a terminal when none is open.
-    fn toggle_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let index = match self.shown(true) {
-            Some(index) => index,
-            None => {
-                self.add_tab(window, cx);
-                self.tabs.len() - 1
-            }
-        };
-        // Selecting the tab puts the keyboard in its terminal, which would
-        // turn "close the box I am in" into "go back to the box".
-        if index != self.active {
-            self.select_tab(index, window, cx);
-        }
-        let Some(pane) = self.tabs[index].active_pane().cloned() else { return };
-        pane.update(cx, |pane, cx| pane.toggle_prompt(window, cx));
-        cx.notify();
     }
 
     /// The file whose tab is showing. With one row of tabs that is the
@@ -1071,7 +1052,7 @@ impl TerminalArea {
             .tabs
             .iter()
             .flat_map(|t| t.panes())
-            .any(|p| p.read(cx).has_focus(window, cx));
+            .any(|p| p.focus_handle(cx).is_focused(window));
         if focus_lost && self.confirm.is_none() {
             self.focus_active(window, cx);
         }
@@ -1575,7 +1556,7 @@ impl Render for TerminalArea {
         // Whichever pane was clicked or tabbed into becomes its tab's active pane.
         if let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(focused) =
-                tab.panes().into_iter().find(|p| p.read(cx).has_focus(window, cx))
+                tab.panes().into_iter().find(|p| p.focus_handle(cx).is_focused(window))
             && let Body::Terminals { active, .. } = &mut tab.body
         {
             *active = focused;
@@ -1712,11 +1693,6 @@ impl Render for TerminalArea {
                     this.start_rename(id, window, cx);
                 }
             }))
-            .on_action(cx.listener(move |this, _: &TogglePrompt, window, cx| {
-                if idle {
-                    this.toggle_prompt(window, cx);
-                }
-            }))
             // From the palette: the terminal shown in the terminal row.
             .on_action(cx.listener(|this, _: &Find, window, cx| {
                 this.turn_to_terminal(cx);
@@ -1734,7 +1710,7 @@ impl Render for TerminalArea {
 mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, ClipboardItem, Entity, Focusable as _, Image, ImageFormat, TestAppContext, WindowOptions,
+        AnyWindowHandle, AppContext as _, ClipboardItem, Entity, Image, ImageFormat, TestAppContext, WindowOptions,
     };
     use wercode_core::config::Settings;
 
@@ -2301,107 +2277,17 @@ two
         assert_eq!(shown.matches("PS ").count(), 1, "nothing ran yet: {shown:?}");
     }
 
+    /// Cmd keys belong to the app, as in every Mac terminal: Cmd+V pastes
+    /// and no Cmd key is typed into the shell.
     #[gpui_kit::test]
-    async fn the_prompt_box_sends_what_is_written_in_it(cx: &mut TestAppContext) {
+    async fn cmd_v_pastes_and_cmd_keys_are_not_typed(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let (window, area) = open(cx);
         let pane = area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().clone());
-        press(cx, window, &["ctrl-shift-i"]);
-        let prompt = pane.read_with(cx, |p, _| p.prompt()).expect("Ctrl+Shift+I opens the box");
-        cx.update_window(window, |_, window, cx| {
-            assert!(prompt.read(cx).is_focused(window), "the keyboard is in the box");
-            window.input("echo wercode-", cx);
-        })
-        .unwrap();
-        // Shift+Enter and Ctrl+Enter start new lines in the box; nothing is sent yet.
-        press(cx, window, &["shift-enter"]);
-        cx.update_window(window, |_, window, cx| window.input("prompt", cx)).unwrap();
-        press(cx, window, &["ctrl-enter"]);
-        assert_eq!(prompt.read_with(cx, |p, cx| p.text(cx)), "echo wercode-\nprompt\n");
-        press(cx, window, &["backspace", "home", "backspace"]);
-        assert_eq!(prompt.read_with(cx, |p, cx| p.text(cx)), "echo wercode-prompt");
-
-        press(cx, window, &["enter"]);
-        assert_eq!(prompt.read_with(cx, |p, cx| p.text(cx)), "", "the box is empty once sent");
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
         let screen = |cx: &mut TestAppContext| pane.read_with(cx, |p, _| p.screen_text());
-        // The command as typed, and what it printed.
-        wait_until(cx, "the shell running the message", |cx| screen(cx).matches("wercode-prompt").count() >= 2);
-
-        // With the keyboard in the box, the shortcut closes it and gives the keyboard back.
-        press(cx, window, &["ctrl-shift-i"]);
-        assert!(pane.read_with(cx, |p, _| p.prompt()).is_none());
-        cx.update_window(window, |_, window, cx| assert!(pane.read(cx).focus_handle(cx).is_focused(window))).unwrap();
-    }
-
-    #[gpui_kit::test]
-    async fn a_picture_pasted_into_the_prompt_box_is_sent_as_its_path(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let (window, area) = open(cx);
-        let pane = area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().clone());
-        press(cx, window, &["ctrl-shift-i"]);
-        let prompt = pane.read_with(cx, |p, _| p.prompt()).unwrap();
-
-        // A 1×1 bitmap, the kind a screenshot often is on Windows.
-        let bitmap: Vec<u8> = [
-            &b"BM"[..], &58u32.to_le_bytes(), &[0; 4], &54u32.to_le_bytes(), &40u32.to_le_bytes(),
-            &1i32.to_le_bytes(), &1i32.to_le_bytes(), &1u16.to_le_bytes(), &24u16.to_le_bytes(),
-            &[0; 24], &[0, 0, 255, 0],
-        ]
-        .concat();
-        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Bmp, bitmap))));
-        press(cx, window, &["ctrl-v"]);
-        wait_until(cx, "the picture showing in the box", |cx| prompt.read_with(cx, |p, _| p.pictures().len() == 1));
-        let path = prompt.read_with(cx, |p, _| p.pictures()[0].clone());
-        assert_eq!(prompt.read_with(cx, |p, cx| p.text(cx)), "", "a picture is not text");
-
-        press(cx, window, &["enter"]);
-        assert!(prompt.read_with(cx, |p, _| p.pictures().is_empty()));
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        wait_until(cx, "the path on screen", |cx| pane.read_with(cx, |p, _| p.screen_text().contains(&name)));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[gpui_kit::test]
-    async fn the_prompt_box_opens_for_an_agent_and_goes_with_it(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let (window, area) = open(cx);
-        let pane = area.read_with(cx, |a, _| a.tabs[0].active_pane().unwrap().clone());
-        let see = |cx: &mut TestAppContext, programs: &[&str]| {
-            cx.update_window(window, |_, window, cx| pane.update(cx, |p, cx| p.see_programs(programs, window, cx)))
-                .unwrap();
-            cx.run_until_parked();
-        };
-        let open = |cx: &mut TestAppContext| pane.read_with(cx, |p, _| p.prompt().is_some());
-
-        see(cx, &["cargo"]);
-        assert!(!open(cx), "not for any program");
-        see(cx, &["node", "claude"]);
-        assert!(open(cx), "opens when Claude Code starts");
-        see(cx, &[]);
-        assert!(!open(cx), "an empty box goes when the agent quits");
-
-        // Closed by hand, it stays closed for that agent, and opens for the next one.
-        see(cx, &["codex"]);
-        assert!(open(cx));
-        cx.update_window(window, |_, window, cx| window.click("prompt-close", cx)).unwrap();
-        cx.run_until_parked();
-        assert!(!open(cx));
-        see(cx, &["node", "codex"]);
-        assert!(!open(cx));
-        see(cx, &[]);
-        see(cx, &["codex-x86_64-pc-windows-msvc"]);
-        assert!(open(cx));
-
-        // Something written in it keeps it after the agent quits.
-        let prompt = pane.read_with(cx, |p, _| p.prompt()).unwrap();
-        cx.update_window(window, |_, window, cx| {
-            prompt.update(cx, |p, cx| p.focus(window, cx));
-            window.input("unsent", cx);
-        })
-        .unwrap();
-        see(cx, &[]);
-        assert!(open(cx));
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("wercode-cmd-paste".into())));
+        press(cx, window, &["cmd-k", "cmd-v"]);
+        wait_until(cx, "the paste", |cx| screen(cx).contains("wercode-cmd-paste"));
+        assert!(!screen(cx).contains("kwercode"), "Cmd+K typed nothing: {:?}", screen(cx));
     }
 }

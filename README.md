@@ -73,11 +73,11 @@ smaller VS Code.
 
 **Agents in the terminal**
 - Claude Code and Codex work right in the terminal, the way they do in Cursor: **Shift+Enter**
-  (or Ctrl+Enter) starts a new line of your message instead of sending it, also on Windows
-- **Ctrl+V pastes a screenshot**: Wercode saves it and hands the agent its path, which Claude
-  Code and Codex attach as `[Image #1]`. Image files dragged onto the terminal work the same way
-- If you prefer a separate text field, Ctrl+Shift+I opens one under the terminal; the settings
-  can open it by itself whenever an agent starts
+  (or Ctrl+Enter) starts a new line of your message instead of sending it, on Windows with any
+  keyboard layout, on macOS and on Linux
+- **Pasting a screenshot** (Ctrl+V on Windows, Cmd+V on macOS, Ctrl+Shift+V on Linux) saves it
+  and hands the agent its path, which Claude Code and Codex attach as `[Image #1]`. Image files
+  dragged onto the terminal work the same way
 
 **Terminal**
 - Your own shell: PowerShell, cmd, Git Bash, WSL, bash, zsh, fish (found automatically)
@@ -170,8 +170,7 @@ All of them can be changed in the `[keys]` table of `settings.toml`.
 | Ctrl+Shift+M | Problems |
 | Ctrl+Shift+B | Show or hide the side panel |
 | Shift+Enter or Ctrl+Enter | New line in the prompt of Claude Code, Codex or PowerShell |
-| Ctrl+V | Paste text, or a screenshot as an image for the agent |
-| Ctrl+Shift+I | A separate text field under the terminal, if you want one |
+| Ctrl+V (Cmd+V on macOS, Ctrl+Shift+V on Linux) | Paste text, or a screenshot as an image for the agent |
 | Ctrl+Shift+N | New window |
 | Ctrl+Shift+T | New terminal tab |
 | Ctrl+Shift+D / Ctrl+Shift+E | Split right / split down |

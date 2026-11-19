@@ -34,7 +34,7 @@ use crate::panel::{
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::term::{
     ClosePane, CloseTab, Find, NewTab, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
-    TerminalArea, TogglePrompt, ToggleTerminal,
+    TerminalArea, ToggleTerminal,
 };
 use crate::theme::AppState;
 use crate::update::{self, CheckForUpdates, CloseForUpdate};
@@ -170,7 +170,6 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("Terminal: Previous Pane"), Box::new(PrevPane)),
         (t("Terminal: Find\u{2026}"), Box::new(Find)),
         (t("Terminal: Rename Tab\u{2026}"), Box::new(RenameTab)),
-        (t("Terminal: Show or Hide the Prompt Box"), Box::new(TogglePrompt)),
         (t("File: Go to File\u{2026}"), Box::new(QuickOpen)),
         (t("File: Save"), Box::new(Save)),
         (t("Editor: Go to Definition"), Box::new(GoToDefinition)),
@@ -2162,7 +2161,6 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, a: &PrevPane, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &Find, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &RenameTab, window, cx| this.forward(a, window, cx)))
-            .on_action(cx.listener(|this, a: &TogglePrompt, window, cx| this.forward(a, window, cx)))
             .child(self.render_title(cx))
             .child(div().flex_1().min_h_0().child(body))
             .children(status)

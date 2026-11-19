@@ -46,10 +46,54 @@ pub fn has_children(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// The names of the programs running under `pid`: its children, their
-/// children and so on, in lower case and without `.exe`.
+/// Who reads the keys typed into a terminal on Windows, as far as a new line
+/// (Shift+Enter) goes. The programs disagree on what a new line is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyReader {
+    /// A Windows console program (PowerShell, Codex, cmd): takes whole key
+    /// presses, Shift+Enter included.
+    Console,
+    /// Claude Code on Windows: reads Enter without Shift, and takes a
+    /// Ctrl+Enter press for a new line.
+    Claude,
+    /// Linux programs behind `wsl.exe`, which read bytes as on Linux.
+    Linux,
+}
+
+/// What reads the keys of the shell `pid` and the programs it started.
 #[cfg(windows)]
-pub fn descendant_names(pid: u32) -> Vec<String> {
+pub fn key_reader(pid: u32) -> KeyReader {
+    let programs = descendants(&snapshot(), pid);
+    reader_of(&programs, |pid| unsafe { command_line(pid) })
+}
+
+/// Outside Windows every program reads bytes; the question does not come up.
+#[cfg(not(windows))]
+pub fn key_reader(_pid: u32) -> KeyReader {
+    KeyReader::Console
+}
+
+/// Claude Code anywhere under the shell decides; it runs as `claude.exe`, or
+/// as `node` or `bun` with its script on the command line when installed
+/// with npm. Otherwise WSL decides, then the console.
+fn reader_of(programs: &[(u32, String)], command_line: impl Fn(u32) -> Option<String>) -> KeyReader {
+    let claude = programs.iter().any(|(pid, name)| match name.as_str() {
+        "claude" => true,
+        "node" | "bun" => command_line(*pid).is_some_and(|line| line.to_lowercase().contains("claude")),
+        _ => false,
+    });
+    if claude {
+        KeyReader::Claude
+    } else if programs.iter().any(|(_, name)| name == "wsl" || name == "wslhost") {
+        KeyReader::Linux
+    } else {
+        KeyReader::Console
+    }
+}
+
+/// Every running process as (process, parent, program file name).
+#[cfg(windows)]
+fn snapshot() -> Vec<(u32, u32, String)> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -61,7 +105,7 @@ pub fn descendant_names(pid: u32) -> Vec<String> {
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snapshot == INVALID_HANDLE_VALUE {
-            return Vec::new();
+            return table;
         }
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -77,48 +121,67 @@ pub fn descendant_names(pid: u32) -> Vec<String> {
         }
         CloseHandle(snapshot);
     }
-    descendants(&table, pid)
+    table
 }
 
-/// The names of the programs running under `pid`: its children, their
-/// children and so on, in lower case.
-#[cfg(not(windows))]
-pub fn descendant_names(pid: u32) -> Vec<String> {
-    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,comm="]).output() else {
-        return Vec::new();
-    };
-    let table: Vec<(u32, u32, String)> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next()?.parse().ok()?;
-            let parent = parts.next()?.parse().ok()?;
-            let command = parts.collect::<Vec<_>>().join(" ");
-            Some((pid, parent, command))
-        })
-        .collect();
-    descendants(&table, pid)
-}
-
-/// The names under `root` in a table of (process, parent, program). A
-/// program may be given as a path (macOS does that); only its file name counts.
-fn descendants(table: &[(u32, u32, String)], root: u32) -> Vec<String> {
+/// The processes under `root` (children, their children and so on), each
+/// with its program name in lower case and without `.exe`.
+fn descendants(table: &[(u32, u32, String)], root: u32) -> Vec<(u32, String)> {
     let mut seen = vec![root];
     let mut parents = vec![root];
-    let mut names = Vec::new();
+    let mut found = Vec::new();
     while let Some(parent) = parents.pop() {
         for (pid, ppid, program) in table {
-            // Windows reuses numbers, so a parent may list a newer process
-            // as its child twice over; each is taken once.
+            // Windows reuses numbers, so a process can look like the parent
+            // of an older one; each is taken once.
             if *ppid == parent && !seen.contains(pid) {
                 seen.push(*pid);
                 parents.push(*pid);
                 let file = program.rsplit(['/', '\\']).next().unwrap_or(program).to_lowercase();
-                names.push(file.strip_suffix(".exe").unwrap_or(&file).to_string());
+                found.push((*pid, file.strip_suffix(".exe").unwrap_or(&file).to_string()));
             }
         }
     }
-    names
+    found
+}
+
+/// The command line a process was started with, if the system tells.
+///
+/// # Safety
+/// Plain calls on a process handle that is opened and closed here.
+#[cfg(windows)]
+unsafe fn command_line(pid: u32) -> Option<String> {
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
+    use windows_sys::Win32::Foundation::{CloseHandle, UNICODE_STRING};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let mut needed = 0u32;
+        NtQueryInformationProcess(process, ProcessCommandLineInformation, std::ptr::null_mut(), 0, &mut needed);
+        // u64 cells keep the UNICODE_STRING at its start aligned.
+        let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(4)];
+        let status = NtQueryInformationProcess(
+            process,
+            ProcessCommandLineInformation,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            &mut needed,
+        );
+        CloseHandle(process);
+        if status < 0 {
+            return None;
+        }
+        let text = &*(buffer.as_ptr() as *const UNICODE_STRING);
+        if text.Buffer.is_null() {
+            return None;
+        }
+        let units = std::slice::from_raw_parts(text.Buffer, text.Length as usize / 2);
+        Some(String::from_utf16_lossy(units))
+    }
 }
 
 #[cfg(test)]
@@ -128,7 +191,7 @@ mod tests {
     #[test]
     fn a_made_up_pid_has_no_children() {
         assert!(!has_children(u32::MAX - 7));
-        assert!(descendant_names(u32::MAX - 7).is_empty());
+        assert_eq!(key_reader(u32::MAX - 7), KeyReader::Console);
     }
 
     #[test]
@@ -139,26 +202,41 @@ mod tests {
             (12, 11, "Codex.exe".to_string()),
             (13, 1, "claude.exe".to_string()),
             (14, 10, "/usr/local/bin/claude".to_string()),
-            (0, 0, "[System Process]".to_string()),
         ];
-        let mut names = descendants(&table, 10);
+        let mut names: Vec<String> = descendants(&table, 10).into_iter().map(|(_, name)| name).collect();
         names.sort();
         assert_eq!(names, ["claude", "codex", "node"]);
         assert!(descendants(&table, 12).is_empty());
     }
 
     #[test]
-    fn a_child_of_this_process_is_found() {
-        let me = std::process::id();
-        let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sleep" })
-            .args(if cfg!(windows) { &["/c", "ping", "-n", "3", "127.0.0.1"][..] } else { &["2"][..] })
+    fn claude_code_is_told_apart_from_other_programs() {
+        let program = |name: &str| (7, name.to_string());
+        let no_line = |_| None;
+        assert_eq!(reader_of(&[program("claude")], no_line), KeyReader::Claude);
+        assert_eq!(reader_of(&[program("codex")], no_line), KeyReader::Console);
+        assert_eq!(reader_of(&[], no_line), KeyReader::Console);
+        assert_eq!(reader_of(&[program("wsl")], no_line), KeyReader::Linux);
+        // Installed with npm, Claude Code is node running its script.
+        let npm = |_| Some(r#""C:\Program Files\nodejs\node.exe" C:\Users\me\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js"#.to_string());
+        assert_eq!(reader_of(&[program("node")], npm), KeyReader::Claude);
+        let other = |_| Some(r"node C:\Users\me\project\server.js".to_string());
+        assert_eq!(reader_of(&[program("node")], other), KeyReader::Console);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_command_line_of_a_child_is_read() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping", "-n", "3", "127.0.0.1", "wercode-marker"])
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let names = descendant_names(me);
+        let line = unsafe { command_line(child.id()) };
+        let programs = descendants(&snapshot(), std::process::id());
         let _ = child.kill();
         let _ = child.wait();
-        let wanted = if cfg!(windows) { "cmd" } else { "sleep" };
-        assert!(names.iter().any(|n| n == wanted), "{names:?}");
+        assert!(line.unwrap_or_default().contains("wercode-marker"));
+        assert!(programs.iter().any(|(_, name)| name == "cmd"), "{programs:?}");
     }
 }

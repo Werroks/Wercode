@@ -11,32 +11,24 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::terminal::{
     CursorKind, Frame, FrameCell, SelectKind, SpawnOptions, TermEvent, Terminal,
 };
-use wercode_core::{agent, fs_ops};
+use wercode_core::fs_ops;
 use wercode_core::links::{self, Link, LinkTarget};
 use wercode_core::pasted;
 use wercode_core::theme::Rgb;
 
 use super::mouse::{self, Kind as MouseKind};
-use super::prompt::{PromptBox, PromptEvent};
 use super::{Find, SendBackTab, SendTab, input};
 use crate::theme::{AppState, hsla};
 use wercode_core::i18n::{t, tf};
 
 const PADDING: f32 = 8.0;
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
-/// How often the programs a shell runs are looked over for an agent.
-const AGENT_POLL: Duration = Duration::from_millis(1200);
-/// Between two pasted pictures: the agent reads each file before the next.
-const PICTURE_PAUSE: Duration = Duration::from_millis(150);
-/// Between the pasted message and Enter. Codex on Windows takes an Enter
-/// that comes right after a burst of input for part of that input.
-const ENTER_PAUSE: Duration = Duration::from_millis(250);
 
 /// Where the grid was last painted, for turning pointer positions into cells.
 #[derive(Clone, Copy, Default)]
@@ -87,18 +79,6 @@ pub struct TerminalView {
     find: Option<FindBar>,
     /// The shell asked for when it was opened; `None` is the settings' one.
     chosen_shell: Option<String>,
-    /// The box for writing to an agent, while it is open.
-    prompt: Option<(Entity<PromptBox>, Subscription)>,
-    /// An agent runs in this terminal, as far as the last look found.
-    agent: bool,
-    /// The program gave the window an agent's title. Kept until the shell
-    /// runs nothing, since the agent renames the window as it works.
-    agent_title: bool,
-    /// The user closed the box while this agent ran: it stays closed for it.
-    prompt_dismissed: bool,
-    /// Looks for an agent among the programs now and then. Started with the
-    /// first frame, which has the window it needs.
-    _watch: Option<Task<()>>,
 }
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
@@ -197,11 +177,6 @@ impl TerminalView {
             _events: Some(events),
             find: None,
             chosen_shell: chosen,
-            prompt: None,
-            agent: false,
-            agent_title: false,
-            prompt_dismissed: false,
-            _watch: None,
         }
     }
 
@@ -269,160 +244,6 @@ impl TerminalView {
         }
     }
 
-    /// A file dragged here or picked for this terminal: into the prompt box
-    /// when it is open (a picture waits there as a thumbnail), otherwise
-    /// typed into the shell as a path.
-    pub fn insert_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self.cwd();
-        if let Some((prompt, _)) = &self.prompt {
-            prompt.update(cx, |prompt, cx| {
-                prompt.add_path(path, cwd.as_deref(), window, cx);
-                prompt.focus(window, cx);
-            });
-            return;
-        }
-        self.insert_text(&format!("{} ", fs_ops::for_shell(path, cwd.as_deref())));
-    }
-
-    /// The keyboard is in this terminal or in its prompt box.
-    pub fn has_focus(&self, window: &Window, cx: &App) -> bool {
-        self.focus.is_focused(window) || self.prompt.as_ref().is_some_and(|(p, _)| p.read(cx).is_focused(window))
-    }
-
-    /// Opens the prompt box with the keyboard in it; with the keyboard
-    /// already there, closes it.
-    pub fn toggle_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.prompt {
-            None => self.open_prompt(true, false, window, cx),
-            Some((prompt, _)) if prompt.read(cx).is_focused(window) => self.close_prompt(window, cx),
-            Some((prompt, _)) => prompt.update(cx, |prompt, cx| prompt.focus(window, cx)),
-        }
-    }
-
-    fn open_prompt(&mut self, focus: bool, for_agent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let prompt = match &self.prompt {
-            Some((prompt, _)) => prompt.clone(),
-            None => {
-                let prompt = cx.new(|cx| PromptBox::new(for_agent, window, cx));
-                let subscription = cx.subscribe_in(&prompt, window, Self::on_prompt_event);
-                self.prompt = Some((prompt.clone(), subscription));
-                prompt
-            }
-        };
-        if focus {
-            prompt.update(cx, |prompt, cx| prompt.focus(window, cx));
-        }
-        cx.notify();
-    }
-
-    fn close_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((prompt, _)) = self.prompt.take() else { return };
-        if prompt.read(cx).is_focused(window) {
-            window.focus(&self.focus, cx);
-        }
-        if self.agent {
-            self.prompt_dismissed = true;
-        }
-        cx.notify();
-    }
-
-    fn on_prompt_event(
-        &mut self,
-        _: &Entity<PromptBox>,
-        event: &PromptEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            PromptEvent::Send { text, pictures } => self.send_prompt(text.clone(), pictures.clone(), cx),
-            PromptEvent::Key(keystroke) => {
-                let Some(term) = &self.term else { return };
-                let modes = term.modes();
-                if let Some(bytes) = input::encode(keystroke, modes.app_cursor, modes.win32_input) {
-                    self.send(&bytes, cx);
-                }
-            }
-            PromptEvent::Close => self.close_prompt(window, cx),
-        }
-    }
-
-    /// Hands a message from the prompt box to the program: each picture as
-    /// its pasted path (Claude Code and Codex attach a pasted path to a
-    /// picture as the picture), then the text as one paste, so its lines stay
-    /// lines of one message, then Enter.
-    fn send_prompt(&mut self, text: String, pictures: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(term) = self.term.clone() else { return };
-        if self.exit_code.is_some() {
-            return;
-        }
-        term.clear_selection();
-        term.scroll_to_bottom();
-        cx.notify();
-        cx.spawn(async move |_, cx| {
-            for picture in &pictures {
-                term.paste(&fs_ops::for_shell(picture, None));
-                term.write(b" ");
-                cx.background_executor().timer(PICTURE_PAUSE).await;
-            }
-            if !text.is_empty() {
-                term.paste(&text);
-            }
-            cx.background_executor().timer(ENTER_PAUSE).await;
-            term.write(b"\r");
-        })
-        .detach();
-    }
-
-    /// Looks over the programs the shell runs now and then, and opens the
-    /// prompt box when an agent starts (if the settings want that).
-    fn watch_programs(&self, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
-        let Some(term) = self.term.clone() else { return Task::ready(()) };
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor().timer(AGENT_POLL).await;
-                let wanted = this.update(cx, |this, cx| {
-                    !this.has_exited() && cx.global::<AppState>().settings.prompt_box
-                });
-                match wanted {
-                    Err(_) => break,
-                    Ok(false) => continue,
-                    Ok(true) => {}
-                }
-                let term = term.clone();
-                let programs = cx.background_executor().spawn(async move { term.running_programs() }).await;
-                if this.update_in(cx, |this, window, cx| this.on_programs(&programs, window, cx)).is_err() {
-                    break;
-                }
-            }
-        })
-    }
-
-    fn on_programs(&mut self, programs: &[String], window: &mut Window, cx: &mut Context<Self>) {
-        if programs.is_empty() {
-            self.agent_title = false;
-        }
-        let agent = self.agent_title || programs.iter().any(|program| agent::is_agent(program));
-        if agent == self.agent {
-            return;
-        }
-        self.agent = agent;
-        if agent {
-            if self.prompt.is_none() && !self.prompt_dismissed {
-                let focus = self.focus.is_focused(window);
-                self.open_prompt(focus, true, window, cx);
-            }
-            return;
-        }
-        self.prompt_dismissed = false;
-        // A box that opened for the agent goes with it, unless something is written in it.
-        if let Some((prompt, _)) = &self.prompt
-            && prompt.read(cx).for_agent
-            && prompt.read(cx).is_empty(cx)
-        {
-            self.close_prompt(window, cx);
-        }
-    }
-
     /// Types a command into the shell and presses Enter.
     pub fn run(&self, command: &str) {
         if let Some(term) = &self.term {
@@ -437,9 +258,6 @@ impl TerminalView {
                 cx.notify();
             }
             TermEvent::Title(t) => {
-                if agent::title_names_agent(&t) {
-                    self.agent_title = true;
-                }
                 self.title = t.into();
                 cx.emit(TerminalViewEvent::TitleChanged);
                 cx.notify();
@@ -729,12 +547,41 @@ impl TerminalView {
                 return;
             }
         }
+        // Cmd belongs to the app on macOS, as in every Mac terminal: Cmd+C
+        // copies, Cmd+V pastes (a screenshot as its path, for an agent), and
+        // no Cmd key is typed into the shell. Plain Ctrl+V still reaches the
+        // program: Claude Code and Codex read a picture from the clipboard on it.
+        if m.platform && !m.control && !m.alt {
+            match key {
+                "c" => {
+                    if self.copy_selection(cx) {
+                        term.clear_selection();
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }
+                "v" => {
+                    self.paste_clipboard(cx);
+                    cx.stop_propagation();
+                }
+                _ => {}
+            }
+            return;
+        }
 
         if self.exit_code.is_some() {
             return;
         }
         let modes = term.modes();
-        if let Some(bytes) = input::encode(ks, modes.app_cursor, modes.win32_input) {
+        // A new line in the prompt of an agent: what that is depends on the
+        // program reading the keys, which only matters under the Windows console.
+        if key == "enter" && (m.control || m.shift) && !m.alt {
+            let reader = modes.win32_input.then(|| term.key_reader());
+            self.send(&input::new_line(reader), cx);
+            cx.stop_propagation();
+            return;
+        }
+        if let Some(bytes) = input::encode(ks, modes.app_cursor) {
             self.send(&bytes, cx);
             cx.stop_propagation();
         }
@@ -1017,9 +864,6 @@ impl Render for TerminalView {
             self.blink_on = true;
         }
         self.focused = focused;
-        if self._watch.is_none() && self.term.is_some() {
-            self._watch = Some(self.watch_programs(window, cx));
-        }
 
         let mut root = div()
             .id("terminal")
@@ -1236,17 +1080,10 @@ impl Render for TerminalView {
                     .child(text),
             );
         }
-        // The fields sit next to the terminal, not in it, so what is typed
-        // there never reaches the shell by itself.
+        // The field sits next to the terminal, not in it, so what is typed
+        // there never reaches the shell.
         let find = self.render_find(cx);
-        let prompt = self.prompt.as_ref().map(|(prompt, _)| prompt.clone());
-        v_flex()
-            .size_full()
-            .relative()
-            .child(root.flex_1().min_h_0())
-            .children(prompt)
-            .children(find)
-            .into_any_element()
+        div().size_full().relative().child(root).children(find).into_any_element()
     }
 }
 
@@ -1258,15 +1095,5 @@ impl TerminalView {
 
     pub fn win32_input(&self) -> bool {
         self.term.as_ref().is_some_and(|term| term.modes().win32_input)
-    }
-
-    pub fn prompt(&self) -> Option<Entity<PromptBox>> {
-        self.prompt.as_ref().map(|(prompt, _)| prompt.clone())
-    }
-
-    /// What a look over the programs that found these would do, without waiting for one.
-    pub fn see_programs(&mut self, programs: &[&str], window: &mut Window, cx: &mut Context<Self>) {
-        let programs: Vec<String> = programs.iter().map(|p| p.to_string()).collect();
-        self.on_programs(&programs, window, cx);
     }
 }

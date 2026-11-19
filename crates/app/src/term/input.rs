@@ -3,6 +3,7 @@
 //! Behaviour follows xterm conventions, the same ones VS Code's terminal uses.
 
 use gpui_kit::Keystroke;
+use wercode_core::process::KeyReader;
 
 /// xterm modifier parameter: 1 + shift(1) + alt(2) + ctrl(4).
 fn modifier_param(ks: &Keystroke) -> u8 {
@@ -10,25 +11,32 @@ fn modifier_param(ks: &Keystroke) -> u8 {
     1 + (m.shift as u8) + 2 * (m.alt as u8) + 4 * (m.control as u8)
 }
 
-/// A new line in a prompt rather than "send": what Shift+Enter and Ctrl+Enter
-/// type. Where the Windows console takes whole key presses (`win32_input`),
-/// a Ctrl+J press: Claude Code, Codex and PowerShell all start a new line on
-/// it. A plain line feed would do for Claude Code, but Codex on Windows reads
-/// key presses and ignores it, and PowerShell takes it for "new line above".
-/// Elsewhere the line feed byte is Ctrl+J itself.
-fn new_line(win32_input: bool) -> Vec<u8> {
-    if win32_input {
-        // ESC [ key code ; scan code ; character ; down ; Ctrl held ; repeat _
-        b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_".to_vec()
-    } else {
-        vec![b'\n']
+/// What Shift+Enter and Ctrl+Enter type: a new line in a prompt rather than
+/// "send". The programs disagree on it; each was tried, under an English and
+/// a Russian keyboard layout.
+///
+/// Outside the Windows console (`reader` is `None`: macOS, Linux) and for
+/// Linux programs behind WSL, the line feed byte, which is Ctrl+J: Claude
+/// Code, Codex and Linux shells all take it so. Under the Windows console
+/// Claude Code reads Enter without Shift, so it gets a whole Ctrl+Enter press;
+/// everything else (Codex, PowerShell) gets the Shift+Enter press itself, as
+/// in Windows Terminal. Codex there reads key presses and ignores a bare line
+/// feed, PowerShell takes the line feed for "new line above", and a Ctrl+J
+/// press is read through the keyboard layout (a Cyrillic letter in Russian).
+pub fn new_line(reader: Option<KeyReader>) -> Vec<u8> {
+    // ESC [ key code ; scan code ; character ; down ; modifiers ; repeat _
+    match reader {
+        None | Some(KeyReader::Linux) => vec![b'\n'],
+        Some(KeyReader::Claude) => b"\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_".to_vec(),
+        Some(KeyReader::Console) => b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_".to_vec(),
     }
 }
 
 /// Returns the bytes to send for a key press, or `None` if the key means
-/// nothing to a terminal (a lone modifier, for example). `win32_input` says
-/// the Windows console under the terminal takes whole key presses.
-pub fn encode(ks: &Keystroke, app_cursor: bool, win32_input: bool) -> Option<Vec<u8>> {
+/// nothing to a terminal (a lone modifier, for example). Shift+Enter and
+/// Ctrl+Enter give the line feed here; the terminal asks [`new_line`] first
+/// when it knows more about the program reading the keys.
+pub fn encode(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
     let mods = modifier_param(ks);
     let plain = mods == 1;
@@ -62,7 +70,7 @@ pub fn encode(ks: &Keystroke, app_cursor: bool, win32_input: bool) -> Option<Vec
     let bytes = match key {
         // Shift+Enter and Ctrl+Enter start a new line in the prompt of an
         // agent instead of sending what is typed.
-        "enter" if (m.control || m.shift) && !m.alt => new_line(win32_input),
+        "enter" if (m.control || m.shift) && !m.alt => new_line(None),
         "enter" => with_alt(vec![b'\r']),
         "tab" if m.shift => b"\x1b[Z".to_vec(),
         "tab" => vec![b'\t'],
@@ -153,38 +161,42 @@ mod tests {
 
     #[test]
     fn typing_and_control() {
-        assert_eq!(encode(&ks("a", Some("a"), false, false, false), false, false).unwrap(), b"a");
-        assert_eq!(encode(&ks("ф", Some("ф"), false, false, false), false, false).unwrap(), "ф".as_bytes());
-        assert_eq!(encode(&ks("c", None, true, false, false), false, false).unwrap(), [0x03]);
-        assert_eq!(encode(&ks("enter", None, false, false, false), false, false).unwrap(), b"\r");
-        assert_eq!(encode(&ks("b", None, false, true, false), false, false).unwrap(), b"\x1bb");
+        assert_eq!(encode(&ks("a", Some("a"), false, false, false), false).unwrap(), b"a");
+        assert_eq!(encode(&ks("ф", Some("ф"), false, false, false), false).unwrap(), "ф".as_bytes());
+        assert_eq!(encode(&ks("c", None, true, false, false), false).unwrap(), [0x03]);
+        assert_eq!(encode(&ks("enter", None, false, false, false), false).unwrap(), b"\r");
+        assert_eq!(encode(&ks("b", None, false, true, false), false).unwrap(), b"\x1bb");
     }
 
     #[test]
     fn ctrl_or_shift_enter_starts_a_new_line() {
-        assert_eq!(encode(&ks("enter", None, true, false, false), false, false).unwrap(), b"\n");
-        assert_eq!(encode(&ks("enter", None, false, false, true), false, false).unwrap(), b"\n");
-        assert_eq!(encode(&ks("enter", None, false, true, false), false, false).unwrap(), b"\x1b\r");
-        // Under the Windows console: a whole Ctrl+J press, down and up.
-        let ctrl_j = b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_";
-        assert_eq!(encode(&ks("enter", None, false, false, true), false, true).unwrap(), ctrl_j);
-        assert_eq!(encode(&ks("enter", None, true, false, false), false, true).unwrap(), ctrl_j);
-        assert_eq!(encode(&ks("enter", None, false, false, false), false, true).unwrap(), b"\r");
+        assert_eq!(encode(&ks("enter", None, true, false, false), false).unwrap(), b"\n");
+        assert_eq!(encode(&ks("enter", None, false, false, true), false).unwrap(), b"\n");
+        assert_eq!(encode(&ks("enter", None, false, true, false), false).unwrap(), b"\x1b\r");
+    }
+
+    #[test]
+    fn a_new_line_suits_the_program_reading_the_keys() {
+        assert_eq!(new_line(None), b"\n");
+        assert_eq!(new_line(Some(KeyReader::Linux)), b"\n");
+        // Whole key presses for the Windows console, down and up.
+        assert_eq!(new_line(Some(KeyReader::Claude)), b"\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_");
+        assert_eq!(new_line(Some(KeyReader::Console)), b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_");
     }
 
     #[test]
     fn arrows_and_modes() {
-        assert_eq!(encode(&ks("up", None, false, false, false), false, false).unwrap(), b"\x1b[A");
-        assert_eq!(encode(&ks("up", None, false, false, false), true, false).unwrap(), b"\x1bOA");
-        assert_eq!(encode(&ks("right", None, true, false, false), true, false).unwrap(), b"\x1b[1;5C");
-        assert_eq!(encode(&ks("delete", None, false, false, false), false, false).unwrap(), b"\x1b[3~");
-        assert_eq!(encode(&ks("f1", None, false, false, false), false, false).unwrap(), b"\x1bOP");
-        assert_eq!(encode(&ks("f5", None, false, false, true), false, false).unwrap(), b"\x1b[15;2~");
-        assert_eq!(encode(&ks("tab", None, false, false, true), false, false).unwrap(), b"\x1b[Z");
+        assert_eq!(encode(&ks("up", None, false, false, false), false).unwrap(), b"\x1b[A");
+        assert_eq!(encode(&ks("up", None, false, false, false), true).unwrap(), b"\x1bOA");
+        assert_eq!(encode(&ks("right", None, true, false, false), true).unwrap(), b"\x1b[1;5C");
+        assert_eq!(encode(&ks("delete", None, false, false, false), false).unwrap(), b"\x1b[3~");
+        assert_eq!(encode(&ks("f1", None, false, false, false), false).unwrap(), b"\x1bOP");
+        assert_eq!(encode(&ks("f5", None, false, false, true), false).unwrap(), b"\x1b[15;2~");
+        assert_eq!(encode(&ks("tab", None, false, false, true), false).unwrap(), b"\x1b[Z");
     }
 
     #[test]
     fn lone_modifier_sends_nothing() {
-        assert!(encode(&ks("shift", None, false, false, true), false, false).is_none());
+        assert!(encode(&ks("shift", None, false, false, true), false).is_none());
     }
 }

@@ -8,7 +8,7 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 // An icon used through `gpui_kit::assets::IconName` must be listed here,
 // otherwise it silently draws as nothing.
-icon_assets!(ExtraIcons, [AppWindow, ArrowDownToLine, ArrowUpFromLine, ChevronsDownUp, FilePlus, FolderPlus, GitBranch, Paperclip, Undo2]);
+icon_assets!(ExtraIcons, [AppWindow, ArrowDownToLine, ArrowUpFromLine, ChevronsDownUp, FilePlus, FolderPlus, GitBranch, Undo2]);
 
 /// Embeds the named pictures from one folder of `assets/`.
 macro_rules! embed {
@@ -103,7 +103,6 @@ mod tests {
             IconName::CircleCheck,
             IconName::LoaderCircle,
             IconName::AppWindow,
-            IconName::Paperclip,
             IconName::Heart,
             IconName::Copy,
         ];

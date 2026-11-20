@@ -10,7 +10,10 @@
 #   click:x,y   rclick:x,y   move:x,y   drag:x1,y1,x2,y2   wheel:x,y,delta
 #   text:...    key:<virtual key code>   sleep:<ms>   shot:<path.png>   size
 param([string]$Steps = "size")
-$p = Get-Process wercode -ErrorAction SilentlyContinue | Select-Object -First 1
+# A build from target\ first: an installed Wercode may be open with real work in it.
+$all = @(Get-Process wercode -ErrorAction SilentlyContinue)
+$p = $all | Where-Object { $_.Path -like "*\target\*\wercode.exe" } | Select-Object -First 1
+if (-not $p) { $p = $all | Select-Object -First 1 }
 if (-not $p) { "wercode is not running"; exit 1 }
 Add-Type -AssemblyName System.Drawing
 Add-Type @'

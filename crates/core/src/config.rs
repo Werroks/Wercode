@@ -205,9 +205,87 @@ pub fn save_to(path: &Path, settings: &Settings) -> Result<(), String> {
     std::fs::write(path, doc.to_string()).map_err(failed)
 }
 
+/// Writes the shortcuts of one command into the `[keys]` table of the file,
+/// or takes the command out of it with `None` so the built-in ones count
+/// again. The rest of the file stays as it was.
+pub fn save_keys(path: &Path, command: &str, keys: Option<&Keys>) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().map_err(|e| tf("{file} has a mistake and was not changed: {error}", &[("file", &path.display()), ("error", &e)]))?;
+    match keys {
+        Some(keys) => {
+            if !doc.contains_key("keys") {
+                doc["keys"] = toml_edit::table();
+            }
+            let Some(table) = doc["keys"].as_table_like_mut() else {
+                return Err(tf("{file} has a mistake and was not changed: {error}", &[("file", &path.display()), ("error", &"keys")]));
+            };
+            let value = match keys {
+                Keys::One(key) => toml_edit::value(key.as_str()),
+                Keys::Many(list) => toml_edit::value(list.iter().map(String::as_str).collect::<toml_edit::Array>()),
+            };
+            // A comment at the end of the line stays with the command.
+            let decor = table.get(command).and_then(|item| item.as_value()).map(|old| old.decor().clone());
+            table.insert(command, value);
+            if let (Some(decor), Some(new)) = (decor, table.get_mut(command).and_then(|item| item.as_value_mut())) {
+                *new.decor_mut() = decor;
+            }
+        }
+        None => {
+            if let Some(table) = doc.get_mut("keys").and_then(|item| item.as_table_like_mut()) {
+                table.remove(command);
+            }
+        }
+    }
+    let failed = |e: std::io::Error| tf("Could not write {file}: {error}", &[("file", &path.display()), ("error", &e)]);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(failed)?;
+    }
+    std::fs::write(path, doc.to_string()).map_err(failed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_commands_shortcuts_are_written_alone() {
+        let dir = std::env::temp_dir().join(format!("wercode-keys-{}", std::process::id()));
+        let path = dir.join("settings.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // No file, no table: both are made.
+        save_keys(&path, "terminal.new_tab", Some(&Keys::One("ctrl-shift-y".into()))).unwrap();
+        let (settings, error) = load_from(&path);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(settings.keys["terminal.new_tab"].list(), ["ctrl-shift-y"]);
+
+        // Others and their comments stay; a command's own comment too.
+        std::fs::write(&path, "theme = \"paper\" # light\n\n[keys]\n\"terminal.new_tab\" = \"ctrl-shift-y\" # mine\n\"git.push\" = \"\"\n").unwrap();
+        save_keys(&path, "terminal.new_tab", Some(&Keys::Many(vec!["ctrl-shift-u".into(), "f9".into()]))).unwrap();
+        save_keys(&path, "workspace.new_window", Some(&Keys::One(String::new()))).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("theme = \"paper\" # light\n"), "{text}");
+        assert!(text.contains("\"terminal.new_tab\" = [\"ctrl-shift-u\", \"f9\"] # mine"), "{text}");
+        let (settings, _) = load_from(&path);
+        assert_eq!(settings.keys["terminal.new_tab"].list(), ["ctrl-shift-u", "f9"]);
+        assert!(settings.keys["workspace.new_window"].list().is_empty());
+        assert!(settings.keys["git.push"].list().is_empty());
+
+        // Taken out, the command has its built-in shortcut again.
+        save_keys(&path, "terminal.new_tab", None).unwrap();
+        save_keys(&path, "not.there", None).unwrap();
+        let (settings, _) = load_from(&path);
+        assert!(!settings.keys.contains_key("terminal.new_tab"));
+        assert_eq!(settings.keys.len(), 2);
+        assert_eq!(settings.theme, "paper");
+
+        // A broken file is left alone.
+        std::fs::write(&path, "theme = ").unwrap();
+        assert!(save_keys(&path, "git.push", None).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = ");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn partial_file_keeps_defaults() {

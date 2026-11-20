@@ -18,7 +18,7 @@ use crate::workspace::{
     CommandPalette, NewWindow, OpenFolder, OpenSettings, QuickOpen, RerunTask, RunTask, ShowFiles, ShowGit, ShowProblems, ShowSearch,
     SwitchBranch, SwitchProject, TogglePanel,
 };
-use wercode_core::i18n::tf;
+use wercode_core::i18n::{t, tf};
 
 /// A command that can have a shortcut.
 pub struct Shortcut {
@@ -30,67 +30,69 @@ pub struct Shortcut {
     /// keys belong to the shell and to the programs running in it.
     keys: &'static [&'static str],
     action: fn() -> Box<dyn Action>,
+    /// What the command does, in the words of the interface.
+    pub title: fn() -> &'static str,
 }
 
 macro_rules! shortcut {
-    ($command:literal, $context:literal, $action:expr, [$($key:literal),*]) => {
-        Shortcut { command: $command, context: $context, keys: &[$($key),*], action: || Box::new($action) }
+    ($command:literal, $context:literal, $action:expr, [$($key:literal),*], $title:expr) => {
+        Shortcut { command: $command, context: $context, keys: &[$($key),*], action: || Box::new($action), title: || $title }
     };
 }
 
 pub fn shortcuts() -> Vec<Shortcut> {
     vec![
-        shortcut!("workspace.command_palette", "Workspace", CommandPalette, ["ctrl-shift-p"]),
-        shortcut!("workspace.quick_open", "Workspace", QuickOpen, ["ctrl-shift-k"]),
-        shortcut!("workspace.find_in_files", "Workspace", ShowSearch, ["ctrl-shift-f"]),
-        shortcut!("workspace.toggle_panel", "Workspace", TogglePanel, ["ctrl-shift-b"]),
-        shortcut!("workspace.show_files", "Workspace", ShowFiles, []),
-        shortcut!("workspace.show_git", "Workspace", ShowGit, ["ctrl-shift-g"]),
-        shortcut!("workspace.show_problems", "Workspace", ShowProblems, ["ctrl-shift-m"]),
-        shortcut!("workspace.restart_language_servers", "Workspace", RestartLanguageServers, []),
-        shortcut!("workspace.open_folder", "Workspace", OpenFolder, ["ctrl-shift-o"]),
-        shortcut!("workspace.switch_project", "Workspace", SwitchProject, []),
-        shortcut!("workspace.switch_branch", "Workspace", SwitchBranch, []),
-        shortcut!("workspace.new_window", "Workspace", NewWindow, ["ctrl-shift-n"]),
-        shortcut!("workspace.settings", "Workspace", OpenSettings, []),
+        shortcut!("workspace.command_palette", "Workspace", CommandPalette, ["ctrl-shift-p"], t("View: Command Palette")),
+        shortcut!("workspace.quick_open", "Workspace", QuickOpen, ["ctrl-shift-k"], t("File: Go to File\u{2026}")),
+        shortcut!("workspace.find_in_files", "Workspace", ShowSearch, ["ctrl-shift-f"], t("Search: Find in Files")),
+        shortcut!("workspace.toggle_panel", "Workspace", TogglePanel, ["ctrl-shift-b"], t("View: Toggle Side Panel")),
+        shortcut!("workspace.show_files", "Workspace", ShowFiles, [], t("View: Show Files")),
+        shortcut!("workspace.show_git", "Workspace", ShowGit, ["ctrl-shift-g"], t("View: Show Git")),
+        shortcut!("workspace.show_problems", "Workspace", ShowProblems, ["ctrl-shift-m"], t("View: Show Problems")),
+        shortcut!("workspace.restart_language_servers", "Workspace", RestartLanguageServers, [], t("Language Servers: Restart")),
+        shortcut!("workspace.open_folder", "Workspace", OpenFolder, ["ctrl-shift-o"], t("Project: Open Folder\u{2026}")),
+        shortcut!("workspace.switch_project", "Workspace", SwitchProject, [], t("Project: Switch to Recent\u{2026}")),
+        shortcut!("workspace.switch_branch", "Workspace", SwitchBranch, [], t("Git: Switch or Create Branch\u{2026}")),
+        shortcut!("workspace.new_window", "Workspace", NewWindow, ["ctrl-shift-n"], t("Window: New Window")),
+        shortcut!("workspace.settings", "Workspace", OpenSettings, [], t("Preferences: Settings")),
         // X for "execute"; L for the last one again.
-        shortcut!("workspace.run_task", "Workspace", RunTask, ["ctrl-shift-x"]),
-        shortcut!("workspace.rerun_task", "Workspace", RerunTask, ["ctrl-shift-l"]),
+        shortcut!("workspace.run_task", "Workspace", RunTask, ["ctrl-shift-x"], t("Tasks: Run\u{2026}")),
+        shortcut!("workspace.rerun_task", "Workspace", RerunTask, ["ctrl-shift-l"], t("Tasks: Run the Last One Again")),
         // Up sends commits away, down brings them in, like the arrows on the buttons.
-        shortcut!("git.push", "Workspace", Push, ["ctrl-shift-up"]),
-        shortcut!("git.pull", "Workspace", Pull, ["ctrl-shift-down"]),
-        shortcut!("git.fetch", "Workspace", Fetch, ["ctrl-shift-r"]),
-        shortcut!("git.commit", "Workspace", Commit, ["ctrl-shift-enter"]),
-        shortcut!("git.stage_all", "Workspace", StageAll, []),
+        shortcut!("git.push", "Workspace", Push, ["ctrl-shift-up"], t("Git: Push")),
+        shortcut!("git.pull", "Workspace", Pull, ["ctrl-shift-down"], t("Git: Pull")),
+        shortcut!("git.fetch", "Workspace", Fetch, ["ctrl-shift-r"], t("Git: Fetch")),
+        shortcut!("git.commit", "Workspace", Commit, ["ctrl-shift-enter"], t("Git: Commit")),
+        shortcut!("git.stage_all", "Workspace", StageAll, [], t("Git: Stage All Changes")),
         // A for "all changes".
-        shortcut!("git.show_all_changes", "Workspace", ShowAllChanges, ["ctrl-shift-a"]),
-        shortcut!("terminal.toggle", "TerminalArea", ToggleTerminal, ["ctrl-shift-j"]),
-        shortcut!("terminal.new_tab", "TerminalArea", NewTab, ["ctrl-shift-t"]),
-        shortcut!("terminal.close_tab", "TerminalArea", CloseTab, ["ctrl-shift-q"]),
-        shortcut!("terminal.close_pane", "TerminalArea", ClosePane, ["ctrl-shift-w"]),
-        shortcut!("terminal.split_right", "TerminalArea", SplitRight, ["ctrl-shift-d"]),
-        shortcut!("terminal.split_down", "TerminalArea", SplitDown, ["ctrl-shift-e"]),
-        shortcut!("terminal.next_tab", "TerminalArea", NextTab, ["ctrl-tab", "ctrl-pagedown"]),
-        shortcut!("terminal.previous_tab", "TerminalArea", PrevTab, ["ctrl-shift-tab", "ctrl-pageup"]),
+        shortcut!("git.show_all_changes", "Workspace", ShowAllChanges, ["ctrl-shift-a"], t("Git: Show All Changes")),
+        shortcut!("terminal.toggle", "TerminalArea", ToggleTerminal, ["ctrl-shift-j"], t("Terminal: Show or Hide")),
+        shortcut!("terminal.new_tab", "TerminalArea", NewTab, ["ctrl-shift-t"], t("Terminal: New Tab")),
+        shortcut!("terminal.close_tab", "TerminalArea", CloseTab, ["ctrl-shift-q"], t("Terminal: Close Tab")),
+        shortcut!("terminal.close_pane", "TerminalArea", ClosePane, ["ctrl-shift-w"], t("Terminal: Close Pane")),
+        shortcut!("terminal.split_right", "TerminalArea", SplitRight, ["ctrl-shift-d"], t("Terminal: Split Right")),
+        shortcut!("terminal.split_down", "TerminalArea", SplitDown, ["ctrl-shift-e"], t("Terminal: Split Down")),
+        shortcut!("terminal.next_tab", "TerminalArea", NextTab, ["ctrl-tab", "ctrl-pagedown"], t("Terminal: Next Tab")),
+        shortcut!("terminal.previous_tab", "TerminalArea", PrevTab, ["ctrl-shift-tab", "ctrl-pageup"], t("Terminal: Previous Tab")),
         // The arrows go to the terminal on that side; round the circle is in the palette.
-        shortcut!("terminal.pane_left", "TerminalArea", PaneLeft, ["ctrl-alt-left"]),
-        shortcut!("terminal.pane_right", "TerminalArea", PaneRight, ["ctrl-alt-right"]),
-        shortcut!("terminal.pane_up", "TerminalArea", PaneUp, ["ctrl-alt-up"]),
-        shortcut!("terminal.pane_down", "TerminalArea", PaneDown, ["ctrl-alt-down"]),
-        shortcut!("terminal.next_pane", "TerminalArea", NextPane, []),
-        shortcut!("terminal.previous_pane", "TerminalArea", PrevPane, []),
+        shortcut!("terminal.pane_left", "TerminalArea", PaneLeft, ["ctrl-alt-left"], t("Terminal: Go to the Pane on the Left")),
+        shortcut!("terminal.pane_right", "TerminalArea", PaneRight, ["ctrl-alt-right"], t("Terminal: Go to the Pane on the Right")),
+        shortcut!("terminal.pane_up", "TerminalArea", PaneUp, ["ctrl-alt-up"], t("Terminal: Go to the Pane Above")),
+        shortcut!("terminal.pane_down", "TerminalArea", PaneDown, ["ctrl-alt-down"], t("Terminal: Go to the Pane Below")),
+        shortcut!("terminal.next_pane", "TerminalArea", NextPane, [], t("Terminal: Next Pane")),
+        shortcut!("terminal.previous_pane", "TerminalArea", PrevPane, [], t("Terminal: Previous Pane")),
         // Ctrl+Shift+F finds in the project's files; S for "search" here.
-        shortcut!("terminal.find", "Terminal", Find, ["ctrl-shift-s"]),
-        shortcut!("terminal.rename_tab", "TerminalArea", RenameTab, []),
+        shortcut!("terminal.find", "Terminal", Find, ["ctrl-shift-s"], t("Terminal: Find\u{2026}")),
+        shortcut!("terminal.rename_tab", "TerminalArea", RenameTab, [], t("Terminal: Rename Tab\u{2026}")),
         // Plain Ctrl+S is safe here: the keyboard is in a text editor, not in a shell.
-        shortcut!("editor.save", "EditorView", Save, ["ctrl-s"]),
-        shortcut!("editor.go_to_definition", "EditorView", GoToDefinition, ["f12"]),
-        shortcut!("editor.show_completions", "EditorView", ShowCompletions, ["ctrl-space"]),
-        shortcut!("editor.quick_fix", "EditorView", ToggleCodeActions, ["ctrl-."]),
-        shortcut!("editor.rename", "EditorView", RenameSymbol, ["f2"]),
+        shortcut!("editor.save", "EditorView", Save, ["ctrl-s"], t("File: Save")),
+        shortcut!("editor.go_to_definition", "EditorView", GoToDefinition, ["f12"], t("Editor: Go to Definition")),
+        shortcut!("editor.show_completions", "EditorView", ShowCompletions, ["ctrl-space"], t("Editor: Show Completions")),
+        shortcut!("editor.quick_fix", "EditorView", ToggleCodeActions, ["ctrl-."], t("Editor: Quick Fix\u{2026}")),
+        shortcut!("editor.rename", "EditorView", RenameSymbol, ["f2"], t("Editor: Rename Symbol\u{2026}")),
         // R as in Sublime; Ctrl+Shift+O opens a folder here.
-        shortcut!("editor.go_to_symbol", "EditorView", GoToSymbol, ["ctrl-r"]),
-        shortcut!("workspace.go_to_project_symbol", "Workspace", GoToProjectSymbol, []),
+        shortcut!("editor.go_to_symbol", "EditorView", GoToSymbol, ["ctrl-r"], t("Go to Symbol in File\u{2026}")),
+        shortcut!("workspace.go_to_project_symbol", "Workspace", GoToProjectSymbol, [], t("Go to Symbol in Project\u{2026}")),
     ]
 }
 
@@ -170,6 +172,44 @@ pub fn apply(cx: &mut App) {
     cx.set_global(Applied { bound, problems });
 }
 
+/// A key press as a shortcut is written: `ctrl-shift-y`. `None` for a
+/// modifier pressed alone.
+pub fn stroke(keystroke: &Keystroke) -> Option<String> {
+    let key = keystroke.key.to_lowercase();
+    if key.is_empty() || matches!(key.as_str(), "shift" | "control" | "ctrl" | "alt" | "platform" | "cmd" | "super" | "win" | "function" | "fn") {
+        return None;
+    }
+    let m = &keystroke.modifiers;
+    let mut out = String::new();
+    for (on, name) in [(m.control, "ctrl-"), (m.alt, "alt-"), (m.shift, "shift-"), (m.platform, if cfg!(target_os = "macos") { "cmd-" } else { "super-" })] {
+        if on {
+            out.push_str(name);
+        }
+    }
+    out.push_str(&key);
+    Some(out)
+}
+
+/// Whether a key press can be a shortcut of the whole window without
+/// taking a letter away from typing: it needs Ctrl, Alt or the system
+/// key, except for F1 to F24.
+pub fn usable(stroke: &str) -> bool {
+    let key = stroke.rsplit('-').next().unwrap_or_default();
+    let function = key.strip_prefix('f').is_some_and(|n| n.parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)));
+    function || ["ctrl-", "alt-", "cmd-", "super-"].iter().any(|m| stroke.contains(m))
+}
+
+/// The commands, other than `command`, that a shortcut is bound to now.
+pub fn taken_by(stroke: &str, command: &str, cx: &App) -> Vec<&'static str> {
+    let all = shortcuts();
+    cx.try_global::<Applied>()
+        .iter()
+        .flat_map(|applied| &applied.bound)
+        .filter(|(key, _, name)| key == stroke && *name != command)
+        .filter_map(|(_, _, name)| all.iter().find(|s| s.command == *name).map(|s| (s.title)()))
+        .collect()
+}
+
 /// What in `[keys]` could not be used, as sentences for the settings screen.
 pub fn problems(cx: &App) -> Vec<String> {
     cx.try_global::<Applied>().map(|applied| applied.problems.clone()).unwrap_or_default()
@@ -193,9 +233,20 @@ pub fn label(keys: &str) -> String {
     keys.split_whitespace().map(stroke).collect::<Vec<_>>().join(" ")
 }
 
+/// A command as the settings screen lists it.
+pub struct Listed {
+    pub command: &'static str,
+    pub title: &'static str,
+    /// Its shortcuts now, printed like keys.
+    pub keys: Vec<String>,
+    /// The `[keys]` table changes them.
+    pub changed: bool,
+}
+
 /// Every command with the shortcuts it has now, for the settings screen.
-pub fn listing(cx: &App) -> Vec<(&'static str, Vec<String>)> {
+pub fn listing(cx: &App) -> Vec<Listed> {
     let applied = cx.try_global::<Applied>();
+    let overrides = cx.try_global::<AppState>().map(|state| &state.settings.keys);
     shortcuts()
         .iter()
         .map(|shortcut| {
@@ -205,7 +256,8 @@ pub fn listing(cx: &App) -> Vec<(&'static str, Vec<String>)> {
                 .filter(|(_, _, command)| *command == shortcut.command)
                 .map(|(key, _, _)| label(key))
                 .collect();
-            (shortcut.command, keys)
+            let changed = overrides.is_some_and(|keys| keys.contains_key(shortcut.command));
+            Listed { command: shortcut.command, title: (shortcut.title)(), keys, changed }
         })
         .collect()
 }
@@ -218,7 +270,8 @@ pub fn label_for(command: &str, cx: &App) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{label, normalized, shortcuts};
+    use super::{label, normalized, shortcuts, stroke, usable};
+    use gpui_kit::Keystroke;
 
     #[test]
     fn shortcuts_are_printed_like_keys() {
@@ -226,6 +279,18 @@ mod tests {
         assert_eq!(label("ctrl-k ctrl-pagedown"), "Ctrl+K Ctrl+Pagedown");
         assert_eq!(normalized(" Ctrl+Shift+Y "), "ctrl-shift-y");
         assert_eq!(normalized("ctrl-k Ctrl++"), "ctrl-k ctrl-+");
+    }
+
+    #[test]
+    fn a_key_press_is_written_as_a_shortcut() {
+        let press = |text: &'static str| stroke(&Keystroke::parse(text).unwrap());
+        assert_eq!(press("ctrl-shift-y").as_deref(), Some("ctrl-shift-y"));
+        assert_eq!(press("alt-shift-f2").as_deref(), Some("alt-shift-f2"));
+        assert_eq!(press("shift-enter").as_deref(), Some("shift-enter"));
+        let alone = Keystroke { key: "shift".into(), ..Keystroke::parse("shift-a").unwrap() };
+        assert_eq!(stroke(&alone), None);
+        assert!(usable("ctrl-shift-y") && usable("f5") && usable("shift-f12") && usable("alt-x"));
+        assert!(!usable("y") && !usable("shift-y") && !usable("enter") && !usable("f99"));
     }
 
     #[test]

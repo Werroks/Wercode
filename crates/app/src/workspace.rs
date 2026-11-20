@@ -3707,6 +3707,56 @@ four
     }
 
     #[gpui_kit::test]
+    async fn shortcuts_are_recorded_on_the_settings_screen(cx: &mut TestAppContext) {
+        let f = open(cx, "keyeditor");
+        let settings_file = f.dir.join("settings.toml");
+        std::fs::write(&settings_file, "# mine\nscrollback = 500\n").unwrap();
+        cx.update(|cx| crate::theme::set_settings_path(Some(settings_file.clone()), cx));
+        // The shortcuts are at the end of the screen: scroll there first.
+        let click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+            cx.update_window(f.window, |_, window, cx| {
+                window.scroll("settings-body", gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-20000.))), cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(f.window, |_, window, cx| window.click(id, cx)).unwrap();
+            cx.run_until_parked();
+        };
+        let label = |cx: &mut TestAppContext| cx.update(|cx| crate::keymap::label_for("workspace.toggle_panel", cx));
+        let row = cx.update(|cx| crate::keymap::listing(cx)).iter().position(|l| l.command == "workspace.toggle_panel").unwrap();
+        cx.update_window(f.window, |_, window, cx| window.click("open-settings", cx)).unwrap();
+        let view = f.workspace.read_with(cx, |w, _| w.settings.as_ref().map(|(view, _)| view.clone())).unwrap();
+        cx.update_window(f.window, |_, window, cx| view.update(cx, |v, cx| v.filter_keys("side panel", window, cx))).unwrap();
+        cx.run_until_parked();
+
+        // The next key press is the new shortcut; it does not run the old meaning of the keys.
+        click(cx, ("settings-key", row).into());
+        press(cx, f.window, &["ctrl-shift-g"]);
+        assert_eq!(label(cx).as_deref(), Some("Ctrl+Shift+G"));
+        assert!(f.workspace.read_with(cx, |w, _| w.settings.is_some()));
+        assert_eq!(f.workspace.read_with(cx, |w, _| w.panel), PanelKind::Files);
+        let text = std::fs::read_to_string(&settings_file).unwrap();
+        assert!(text.starts_with("# mine\nscrollback = 500\n") && text.contains("\"workspace.toggle_panel\" = \"ctrl-shift-g\""), "{text}");
+
+        // A letter alone is refused, Escape stops without a change.
+        click(cx, ("settings-key", row).into());
+        press(cx, f.window, &["y"]);
+        assert_eq!(label(cx).as_deref(), Some("Ctrl+Shift+G"));
+        press(cx, f.window, &["escape"]);
+        assert!(f.workspace.read_with(cx, |w, _| w.settings.is_some()), "Escape only stopped the recording");
+        assert_eq!(label(cx).as_deref(), Some("Ctrl+Shift+G"));
+
+        // Removed, then back to the built-in one, which leaves the file as it was.
+        click(cx, ("settings-key-clear", row).into());
+        assert_eq!(label(cx), None);
+        click(cx, ("settings-key-reset", row).into());
+        assert_eq!(label(cx).as_deref(), Some("Ctrl+Shift+B"));
+        let (saved, _) = wercode_core::config::load_from(&settings_file);
+        assert!(saved.keys.is_empty());
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
     async fn a_file_dragged_onto_the_terminal_is_typed_as_a_path(cx: &mut TestAppContext) {
         let root = project_dir("drag");
         std::fs::write(root.join("only.txt"), "text\n").unwrap();

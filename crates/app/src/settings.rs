@@ -40,7 +40,16 @@ pub struct SettingsView {
     error: Option<String>,
     /// The donation address was just copied; the button says so for a moment.
     copied: Option<Task<()>>,
+    /// Narrows the list of shortcuts.
+    key_filter: Entity<InputState>,
+    /// The command whose new shortcut the next key press is.
+    recording: Option<&'static str>,
+    /// Takes key presses before any shortcut sees them, while recording.
+    _intercept: Option<Subscription>,
+    /// What to say under a command after a key press: the text, and whether it is a refusal.
+    key_note: Option<(&'static str, String, bool)>,
     _subscription: Subscription,
+    _filter: Subscription,
     _updates: Subscription,
 }
 
@@ -63,6 +72,12 @@ impl SettingsView {
         });
         let schemes = wercode_core::theme::available();
         let scheme_error = scheme_error(&cx.global::<AppState>().settings.theme);
+        let key_filter = cx.new(|cx| InputState::new(window, cx).placeholder(t("Find a command or a shortcut")));
+        let filter = cx.subscribe(&key_filter, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         Self {
             focus: cx.focus_handle(),
             font,
@@ -71,7 +86,12 @@ impl SettingsView {
             shells: shell::available(),
             error: None,
             copied: None,
+            key_filter,
+            recording: None,
+            _intercept: None,
+            key_note: None,
             _subscription: subscription,
+            _filter: filter,
             _updates: cx.observe_global::<update::Updater>(|_, cx| cx.notify()),
         }
     }
@@ -107,6 +127,151 @@ impl SettingsView {
         self.schemes = wercode_core::theme::available();
         self.change(cx, |s| s.theme = id);
         cx.emit(SettingsEvent::OpenFile(path));
+    }
+
+    /// Waits for the next key press in this window and makes it the shortcut
+    /// of `command`. Shortcuts do not run meanwhile.
+    fn record(&mut self, command: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let handle = window.window_handle();
+        self.recording = Some(command);
+        self.key_note = None;
+        self._intercept = Some(cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != handle {
+                return;
+            }
+            if this.update(cx, |this, cx| this.pressed(&event.keystroke, cx)).is_ok() {
+                cx.stop_propagation();
+            }
+        }));
+        cx.notify();
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        self.recording = None;
+        self._intercept = None;
+        cx.notify();
+    }
+
+    fn pressed(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let Some(command) = self.recording else { return };
+        let plain = !keystroke.modifiers.modified();
+        if plain && keystroke.key == "escape" {
+            self.stop_recording(cx);
+            return;
+        }
+        // A modifier alone: the rest of the shortcut is still to come.
+        let Some(stroke) = crate::keymap::stroke(keystroke) else { return };
+        let keys = crate::keymap::label(&stroke);
+        if !crate::keymap::usable(&stroke) {
+            let said = tf("{keys} cannot be a shortcut: it would take a key away from typing. Add Ctrl or Alt, or use F1 to F24.", &[("keys", &keys)]);
+            self.key_note = Some((command, said, true));
+            cx.notify();
+            return;
+        }
+        self.stop_recording(cx);
+        self.set_keys(command, Some(vec![stroke.clone()]), cx);
+        let others = crate::keymap::taken_by(&stroke, command, cx);
+        let shell_key = keystroke.modifiers.control
+            && !keystroke.modifiers.shift
+            && !keystroke.modifiers.alt
+            && !keystroke.modifiers.platform
+            && keystroke.key.chars().count() == 1;
+        self.key_note = if !others.is_empty() {
+            Some((command, tf("{keys} is also the shortcut of: {commands}.", &[("keys", &keys), ("commands", &others.join(", "))]), false))
+        } else if shell_key {
+            Some((command, tf("Programs in the terminal no longer get {keys}.", &[("keys", &keys)]), false))
+        } else {
+            None
+        };
+    }
+
+    /// Gives a command its own shortcuts, or `None` for its built-in ones.
+    fn set_keys(&mut self, command: &'static str, keys: Option<Vec<String>>, cx: &mut Context<Self>) {
+        self.error = theme::change_keys(cx, command, keys).err();
+        self.key_note = None;
+        cx.notify();
+    }
+
+    /// Every command with its shortcuts, each a button to record a new one.
+    fn render_keys(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme();
+        let (muted, danger, accent) = (theme.muted_foreground, theme.danger, theme.warning);
+        let mono = theme.mono_font_family.clone();
+        let filter = self.key_filter.read(cx).value().trim().to_lowercase();
+        let listed = crate::keymap::listing(cx);
+        let rows = listed.into_iter().enumerate().filter(|(_, listed)| {
+            filter.is_empty()
+                || listed.title.to_lowercase().contains(&filter)
+                || listed.command.contains(&filter)
+                || listed.keys.iter().any(|keys| keys.to_lowercase().contains(&filter))
+        });
+        let rows: Vec<AnyElement> = rows
+            .map(|(ix, listed)| {
+                let command = listed.command;
+                let recording = self.recording == Some(command);
+                let label = if recording {
+                    t("Press the keys\u{2026} Esc cancels").to_string()
+                } else if listed.keys.is_empty() {
+                    t("No shortcut").to_string()
+                } else {
+                    listed.keys.join(",  ")
+                };
+                let key = Button::new(("settings-key", ix)).xsmall().label(label).tooltip(t("Click, then press the new shortcut"));
+                let key = if recording { key.primary() } else { key.outline() };
+                let note = self.key_note.as_ref().filter(|(on, _, _)| *on == command).map(|(_, text, bad)| (text.clone(), *bad));
+                v_flex()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().text_sm().truncate().child(listed.title))
+                                    .child(div().text_xs().text_color(muted).font_family(mono.clone()).truncate().child(command)),
+                            )
+                            .child(key.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                if this.recording == Some(command) {
+                                    this.stop_recording(cx);
+                                } else {
+                                    this.record(command, window, cx);
+                                }
+                            })))
+                            .when(!listed.keys.is_empty() && !recording, |d| {
+                                d.child(
+                                    Button::new(("settings-key-clear", ix))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Close)
+                                        .tooltip(t("Remove the shortcut"))
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_keys(command, Some(Vec::new()), cx))),
+                                )
+                            })
+                            .when(listed.changed && !recording, |d| {
+                                d.child(
+                                    Button::new(("settings-key-reset", ix))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Undo2)
+                                        .tooltip(t("Back to the built-in shortcut"))
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_keys(command, None, cx))),
+                                )
+                            }),
+                    )
+                    .when_some(note, |d, (text, bad)| {
+                        d.child(div().id(("settings-key-note", ix)).text_xs().text_color(if bad { danger } else { accent }).child(text))
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        let empty = rows.is_empty();
+        v_flex()
+            .id("settings-keys")
+            .gap_1p5()
+            .child(Input::new(&self.key_filter).small())
+            .children(rows)
+            .when(empty, |d| d.child(div().text_xs().text_color(muted).child(t("No command matches."))))
     }
 
     fn apply_font(&mut self, cx: &mut Context<Self>) {
@@ -415,18 +580,9 @@ impl Render for SettingsView {
             })
         };
 
-        // Shortcuts are changed in the file; here they are listed with their names.
-        let mono = theme.mono_font_family.clone();
-        let keys = v_flex().id("settings-keys").gap_0p5().children(crate::keymap::listing(cx).into_iter().map(
-            |(command, keys)| {
-                h_flex()
-                    .gap_3()
-                    .text_xs()
-                    .child(div().flex_1().min_w_0().truncate().font_family(mono.clone()).child(command))
-                    .child(div().flex_none().text_color(muted).child(keys.join(",  ")))
-            },
-        ));
+        let keys = self.render_keys(cx);
         let key_problems = crate::keymap::problems(cx);
+        let theme = cx.theme();
 
         let file = path.clone();
         v_flex()
@@ -435,8 +591,9 @@ impl Render for SettingsView {
             .track_focus(&self.focus)
             // A press inside the card must not reach the backdrop, which closes it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                // While a shortcut is recorded, Escape only stops that.
+                if event.keystroke.key == "escape" && this.recording.is_none() {
                     cx.emit(SettingsEvent::Close);
                     cx.stop_propagation();
                 }
@@ -470,6 +627,7 @@ impl Render for SettingsView {
             .child(
                 v_flex()
                     .id("settings-body")
+                    .test_support()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -550,7 +708,7 @@ impl Render for SettingsView {
                             .gap_1()
                             .child(div().text_sm().child(t("Keyboard shortcuts")))
                             .child(div().text_xs().text_color(muted).child(
-                                t("To change one, add its name to the [keys] table of settings.toml, for example \"terminal.new_tab\" = \"ctrl-shift-y\". An empty value removes the shortcut."),
+                                t("Click a shortcut and press the keys you want; Esc cancels. Your shortcuts are kept in the [keys] table of settings.toml."),
                             )),
                     )
                     .children(
@@ -583,6 +741,15 @@ impl Render for SettingsView {
                         )),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+impl SettingsView {
+    /// Narrows the list of shortcuts, as typing in its field does.
+    pub fn filter_keys(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_filter.update(cx, |input, cx| input.set_value(text.to_string(), window, cx));
+        cx.notify();
     }
 }
 

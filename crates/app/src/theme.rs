@@ -122,6 +122,29 @@ pub fn change_settings(cx: &mut App, change: impl FnOnce(&mut Settings)) -> Resu
     saved
 }
 
+/// Gives a command its own shortcuts, or with `None` its built-in ones
+/// again. Only that line of the `[keys]` table is written.
+pub fn change_keys(cx: &mut App, command: &str, keys: Option<Vec<String>>) -> Result<(), String> {
+    use wercode_core::config::Keys;
+    let state = cx.global::<AppState>();
+    let (mut settings, path) = (state.settings.clone(), state.settings_path.clone());
+    let keys = keys.map(|mut keys| match keys.len() {
+        0 => Keys::One(String::new()),
+        1 => Keys::One(keys.remove(0)),
+        _ => Keys::Many(keys),
+    });
+    match &keys {
+        Some(keys) => drop(settings.keys.insert(command.to_string(), keys.clone())),
+        None => drop(settings.keys.remove(command)),
+    }
+    let saved = match &path {
+        Some(path) => wercode_core::config::save_keys(path, command, keys.as_ref()),
+        None => Ok(()),
+    };
+    apply(settings, cx);
+    saved
+}
+
 /// Reads the settings file again, picking up what was edited by hand.
 pub fn reload_settings(cx: &mut App) {
     let Some(path) = cx.global::<AppState>().settings_path.clone() else { return };

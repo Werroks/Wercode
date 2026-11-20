@@ -1690,11 +1690,20 @@ impl TerminalArea {
                     .child(close)
                     .when(on_editor, |d| {
                         d.child(
-                            button("split-editor-right", IconName::PanelRight, t("Open another file beside this one"))
+                            // Not the panel icons: those are the terminal's.
+                            Button::new("split-editor-right")
+                                .ghost()
+                                .xsmall()
+                                .icon(gpui_kit::assets::IconName::Columns2)
+                                .tooltip(t("Open another file beside this one"))
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.split_editor(Axis::Horizontal, cx))),
                         )
                         .child(
-                            button("split-editor-down", IconName::PanelBottom, t("Open another file below this one"))
+                            Button::new("split-editor-down")
+                                .ghost()
+                                .xsmall()
+                                .icon(gpui_kit::assets::IconName::Rows2)
+                                .tooltip(t("Open another file below this one"))
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.split_editor(Axis::Vertical, cx))),
                         )
                     })

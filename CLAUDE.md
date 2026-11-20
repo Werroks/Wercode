@@ -32,8 +32,8 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   commit history and its graph (`history`), every change cut into hunks
   and single hunks staged or thrown away (`changes`), updates (`update`), the
   languages of the interface (`i18n`, with `locales/`), language servers
-  for code checks (`lsp`: finding and running them, the protocol, what they
-  report), which program reads a terminal's keys (`process::key_reader`).
+  for code checks (`lsp`: finding and running them, fetching them into
+  Wercode's own folder (`lsp::download`), the protocol, what they report), which program reads a terminal's keys (`process::key_reader`).
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
   `panel/` (file tree, search, git panel, `graph.rs` for the history),
@@ -116,3 +116,5 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   puts the last known problems back once typing pauses.
 - After finishing a feature, update `docs/features.csv` and
   `docs/build-log.md`.
+- `lsp::download::tests::real_downloads` fetches real servers from the
+  internet; it is `#[ignore]` and never runs in CI.

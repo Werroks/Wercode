@@ -36,6 +36,7 @@ use crate::term::{
     ClosePane, CloseTab, Find, NewTab, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
     TerminalArea, ToggleTerminal,
 };
+use crate::term::area::AreaEvent;
 use crate::theme::AppState;
 use crate::update::{self, CheckForUpdates, CloseForUpdate};
 use wercode_core::i18n::{t, tf, tn};
@@ -191,6 +192,7 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("Git: Fetch"), Box::new(git_panel::Fetch)),
         (t("Git: Commit"), Box::new(git_panel::Commit)),
         (t("Git: Stage All Changes"), Box::new(git_panel::StageAll)),
+        (t("Git: Show All Changes"), Box::new(git_panel::ShowAllChanges)),
         (t("Help: Check for Updates"), Box::new(CheckForUpdates)),
     ]
 }
@@ -207,7 +209,7 @@ struct Project {
     git: Option<Arc<RepoStatus>>,
     /// Keeps the language servers of the project running.
     _servers: Option<ProjectGuard>,
-    _subscriptions: [Subscription; 6],
+    _subscriptions: [Subscription; 7],
     _git_poll: Task<()>,
     /// Reports files changed by other programs. `None` when the system would
     /// not watch the folder; the git poll then still notices new files.
@@ -378,6 +380,7 @@ impl Workspace {
                         .terminals
                         .update(cx, |area, cx| area.open_diff(root, path, staged, untracked, window, cx));
                 }
+                GitPanelEvent::OpenAllChanges { staged } => this.open_all_changes(*staged, window, cx),
                 GitPanelEvent::OpenCommitDiff { path, hash, parent } => {
                     let Some(project) = &this.project else { return };
                     let (root, path, hash, parent) = (project.root.clone(), path.clone(), hash.clone(), parent.clone());
@@ -388,6 +391,10 @@ impl Workspace {
             }),
             // A fetch, pull or push shows in the status bar while it runs.
             cx.observe(&changes, |_, _, cx| cx.notify()),
+            // The tab of all changes staged or threw something away.
+            cx.subscribe(&terminals, |this, _, event: &AreaEvent, cx| match event {
+                AreaEvent::GitChanged => this.refresh_git(cx),
+            }),
             // Tabs opened, closed or split are written down for the next launch.
             cx.observe(&terminals, |this, _, cx| {
                 this.remember_layout(cx);
@@ -986,6 +993,14 @@ impl Workspace {
         cx.notify();
         let Some(panel) = self.project.as_ref().map(|p| p.changes.clone()) else { return };
         panel.update(cx, |panel, cx| panel.remote(command, window, cx));
+    }
+
+    /// Shows every change in the repository in one tab.
+    fn open_all_changes(&mut self, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        cx.notify();
+        let Some(terminals) = self.project.as_ref().map(|p| p.terminals.clone()) else { return };
+        terminals.update(cx, |area, cx| area.open_changes(staged, window, cx));
     }
 
     fn git_stage_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2120,6 +2135,9 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &git_panel::Commit, window, cx| this.git_commit(window, cx)))
             .on_action(cx.listener(|this, _: &git_panel::StageAll, window, cx| this.git_stage_all(window, cx)))
+            .on_action(cx.listener(|this, _: &git_panel::ShowAllChanges, window, cx| {
+                this.open_all_changes(false, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| {
                 this.palette = None;
                 update::check(true, cx);
@@ -2673,6 +2691,83 @@ mod tests {
         assert_eq!(windows.len(), 2);
         // The first window keeps its project.
         assert!(f.workspace.read_with(cx, |w, _| w.root()).is_some());
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn all_changes_stage_discard_and_unstage_single_hunks(cx: &mut TestAppContext) {
+        use std::process::Command;
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = project_dir("allchanges");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success(), "{args:?}");
+        };
+        let staged = || {
+            let out = Command::new("git").arg("-C").arg(&repo).args(["diff", "--cached"]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        let lines: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(repo.join("a.txt"), &lines).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "First"]);
+        // Two places far apart in one file, and a new file.
+        let changed = lines.replace("line 2\n", "line two\n").replace("line 28\n", "line 28\nadded\n");
+        std::fs::write(repo.join("a.txt"), &changed).unwrap();
+        std::fs::write(repo.join("new.txt"), "fresh\n").unwrap();
+        let a = || std::fs::read_to_string(repo.join("a.txt")).unwrap().replace("\r\n", "\n");
+
+        let f = open(cx, "allchanges");
+        press(cx, f.window, &["ctrl-shift-a"]);
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let view = area.read_with(cx, |a, _| a.active_changes()).expect("the tab of all changes");
+        let settled = |cx: &mut TestAppContext| {
+            wait_until(cx, "the changes to be read", |cx| view.read_with(cx, |v, _| !v.is_busy()));
+        };
+        let click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+            cx.update_window(f.window, |_, window, cx| window.click(id, cx)).unwrap();
+            settled(cx);
+        };
+        settled(cx);
+        assert_eq!(view.read_with(cx, |v, _| v.names()), ["a.txt", "new.txt"]);
+        assert_eq!(view.read_with(cx, |v, _| v.hunks()), [2, 1]);
+        // The same shortcut again shows the same tab.
+        press(cx, f.window, &["ctrl-shift-a"]);
+        assert_eq!(area.read_with(cx, |a, _| a.tab_count()), 2);
+        // It is not written down for the next launch.
+        assert_eq!(area.read_with(cx, |a, cx| a.layout(cx).tabs.len()), 1);
+
+        // Staging the second piece of a.txt leaves the first one out of the index.
+        click(cx, ("changes-stage", 1usize).into());
+        assert!(staged().contains("+added") && !staged().contains("line two"), "{}", staged());
+        assert_eq!(view.read_with(cx, |v, _| v.hunks()), [1, 1]);
+        assert_eq!(view.read_with(cx, |v, _| v.error().map(str::to_string)), None);
+
+        // Throwing the first piece away changes the file; Undo brings it back.
+        click(cx, ("changes-discard", 0usize).into());
+        assert!(!a().contains("line two"));
+        assert!(view.read_with(cx, |v, _| v.can_undo()));
+        click(cx, "changes-undo".into());
+        assert_eq!(a(), changed);
+        assert!(!view.read_with(cx, |v, _| v.can_undo()));
+
+        // The staged side has the piece that went in; it can come back out.
+        click(cx, "changes-staged".into());
+        assert_eq!(view.read_with(cx, |v, _| v.names()), ["a.txt"]);
+        click(cx, ("changes-unstage", 0usize).into());
+        assert_eq!(staged(), "");
+        assert_eq!(view.read_with(cx, |v, _| v.note().map(str::to_string)), Some("Nothing is staged.".into()));
+
+        // Stage all from the other side puts in the new file too.
+        click(cx, "changes-unstaged".into());
+        click(cx, "changes-all".into());
+        assert!(staged().contains("+fresh"));
+        assert_eq!(view.read_with(cx, |v, _| v.names()), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

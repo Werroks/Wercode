@@ -88,7 +88,7 @@ impl RepoStatus {
     }
 }
 
-fn git(dir: &Path) -> Command {
+pub(crate) fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir).stdin(Stdio::null()).stderr(Stdio::null());
     // Reading status must never take the index lock away from the user's own git.
@@ -102,17 +102,22 @@ fn git(dir: &Path) -> Command {
     cmd
 }
 
-fn output(cmd: &mut Command) -> Option<Vec<u8>> {
+pub(crate) fn output(cmd: &mut Command) -> Option<Vec<u8>> {
     let out = cmd.output().ok()?;
     out.status.success().then_some(out.stdout)
+}
+
+/// The top folder of the repository containing `dir`.
+pub fn top(dir: &Path) -> Option<PathBuf> {
+    let top = output(git(dir).args(["rev-parse", "--show-toplevel"]))?;
+    Some(PathBuf::from(String::from_utf8_lossy(&top).trim_end_matches(['\r', '\n'])))
 }
 
 /// Reads the status of the repository containing `dir`. `None` when `dir` is
 /// not inside a repository or git is not installed. Blocks; call it off the
 /// UI thread.
 pub fn status(dir: &Path) -> Option<RepoStatus> {
-    let top = output(git(dir).args(["rev-parse", "--show-toplevel"]))?;
-    let root = PathBuf::from(String::from_utf8_lossy(&top).trim_end_matches(['\r', '\n']));
+    let root = top(dir)?;
     let raw = output(git(dir).args(["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]))?;
     Some(parse(&root, &String::from_utf8_lossy(&raw)))
 }

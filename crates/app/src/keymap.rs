@@ -8,7 +8,7 @@ use gpui_kit::*;
 
 use crate::editor::Save;
 use crate::lsp::RestartLanguageServers;
-use crate::panel::git::{Commit, Fetch, Pull, Push, StageAll};
+use crate::panel::git::{Commit, Fetch, Pull, Push, ShowAllChanges, StageAll};
 use crate::term::{
     ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
 };
@@ -61,6 +61,8 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("git.fetch", "Workspace", Fetch, ["ctrl-shift-r"]),
         shortcut!("git.commit", "Workspace", Commit, ["ctrl-shift-enter"]),
         shortcut!("git.stage_all", "Workspace", StageAll, []),
+        // A for "all changes".
+        shortcut!("git.show_all_changes", "Workspace", ShowAllChanges, ["ctrl-shift-a"]),
         shortcut!("terminal.toggle", "TerminalArea", ToggleTerminal, ["ctrl-shift-j"]),
         shortcut!("terminal.new_tab", "TerminalArea", NewTab, ["ctrl-shift-t"]),
         shortcut!("terminal.close_tab", "TerminalArea", CloseTab, ["ctrl-shift-q"]),

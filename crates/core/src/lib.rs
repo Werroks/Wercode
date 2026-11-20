@@ -1,5 +1,6 @@
 //! Wercode core: everything that does not need a window.
 
+pub mod changes;
 pub mod config;
 pub mod document;
 pub mod environment;

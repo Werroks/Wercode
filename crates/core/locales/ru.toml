@@ -289,3 +289,26 @@
 "Send only USDT on TRC-20 to this address; coins sent on another network are lost." = "Отправляйте на этот адрес только USDT в сети TRC-20: монеты, отправленные в другой сети, пропадут."
 "Support Wercode" = "Поддержать Wercode"
 "Wercode is free and open source. If it saves you time and you want to help it grow, you can send USDT on the TRON network (TRC-20) to this address:" = "Wercode бесплатный, с открытым кодом. Если он экономит вам время и вы хотите помочь ему развиваться, можно отправить USDT в сети TRON (TRC-20) на этот адрес:"
+"All Changes" = "Все изменения"
+"All Staged Changes" = "Все изменения в индексе"
+"Bring back what was just thrown away" = "Вернуть то, что только что отменено"
+"Could not read the changes: {error}" = "Не удалось прочитать изменения: {error}"
+"Git: Show All Changes" = "Git: показать все изменения"
+"Not Staged" = "Не в индексе"
+"Nothing has changed that is not staged." = "Изменений вне индекса нет."
+"Nothing is staged." = "В индексе ничего нет."
+"Open File" = "Открыть файл"
+"Show all changes in one tab (Ctrl+Shift+A)" = "Показать все изменения в одной вкладке (Ctrl+Shift+A)"
+"Staged" = "В индексе"
+"This change is gone." = "Этого изменения уже нет."
+"This folder is not a git repository." = "Эта папка — не git-репозиторий."
+"Too large to show" = "Слишком большой, чтобы показать"
+"Undo" = "Вернуть"
+"git could not apply the change." = "git не смог применить изменение."
+"git could not list the changes." = "git не смог перечислить изменения."
+"{name} exists again; it was left as it is." = "{name} снова существует; файл оставлен как есть."
+"{n} changed files" = { one = "{n} изменённый файл", few = "{n} изменённых файла", many = "{n} изменённых файлов" }
+"{n} files could not be shown." = { one = "{n} файл не удалось показать.", few = "{n} файла не удалось показать.", many = "{n} файлов не удалось показать." }
+"{n} files with merge conflicts are not shown; resolve them in the editor." = { one = "{n} файл с конфликтом слияния не показан; разрешите конфликт в редакторе.", few = "{n} файла с конфликтами слияния не показаны; разрешите конфликты в редакторе.", many = "{n} файлов с конфликтами слияния не показаны; разрешите конфликты в редакторе." }
+"{n} more new files are not shown." = { one = "Ещё {n} новый файл не показан.", few = "Ещё {n} новых файла не показаны.", many = "Ещё {n} новых файлов не показаны." }
+"Get the Installer" = "Скачать установщик"

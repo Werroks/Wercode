@@ -289,3 +289,26 @@
 "Send only USDT on TRC-20 to this address; coins sent on another network are lost." = "Senden Sie an diese Adresse nur USDT über TRC-20; Coins aus einem anderen Netzwerk gehen verloren."
 "Support Wercode" = "Wercode unterstützen"
 "Wercode is free and open source. If it saves you time and you want to help it grow, you can send USDT on the TRON network (TRC-20) to this address:" = "Wercode ist kostenlos und quelloffen. Wenn es Ihnen Zeit spart und Sie seine Entwicklung unterstützen möchten, können Sie USDT im TRON-Netzwerk (TRC-20) an diese Adresse senden:"
+"All Changes" = "Alle Änderungen"
+"All Staged Changes" = "Alle bereitgestellten Änderungen"
+"Bring back what was just thrown away" = "Gerade Verworfenes zurückholen"
+"Could not read the changes: {error}" = "Die Änderungen konnten nicht gelesen werden: {error}"
+"Git: Show All Changes" = "Git: Alle Änderungen anzeigen"
+"Not Staged" = "Nicht bereitgestellt"
+"Nothing has changed that is not staged." = "Es gibt keine nicht bereitgestellten Änderungen."
+"Nothing is staged." = "Nichts ist bereitgestellt."
+"Open File" = "Datei öffnen"
+"Show all changes in one tab (Ctrl+Shift+A)" = "Alle Änderungen in einem Tab anzeigen (Ctrl+Shift+A)"
+"Staged" = "Bereitgestellt"
+"This change is gone." = "Diese Änderung gibt es nicht mehr."
+"This folder is not a git repository." = "Dieser Ordner ist kein Git-Repository."
+"Too large to show" = "Zu groß zum Anzeigen"
+"Undo" = "Rückgängig"
+"git could not apply the change." = "git konnte die Änderung nicht anwenden."
+"git could not list the changes." = "git konnte die Änderungen nicht auflisten."
+"{name} exists again; it was left as it is." = "{name} existiert wieder; die Datei bleibt, wie sie ist."
+"{n} changed files" = { one = "{n} geänderte Datei", other = "{n} geänderte Dateien" }
+"{n} files could not be shown." = { one = "{n} Datei konnte nicht angezeigt werden.", other = "{n} Dateien konnten nicht angezeigt werden." }
+"{n} files with merge conflicts are not shown; resolve them in the editor." = { one = "{n} Datei mit Merge-Konflikten wird nicht angezeigt; bitte im Editor auflösen.", other = "{n} Dateien mit Merge-Konflikten werden nicht angezeigt; bitte im Editor auflösen." }
+"{n} more new files are not shown." = { one = "{n} weitere neue Datei wird nicht angezeigt.", other = "{n} weitere neue Dateien werden nicht angezeigt." }
+"Get the Installer" = "Installationsprogramm herunterladen"

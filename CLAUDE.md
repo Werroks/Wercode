@@ -29,7 +29,8 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   by name, reading and
   writing documents, project search, watching the folder for changes,
   dropping what the program that started Wercode left in its environment,
-  commit history and its graph (`history`), updates (`update`), the
+  commit history and its graph (`history`), every change cut into hunks
+  and single hunks staged or thrown away (`changes`), updates (`update`), the
   languages of the interface (`i18n`, with `locales/`), language servers
   for code checks (`lsp`: finding and running them, the protocol, what they
   report), which program reads a terminal's keys (`process::key_reader`).
@@ -38,7 +39,8 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   `panel/` (file tree, search, git panel, `graph.rs` for the history),
   `editor.rs` (a file in a tab), `update.rs` (checking and installing updates),
   `lsp.rs` (the shared language servers), `panel/problems.rs` (their list),
-  `diff.rs` (the changes to a file in a tab),
+  `diff.rs` (the changes to a file in a tab), `changes.rs` (every change
+  in one tab, with buttons for each hunk),
   `settings.rs` (the settings screen), `keymap.rs` (every shortcut, and the
   user's own from `[keys]`), `assets.rs` (bundled icons), `theme.rs`.
 - `assets/themes/*.toml` — built-in colour schemes, compiled in.

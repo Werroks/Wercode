@@ -28,7 +28,9 @@ actions!(
         /// Commits with the message in the git panel; without one, puts the
         /// keyboard in the message field.
         Commit,
-        StageAll
+        StageAll,
+        /// Shows every change in the repository in one tab.
+        ShowAllChanges
     ]
 );
 
@@ -41,6 +43,8 @@ pub enum GitPanelEvent {
     OpenDiff { path: PathBuf, staged: bool, untracked: bool },
     /// A file of a commit in the history was clicked.
     OpenCommitDiff { path: PathBuf, hash: String, parent: Option<String> },
+    /// Every change on one side of the index, in one tab.
+    OpenAllChanges { staged: bool },
 }
 
 /// The commands that talk to the remote.
@@ -319,6 +323,10 @@ impl GitPanel {
             List::Staged => ("git-staged", "git-unstage"),
             List::Changes => ("git-change", "git-stage"),
         };
+        let (all_changes_id, staged) = match list {
+            List::Staged => ("git-all-staged", true),
+            List::Changes => ("git-all-changes", false),
+        };
         let busy = self.busy;
 
         let rows = changes.into_iter().enumerate().map(|(ix, change)| {
@@ -429,6 +437,16 @@ impl GitPanel {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(muted)
                                 .child(format!("{title}  {}", rows.len())),
+                        )
+                        .child(
+                            Button::new(all_changes_id)
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(Lucide::FileDiff))
+                                .tooltip(t("Show all changes in one tab (Ctrl+Shift+A)"))
+                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                    cx.emit(GitPanelEvent::OpenAllChanges { staged })
+                                })),
                         )
                         .child(
                             Button::new(all_id)

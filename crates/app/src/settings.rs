@@ -158,6 +158,17 @@ impl SettingsView {
                                 .label(t("Restart to Update"))
                                 .on_click(|_: &ClickEvent, _, cx| update::restart(cx)),
                         )
+                    })
+                    // A copy built from source never updates itself: the
+                    // installed release does, so point to it.
+                    .when(off, |d| {
+                        d.child(
+                            Button::new("settings-get-installer")
+                                .small()
+                                .outline()
+                                .label(t("Get the Installer"))
+                                .on_click(|_: &ClickEvent, _, cx| cx.open_url(wercode_core::update::RELEASES_URL)),
+                        )
                     }),
             )
             .when(!said.is_empty(), |d| {

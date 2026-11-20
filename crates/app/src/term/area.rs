@@ -14,6 +14,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use wercode_core::changes::Side;
 use wercode_core::{file_icons, fs_ops, shell};
 use wercode_core::state::{Layout, PaneLayout, TabLayout};
 
@@ -22,6 +23,7 @@ use super::{
     ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
     ToggleTerminal,
 };
+use crate::changes::{ChangesEvent, ChangesView};
 use crate::diff::DiffView;
 use crate::editor::{EditorEvent, EditorView};
 use crate::panel::DraggedPath;
@@ -177,6 +179,14 @@ enum Body {
     Editor(Entity<EditorView>),
     /// The changes to a file, read-only.
     Diff(Entity<DiffView>),
+    /// Every change in the repository, with buttons for each piece.
+    Changes(Entity<ChangesView>),
+}
+
+/// What the tabs tell the window.
+pub enum AreaEvent {
+    /// A tab changed the repository (staged or threw away a change).
+    GitChanged,
 }
 
 struct Tab {
@@ -241,13 +251,13 @@ impl Tab {
     fn active_pane(&self) -> Option<&Pane> {
         match &self.body {
             Body::Terminals { active, .. } => Some(active),
-            Body::Editor(_) | Body::Diff(_) => None,
+            Body::Editor(_) | Body::Diff(_) | Body::Changes(_) => None,
         }
     }
 
     fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.body {
-            Body::Terminals { .. } | Body::Diff(_) => None,
+            Body::Terminals { .. } | Body::Diff(_) | Body::Changes(_) => None,
             Body::Editor(editor) => Some(editor),
         }
     }
@@ -257,6 +267,7 @@ impl Tab {
             Body::Terminals { active, .. } => active.focus_handle(cx),
             Body::Editor(editor) => editor.focus_handle(cx),
             Body::Diff(diff) => diff.focus_handle(cx),
+            Body::Changes(changes) => changes.focus_handle(cx),
         }
     }
 }
@@ -297,6 +308,8 @@ pub struct TerminalArea {
     /// A terminal tab whose name is being typed.
     renaming: Option<Renaming>,
 }
+
+impl EventEmitter<AreaEvent> for TerminalArea {}
 
 impl Focusable for TerminalArea {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -430,7 +443,7 @@ impl TerminalArea {
     /// The open tabs, written down for the next launch.
     pub fn layout(&self, cx: &App) -> Layout {
         // A tab of changes is not kept: by the next launch they are different.
-        let kept = |tab: &Tab| !matches!(tab.body, Body::Diff(_));
+        let kept = |tab: &Tab| !matches!(tab.body, Body::Diff(_) | Body::Changes(_));
         let tabs: Vec<TabLayout> = self
             .tabs
             .iter()
@@ -439,7 +452,7 @@ impl TerminalArea {
                     Some(TabLayout::Terminals { panes: root.layout(cx), name: tab.name.clone() })
                 }
                 Body::Editor(editor) => Some(TabLayout::File { path: editor.read(cx).path().to_path_buf() }),
-                Body::Diff(_) => None,
+                Body::Diff(_) | Body::Changes(_) => None,
             })
             .collect();
         let before = self.tabs.iter().take(self.active).filter(|tab| kept(tab)).count();
@@ -488,13 +501,41 @@ impl TerminalArea {
     /// The repository or the files changed: tabs of changes read them again.
     pub fn refresh_diffs(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
-            // What a commit changed stays the same.
-            if let Body::Diff(diff) = &tab.body
-                && !diff.read(cx).is_commit()
-            {
-                diff.update(cx, |diff, cx| diff.reload(cx));
+            match &tab.body {
+                // What a commit changed stays the same.
+                Body::Diff(diff) if !diff.read(cx).is_commit() => diff.update(cx, |diff, cx| diff.reload(cx)),
+                Body::Changes(changes) => changes.update(cx, |changes, cx| changes.reload(cx)),
+                _ => {}
             }
         }
+    }
+
+    /// Shows every change in the repository in a tab (there is one such
+    /// tab), on the side of the index asked for.
+    pub fn open_changes(&mut self, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let side = if staged { Side::Staged } else { Side::Unstaged };
+        let open = self.tabs.iter().position(|t| matches!(t.body, Body::Changes(_)));
+        let index = match open {
+            Some(index) => {
+                if let Body::Changes(changes) = &self.tabs[index].body {
+                    changes.update(cx, |changes, cx| changes.set_side(side, cx));
+                }
+                index
+            }
+            None => {
+                let root = self.root_dir.clone();
+                let changes = cx.new(|cx| ChangesView::new(root, side, cx));
+                let subscription = cx.subscribe_in(&changes, window, |this, _, event: &ChangesEvent, window, cx| match event {
+                    ChangesEvent::Changed => cx.emit(AreaEvent::GitChanged),
+                    ChangesEvent::Open { path, line } => this.open_path(path.clone(), *line, None, window, cx),
+                });
+                self.subscriptions.insert(changes.entity_id(), subscription);
+                let id = self.id();
+                self.tabs.push(Tab { id, name: None, body: Body::Changes(changes) });
+                self.tabs.len() - 1
+            }
+        };
+        self.select_tab(index, window, cx);
     }
 
     /// Shows what a commit changed in a file, in a tab of its own.
@@ -715,6 +756,15 @@ impl TerminalArea {
             }
         }
         cx.notify();
+    }
+
+    /// The tab of every change, if it is showing.
+    #[cfg(test)]
+    pub fn active_changes(&self) -> Option<Entity<ChangesView>> {
+        match &self.tabs.get(self.active)?.body {
+            Body::Changes(changes) => Some(changes.clone()),
+            _ => None,
+        }
     }
 
     /// The tab of changes that is showing, if one is.
@@ -938,7 +988,7 @@ impl TerminalArea {
         }
         // Nothing to lose in a tab of changes.
         if let CloseTarget::Tab(id) = target
-            && self.tabs.iter().any(|t| t.id == id && matches!(t.body, Body::Diff(_)))
+            && self.tabs.iter().any(|t| t.id == id && matches!(t.body, Body::Diff(_) | Body::Changes(_)))
         {
             self.remove_tab(id, window, cx);
             return;
@@ -1013,6 +1063,9 @@ impl TerminalArea {
         let tab = self.tabs.remove(index);
         if let Some(editor) = tab.editor() {
             self.subscriptions.remove(&editor.entity_id());
+        }
+        if let Body::Changes(changes) = &tab.body {
+            self.subscriptions.remove(&changes.entity_id());
         }
         self.settle(index, tab.is_terminal(), cx);
         if self.tabs.is_empty() {
@@ -1247,6 +1300,13 @@ impl TerminalArea {
                     let picture = file_icons::for_file(&diff.file_name()).and_then(crate::assets::file_icon);
                     (SharedString::from(diff.label()), picture, false)
                 }
+                Body::Changes(changes) => {
+                    let label = match changes.read(cx).side() {
+                        Side::Unstaged => t("All Changes"),
+                        Side::Staged => t("All Staged Changes"),
+                    };
+                    (SharedString::from(label), crate::assets::file_icon("git"), false)
+                }
             };
             let panes = tab.panes().len();
             let terminal = tab.is_terminal();
@@ -1428,6 +1488,7 @@ impl TerminalArea {
             Some(Body::Terminals { root, .. }) => self.render_node(root, true, cx),
             Some(Body::Editor(editor)) => editor.clone().into_any_element(),
             Some(Body::Diff(diff)) => diff.clone().into_any_element(),
+            Some(Body::Changes(changes)) => changes.clone().into_any_element(),
             None => div().into_any_element(),
         }
     }

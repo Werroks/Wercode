@@ -289,3 +289,26 @@
 "Send only USDT on TRC-20 to this address; coins sent on another network are lost." = "Envía a esta dirección solo USDT en TRC-20; las monedas enviadas por otra red se pierden."
 "Support Wercode" = "Apoyar Wercode"
 "Wercode is free and open source. If it saves you time and you want to help it grow, you can send USDT on the TRON network (TRC-20) to this address:" = "Wercode es gratuito y de código abierto. Si te ahorra tiempo y quieres ayudar a que crezca, puedes enviar USDT en la red TRON (TRC-20) a esta dirección:"
+"All Changes" = "Todos los cambios"
+"All Staged Changes" = "Todos los cambios preparados"
+"Bring back what was just thrown away" = "Recuperar lo que se acaba de descartar"
+"Could not read the changes: {error}" = "No se pudieron leer los cambios: {error}"
+"Git: Show All Changes" = "Git: Mostrar todos los cambios"
+"Not Staged" = "Sin preparar"
+"Nothing has changed that is not staged." = "No hay cambios sin preparar."
+"Nothing is staged." = "No hay nada preparado."
+"Open File" = "Abrir archivo"
+"Show all changes in one tab (Ctrl+Shift+A)" = "Mostrar todos los cambios en una pestaña (Ctrl+Shift+A)"
+"Staged" = "Preparados"
+"This change is gone." = "Este cambio ya no existe."
+"This folder is not a git repository." = "Esta carpeta no es un repositorio git."
+"Too large to show" = "Demasiado grande para mostrarlo"
+"Undo" = "Deshacer"
+"git could not apply the change." = "git no pudo aplicar el cambio."
+"git could not list the changes." = "git no pudo listar los cambios."
+"{name} exists again; it was left as it is." = "{name} vuelve a existir; se ha dejado tal como está."
+"{n} changed files" = { one = "{n} archivo modificado", other = "{n} archivos modificados" }
+"{n} files could not be shown." = { one = "No se pudo mostrar {n} archivo.", other = "No se pudieron mostrar {n} archivos." }
+"{n} files with merge conflicts are not shown; resolve them in the editor." = { one = "No se muestra {n} archivo con conflictos de fusión; resuélvalo en el editor.", other = "No se muestran {n} archivos con conflictos de fusión; resuélvalos en el editor." }
+"{n} more new files are not shown." = { one = "No se muestra {n} archivo nuevo más.", other = "No se muestran {n} archivos nuevos más." }
+"Get the Installer" = "Descargar el instalador"

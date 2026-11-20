@@ -464,6 +464,8 @@ impl Render for SettingsView {
         let support = self.render_support(cx);
         let theme = cx.theme();
         let (muted, border, danger) = (theme.muted_foreground, theme.border, theme.danger);
+        // Between the sections: thicker and darker than a border, so they read as separate.
+        let divider = move || div().flex_none().h(px(2.)).my_2().rounded_full().bg(muted.opacity(0.45));
 
         let schemes = h_flex()
             .flex_wrap()
@@ -700,9 +702,9 @@ impl Render for SettingsView {
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().id("settings-error").text_xs().text_color(danger).child(error))
                     })
-                    .child(div().flex_none().h(px(1.)).bg(border))
+                    .child(divider())
                     .child(support)
-                    .child(div().flex_none().h(px(1.)).bg(border))
+                    .child(divider())
                     .child(
                         v_flex()
                             .gap_1()

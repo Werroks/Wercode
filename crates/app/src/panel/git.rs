@@ -43,8 +43,8 @@ pub enum GitPanelEvent {
     OpenDiff { path: PathBuf, staged: bool, untracked: bool },
     /// A file of a commit in the history was clicked.
     OpenCommitDiff { path: PathBuf, hash: String, parent: Option<String> },
-    /// Every change on one side of the index, in one tab.
-    OpenAllChanges { staged: bool },
+    /// Every change on one side of the index, in one tab, scrolled to a file.
+    OpenAllChanges { staged: bool, reveal: Option<PathBuf> },
 }
 
 /// The commands that talk to the remote.
@@ -354,7 +354,12 @@ impl GitPanel {
                 .id((prefix, ix))
                 .test_support()
                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    cx.emit(GitPanelEvent::OpenDiff { path: clicked.clone(), staged, untracked })
+                    // A file git could not merge is resolved with the buttons of the list of all changes.
+                    if status == FileStatus::Conflict {
+                        cx.emit(GitPanelEvent::OpenAllChanges { staged: false, reveal: Some(clicked.clone()) })
+                    } else {
+                        cx.emit(GitPanelEvent::OpenDiff { path: clicked.clone(), staged, untracked })
+                    }
                 }))
                 .w_full()
                 .gap_1p5()
@@ -445,7 +450,7 @@ impl GitPanel {
                                 .icon(Icon::new(Lucide::FileDiff))
                                 .tooltip(t("Show all changes in one tab (Ctrl+Shift+A)"))
                                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                    cx.emit(GitPanelEvent::OpenAllChanges { staged })
+                                    cx.emit(GitPanelEvent::OpenAllChanges { staged, reveal: None })
                                 })),
                         )
                         .child(

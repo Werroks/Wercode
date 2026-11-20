@@ -512,7 +512,7 @@ impl TerminalArea {
 
     /// Shows every change in the repository in a tab (there is one such
     /// tab), on the side of the index asked for.
-    pub fn open_changes(&mut self, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_changes(&mut self, staged: bool, reveal: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let side = if staged { Side::Staged } else { Side::Unstaged };
         let open = self.tabs.iter().position(|t| matches!(t.body, Body::Changes(_)));
         let index = match open {
@@ -535,6 +535,9 @@ impl TerminalArea {
                 self.tabs.len() - 1
             }
         };
+        if let (Some(path), Body::Changes(changes)) = (reveal, &self.tabs[index].body) {
+            changes.update(cx, |changes, cx| changes.reveal(path, cx));
+        }
         self.select_tab(index, window, cx);
     }
 

@@ -388,7 +388,9 @@ impl Workspace {
                         .terminals
                         .update(cx, |area, cx| area.open_diff(root, path, staged, untracked, window, cx));
                 }
-                GitPanelEvent::OpenAllChanges { staged } => this.open_all_changes(*staged, window, cx),
+                GitPanelEvent::OpenAllChanges { staged, reveal } => {
+                    this.open_all_changes(*staged, reveal.clone(), window, cx)
+                }
                 GitPanelEvent::OpenCommitDiff { path, hash, parent } => {
                     let Some(project) = &this.project else { return };
                     let (root, path, hash, parent) = (project.root.clone(), path.clone(), hash.clone(), parent.clone());
@@ -1034,11 +1036,11 @@ impl Workspace {
     }
 
     /// Shows every change in the repository in one tab.
-    fn open_all_changes(&mut self, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_all_changes(&mut self, staged: bool, reveal: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
         cx.notify();
         let Some(terminals) = self.project.as_ref().map(|p| p.terminals.clone()) else { return };
-        terminals.update(cx, |area, cx| area.open_changes(staged, window, cx));
+        terminals.update(cx, |area, cx| area.open_changes(staged, reveal, window, cx));
     }
 
     fn git_stage_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2013,6 +2015,13 @@ impl Workspace {
                     .when(conflicts > 0, |d| {
                         d.child(
                             item()
+                                .id("status-conflicts")
+                                .test_support()
+                                .px_1()
+                                .rounded_sm()
+                                .hover(|s| s.bg(theme.secondary_hover))
+                                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(t("Resolve the conflicts in the list of all changes")).build(window, cx))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_all_changes(false, None, window, cx)))
                                 .text_color(theme.danger)
                                 .child(Icon::new(IconName::TriangleAlert).xsmall())
                                 .child(tn(conflicts as u64, "{n} conflict", "{n} conflicts", &[])),
@@ -2177,7 +2186,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &git_panel::Commit, window, cx| this.git_commit(window, cx)))
             .on_action(cx.listener(|this, _: &git_panel::StageAll, window, cx| this.git_stage_all(window, cx)))
             .on_action(cx.listener(|this, _: &git_panel::ShowAllChanges, window, cx| {
-                this.open_all_changes(false, window, cx)
+                this.open_all_changes(false, None, window, cx)
             }))
             .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| {
                 this.palette = None;
@@ -2812,6 +2821,78 @@ mod tests {
         click(cx, "changes-all".into());
         assert!(staged().contains("+fresh"));
         assert_eq!(view.read_with(cx, |v, _| v.names()), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn merge_conflicts_are_resolved_with_buttons(cx: &mut TestAppContext) {
+        use std::process::Command;
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = project_dir("conflicts");
+        let git = |args: &[&str]| Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success();
+        assert!(git(&["init", "-q", "-b", "main"]));
+        for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
+            assert!(git(&["config", key, value]));
+        }
+        let lines: String = (1..=12).map(|n| format!("line {n}\n")).collect();
+        let a = repo.join("a.txt");
+        std::fs::write(&a, &lines).unwrap();
+        assert!(git(&["add", "-A"]) && git(&["commit", "-q", "-m", "First"]));
+        assert!(git(&["checkout", "-q", "-b", "feature"]));
+        std::fs::write(&a, lines.replace("line 2\n", "feature 2\n").replace("line 11\n", "feature 11\n")).unwrap();
+        assert!(git(&["commit", "-q", "-am", "Feature"]));
+        assert!(git(&["checkout", "-q", "main"]));
+        std::fs::write(&a, lines.replace("line 2\n", "main 2\n").replace("line 11\n", "main 11\n")).unwrap();
+        assert!(git(&["commit", "-q", "-am", "Main"]));
+        assert!(!git(&["merge", "-q", "feature"]));
+        let text = || std::fs::read_to_string(&a).unwrap();
+        let unmerged = || {
+            let out = Command::new("git").arg("-C").arg(&repo).args(["diff", "--name-only", "--diff-filter=U"]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let f = open(cx, "conflicts");
+        press(cx, f.window, &["ctrl-shift-a"]);
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let view = area.read_with(cx, |a, _| a.active_changes()).expect("the tab of all changes");
+        let settled = |cx: &mut TestAppContext| {
+            wait_until(cx, "the changes to be read", |cx| view.read_with(cx, |v, _| !v.is_busy()));
+        };
+        let click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+            cx.update_window(f.window, |_, window, cx| window.click(id, cx)).unwrap();
+            settled(cx);
+        };
+        settled(cx);
+        assert_eq!(view.read_with(cx, |v, _| v.conflicts()), [("a.txt".to_string(), 2)]);
+        assert_eq!(view.read_with(cx, |v, _| v.note().map(str::to_string)), None);
+
+        // The first conflict takes the incoming side; the file stays unmerged.
+        click(cx, ("accept-incoming", 0usize).into());
+        assert!(text().contains("feature 2\n") && !text().contains("main 2\n"), "{}", text());
+        assert_eq!(view.read_with(cx, |v, _| v.conflicts()), [("a.txt".to_string(), 1)]);
+        assert_eq!(unmerged(), "a.txt");
+
+        // The last one keeps both; the file goes into the index and leaves the list.
+        click(cx, ("accept-both", 0usize).into());
+        assert!(text().contains("main 11\nfeature 11\n") && !text().contains("<<<<<<<"), "{}", text());
+        assert_eq!(unmerged(), "");
+        assert!(view.read_with(cx, |v, _| v.conflicts()).is_empty());
+        assert_eq!(view.read_with(cx, |v, _| v.error().map(str::to_string)), None);
+
+        // Undo makes it a conflict again.
+        click(cx, "changes-undo".into());
+        assert_eq!(unmerged(), "a.txt");
+        assert_eq!(view.read_with(cx, |v, _| v.conflicts()), [("a.txt".to_string(), 1)]);
+
+        // Markers taken out by hand: the file is marked resolved with a button.
+        std::fs::write(&a, lines.replace("line 2\n", "feature 2\n")).unwrap();
+        view.update(cx, |v, cx| v.reload(cx));
+        settled(cx);
+        assert_eq!(view.read_with(cx, |v, _| v.conflicts()), [("a.txt".to_string(), 0)]);
+        click(cx, ("changes-mark-resolved", 0usize).into());
+        assert_eq!(unmerged(), "");
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

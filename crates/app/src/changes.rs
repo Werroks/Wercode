@@ -10,11 +10,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::diff::{Diff, DiffAnnotation, DiffFile, DiffFileStatus, DiffLinePosition, DiffSide, DiffState};
+use gpui_kit::component::diff::{
+    Diff, DiffAnnotation, DiffConflictResolution, DiffEvent, DiffFile, DiffFileStatus, DiffLinePosition, DiffSide, DiffState,
+};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wercode_core::changes::{self, Changes, FilePatch, Line, Side, Undo};
+use wercode_core::changes::{self, Changes, FilePatch, Keep, Line, Side, Undo};
 use wercode_core::i18n::{t, tf, tn};
 use wercode_core::{document, git};
 
@@ -36,6 +38,8 @@ struct Landing {
     /// The last line of that hunk goes to the top instead of its first,
     /// when the hunk is still there.
     at_end: bool,
+    /// A file with merge conflicts; `index` counts among those.
+    conflict: bool,
 }
 
 /// Something the list drew in the last frame, top first.
@@ -43,6 +47,7 @@ struct Landing {
 enum Seen {
     Header(usize),
     Footer(usize, usize),
+    Conflict(usize),
 }
 
 /// What a button does.
@@ -53,9 +58,21 @@ enum Act {
     Discard,
 }
 
-/// The files as the list shows them.
+/// A file with merge conflicts, as the list shows it.
+struct Conflict {
+    path: PathBuf,
+    name: SharedString,
+    /// The text the list was made from.
+    text: String,
+    /// Conflicts left in it.
+    left: usize,
+}
+
+/// The files as the list shows them: those with merge conflicts first.
 #[derive(Default)]
 struct Shown {
+    conflicts: Vec<Conflict>,
+    conflict_by_name: HashMap<SharedString, usize>,
     patches: Vec<FilePatch>,
     /// The list's name for each file, in the same order.
     names: Vec<SharedString>,
@@ -74,6 +91,8 @@ pub struct ChangesView {
     totals: (usize, usize, usize),
     /// Files git listed that the list could not show.
     skipped: usize,
+    /// Files with merge conflicts the list could not show.
+    unshown_conflicts: usize,
     /// What to say instead of the list: reading, nothing to show, or an error.
     note: Option<String>,
     /// What went wrong with the last button.
@@ -87,6 +106,7 @@ pub struct ChangesView {
     /// Another read was asked for while one was running.
     again: bool,
     task: Option<Task<()>>,
+    _subscription: Subscription,
 }
 
 impl EventEmitter<ChangesEvent> for ChangesView {}
@@ -110,6 +130,12 @@ fn key(file: usize, hunk: usize) -> usize {
 impl ChangesView {
     pub fn new(root: PathBuf, side: Side, cx: &mut Context<Self>) -> Self {
         let state = cx.new(|cx| DiffState::new([], cx));
+        let subscription = cx.subscribe(&state, |this, state, event: &DiffEvent, cx| {
+            if let DiffEvent::ConflictResolved(name, ix) = event {
+                let chosen = state.read(cx).conflict_resolution(name, *ix);
+                this.resolve(name, *ix, chosen, cx);
+            }
+        });
         let mut this = Self {
             root,
             side,
@@ -118,6 +144,7 @@ impl ChangesView {
             shown: Rc::default(),
             totals: (0, 0, 0),
             skipped: 0,
+            unshown_conflicts: 0,
             note: Some(t("Reading changes\u{2026}").into()),
             error: None,
             busy: false,
@@ -127,6 +154,7 @@ impl ChangesView {
             reading: false,
             again: false,
             task: None,
+            _subscription: subscription,
         };
         this.reload(cx);
         this
@@ -148,6 +176,20 @@ impl ChangesView {
         self.seen.borrow_mut().clear();
         self.reload(cx);
         cx.notify();
+    }
+
+    /// Scrolls to a file, now or once the list has been read.
+    pub fn reveal(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let conflict = self.shown.conflicts.iter().position(|c| c.path == path);
+        let file = self.shown.patches.iter().position(|p| p.path == path);
+        let landing =
+            Landing { path, index: conflict.or(file).unwrap_or(0), line: None, at_end: false, conflict: conflict.is_some() };
+        if conflict.is_none() && file.is_none() || self.reading {
+            self.land = Some(landing);
+            return;
+        }
+        let shown = self.shown.clone();
+        self.state.update(cx, |state, cx| land(&shown, &landing, state, cx));
     }
 
     /// Asks git for the changes again. The list is replaced only when they
@@ -194,6 +236,24 @@ impl ChangesView {
         let mut shown = Shown::default();
         let mut files = Vec::new();
         let mut skipped = 0;
+        self.unshown_conflicts = 0;
+        for conflicted in &changes.conflicts {
+            let name: SharedString = conflicted
+                .path
+                .strip_prefix(&changes.top)
+                .unwrap_or(&conflicted.path)
+                .to_string_lossy()
+                .replace('\\', "/")
+                .into();
+            let parsed = conflicted.text.as_deref().and_then(|text| DiffFile::parse_conflicts(name.clone(), text).ok());
+            let (Some(file), Some(text)) = (parsed, conflicted.text.clone()) else {
+                self.unshown_conflicts += 1;
+                continue;
+            };
+            shown.conflict_by_name.insert(name.clone(), shown.conflicts.len());
+            shown.conflicts.push(Conflict { path: conflicted.path.clone(), name, text, left: file.conflicts().len() });
+            files.push(file.with_language(document::language(&conflicted.path)));
+        }
         for patch in &changes.files {
             let text = String::from_utf8_lossy(&patch.text()).into_owned();
             let Some(file) = DiffFile::parse(&text).ok().filter(|f| f.len() == 1).and_then(|mut f| f.pop()) else {
@@ -212,7 +272,7 @@ impl ChangesView {
             shown.patches.iter().map(FilePatch::deletions).sum(),
         );
         self.skipped = skipped;
-        self.note = shown.patches.is_empty().then(|| match self.side {
+        self.note = (shown.patches.is_empty() && shown.conflicts.is_empty()).then(|| match self.side {
             Side::Unstaged => t("Nothing has changed that is not staged.").to_string(),
             Side::Staged => t("Nothing is staged.").to_string(),
         });
@@ -233,14 +293,25 @@ impl ChangesView {
     fn anchor(&self) -> Option<Landing> {
         let first = *self.seen.borrow().first()?;
         Some(match first {
-            Seen::Header(file) => {
-                Landing { path: self.shown.patches.get(file)?.path.clone(), index: file, line: None, at_end: false }
-            }
+            Seen::Header(file) => Landing {
+                path: self.shown.patches.get(file)?.path.clone(),
+                index: file,
+                line: None,
+                at_end: false,
+                conflict: false,
+            },
             Seen::Footer(file, hunk) => {
                 let patch = self.shown.patches.get(file)?;
                 let last = patch.hunks.get(hunk)?.last;
-                Landing { path: patch.path.clone(), index: file, line: Some(last), at_end: true }
+                Landing { path: patch.path.clone(), index: file, line: Some(last), at_end: true, conflict: false }
             }
+            Seen::Conflict(file) => Landing {
+                path: self.shown.conflicts.get(file)?.path.clone(),
+                index: file,
+                line: None,
+                at_end: false,
+                conflict: true,
+            },
         })
     }
 
@@ -280,7 +351,7 @@ impl ChangesView {
     fn hunk(&mut self, file: usize, hunk: usize, act: Act, cx: &mut Context<Self>) {
         let Some(patch) = self.shown.patches.get(file).cloned() else { return };
         let Some(line) = patch.hunks.get(hunk).map(|h| h.first) else { return };
-        let landing = Landing { path: patch.path.clone(), index: file, line: Some(line), at_end: false };
+        let landing = Landing { path: patch.path.clone(), index: file, line: Some(line), at_end: false, conflict: false };
         self.run(
             Some(landing),
             move |top| match act {
@@ -294,7 +365,7 @@ impl ChangesView {
 
     fn file(&mut self, file: usize, act: Act, window: &mut Window, cx: &mut Context<Self>) {
         let Some(patch) = self.shown.patches.get(file).cloned() else { return };
-        let landing = Landing { path: patch.path.clone(), index: file, line: None, at_end: false };
+        let landing = Landing { path: patch.path.clone(), index: file, line: None, at_end: false, conflict: false };
         // Without lines to put back (a binary file), a discard cannot be undone: ask first.
         if act == Act::Discard && !patch.untracked && patch.hunks.is_empty() {
             let name = patch.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -339,6 +410,35 @@ impl ChangesView {
         );
     }
 
+    /// Keeps the side of a merge conflict its buttons chose, in the file
+    /// itself; the last one puts the file into the index.
+    fn resolve(&mut self, name: &SharedString, ix: usize, chosen: Option<DiffConflictResolution>, cx: &mut Context<Self>) {
+        let Some(&file) = self.shown.conflict_by_name.get(name) else { return };
+        let keep = match chosen {
+            Some(DiffConflictResolution::Current) => Keep::Ours,
+            Some(DiffConflictResolution::Incoming) => Keep::Theirs,
+            Some(_) => Keep::Both,
+            None => return,
+        };
+        if self.busy {
+            // One change to the file at a time: this choice waits for the list to be read again.
+            self.state.update(cx, |state, cx| state.resolve_conflict(name, ix, None, cx));
+            return;
+        }
+        let conflict = &self.shown.conflicts[file];
+        let (path, text) = (conflict.path.clone(), conflict.text.clone());
+        let landing = Landing { path: path.clone(), index: file, line: None, at_end: false, conflict: true };
+        self.run(Some(landing), move |top| changes::resolve_conflict(top, &path, &text, ix, keep), cx);
+    }
+
+    /// Puts a file whose conflict markers are all gone into the index.
+    fn mark_resolved(&mut self, file: usize, cx: &mut Context<Self>) {
+        let Some(conflict) = self.shown.conflicts.get(file) else { return };
+        let path = conflict.path.clone();
+        let landing = Landing { path: path.clone(), index: file, line: None, at_end: false, conflict: true };
+        self.run(Some(landing), move |top| git::stage(top, &[path]).map(|()| None), cx);
+    }
+
     fn undo(&mut self, cx: &mut Context<Self>) {
         let Some(undo) = self.undo.clone() else { return };
         self.run(None, move |top| changes::undo(top, &undo).map(|()| None), cx);
@@ -371,6 +471,8 @@ impl ChangesView {
             ))
         };
         let (files, plus, minus) = self.totals;
+        let conflicts = self.shown.conflicts.len();
+        let danger = theme.danger;
         let busy = self.busy;
         h_flex()
             .flex_none()
@@ -390,6 +492,14 @@ impl ChangesView {
                     .child(div().text_sm().text_color(added).child(format!("+{plus}")))
                     .child(div().text_sm().text_color(removed).child(format!("\u{2212}{minus}")))
             })
+            .when(conflicts > 0, |d| {
+                d.child(
+                    div()
+                        .text_sm()
+                        .text_color(danger)
+                        .child(tn(conflicts as u64, "{n} file with conflicts", "{n} files with conflicts", &[])),
+                )
+            })
             .child(div().flex_1())
             .when(self.undo.is_some(), |d| {
                 d.child(
@@ -398,7 +508,7 @@ impl ChangesView {
                         .small()
                         .icon(IconName::Undo)
                         .label(t("Undo"))
-                        .tooltip(t("Bring back what was just thrown away"))
+                        .tooltip(t("Take back the last change made here"))
                         .disabled(busy)
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.undo(cx))),
                 )
@@ -424,7 +534,7 @@ impl ChangesView {
     fn render_notes(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let theme = cx.theme();
         let read = self.read.as_deref();
-        let conflicts = read.map_or(0, |r| r.conflicts);
+        let conflicts = self.unshown_conflicts;
         let hidden = read.map_or(0, |r| r.hidden);
         let mut notes: Vec<(String, bool)> = Vec::new();
         if let Some(error) = &self.error {
@@ -434,8 +544,8 @@ impl ChangesView {
             notes.push((
                 tn(
                     conflicts as u64,
-                    "{n} file with merge conflicts is not shown; resolve it in the editor.",
-                    "{n} files with merge conflicts are not shown; resolve them in the editor.",
+                    "{n} file with merge conflicts cannot be shown here; resolve it in the editor.",
+                    "{n} files with merge conflicts cannot be shown here; resolve them in the editor.",
                     &[],
                 ),
                 false,
@@ -471,6 +581,10 @@ impl ChangesView {
         let header = {
             let (this, shown, seen) = (this.clone(), shown.clone(), seen.clone());
             move |file: &DiffFile, _: &mut Window, cx: &mut App| {
+                if let Some(&ix) = shown.conflict_by_name.get(file.path()) {
+                    seen.borrow_mut().push(Seen::Conflict(ix));
+                    return conflict_header(&this, &shown.conflicts[ix], ix, busy, cx);
+                }
                 let Some(&ix) = shown.by_name.get(file.path()) else { return h_flex() };
                 seen.borrow_mut().push(Seen::Header(ix));
                 let patch = &shown.patches[ix];
@@ -550,8 +664,60 @@ impl ChangesView {
     }
 }
 
+/// The buttons on the header of a file with merge conflicts.
+fn conflict_header(this: &WeakEntity<ChangesView>, conflict: &Conflict, ix: usize, busy: bool, cx: &App) -> Div {
+    let muted = cx.theme().muted_foreground;
+    let (open, mark) = (this.clone(), this.clone());
+    h_flex()
+        .gap_0p5()
+        .child(div().text_xs().text_color(muted).child(if conflict.left == 0 {
+            t("No conflict markers are left").to_string()
+        } else {
+            tn(conflict.left as u64, "{n} conflict left", "{n} conflicts left", &[])
+        }))
+        .child(Button::new(("changes-open-conflict", ix)).ghost().xsmall().icon(IconName::ExternalLink).tooltip(t("Open File")).on_click(
+            move |_: &ClickEvent, _, cx| {
+                let _ = open.update(cx, |this, cx| {
+                    let conflict = &this.shown.conflicts[ix];
+                    let line = conflict.text.lines().position(|l| l.starts_with("<<<<<<<")).map(|n| n as u32 + 1);
+                    cx.emit(ChangesEvent::Open { path: conflict.path.clone(), line });
+                });
+            },
+        ))
+        .when(conflict.left == 0, |d| {
+            d.child(
+                Button::new(("changes-mark-resolved", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .label(t("Mark Resolved"))
+                    .tooltip(t("Put the file into the index, which tells git the conflict is over"))
+                    .disabled(busy)
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        let _ = mark.update(cx, |this, cx| this.mark_resolved(ix, cx));
+                    }),
+            )
+        })
+}
+
 /// Scrolls the list to where `landing` says, in the files as they are now.
 fn land(shown: &Shown, landing: &Landing, state: &mut DiffState, cx: &mut Context<DiffState>) {
+    if let Some(file) = shown.conflicts.iter().position(|c| c.path == landing.path) {
+        state.scroll_to_file(&shown.conflicts[file].name, cx);
+        return;
+    }
+    if landing.conflict {
+        // Resolved: the next file with conflicts, or the first other file.
+        match shown.conflicts.get(landing.index.min(shown.conflicts.len().saturating_sub(1))) {
+            Some(next) => state.scroll_to_file(&next.name, cx),
+            None => {
+                if let Some(first) = shown.names.first() {
+                    state.scroll_to_file(first, cx);
+                }
+            }
+        }
+        return;
+    }
     if shown.patches.is_empty() {
         return;
     }
@@ -613,6 +779,11 @@ impl ChangesView {
     /// Hunks of each file shown.
     pub fn hunks(&self) -> Vec<usize> {
         self.shown.patches.iter().map(|p| p.hunks.len()).collect()
+    }
+
+    /// Files with merge conflicts shown, by name, with the conflicts left in each.
+    pub fn conflicts(&self) -> Vec<(String, usize)> {
+        self.shown.conflicts.iter().map(|c| (c.name.to_string(), c.left)).collect()
     }
 
     pub fn note(&self) -> Option<&str> {

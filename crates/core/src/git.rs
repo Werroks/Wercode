@@ -205,7 +205,7 @@ pub fn parse(root: &Path, text: &str) -> RepoStatus {
 
 /// Runs a git command that changes the repository and returns what git said
 /// when it failed. Blocks; call it off the UI thread.
-fn run(dir: &Path, args: &[&str], paths: &[PathBuf]) -> Result<(), String> {
+pub(crate) fn run(dir: &Path, args: &[&str], paths: &[PathBuf]) -> Result<(), String> {
     let mut cmd = git(dir);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     // Never wait for an answer nobody can type: no editor, no password prompt.

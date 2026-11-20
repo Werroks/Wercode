@@ -291,7 +291,6 @@
 "Wercode is free and open source. If it saves you time and you want to help it grow, you can send USDT on the TRON network (TRC-20) to this address:" = "Wercode бесплатный, с открытым кодом. Если он экономит вам время и вы хотите помочь ему развиваться, можно отправить USDT в сети TRON (TRC-20) на этот адрес:"
 "All Changes" = "Все изменения"
 "All Staged Changes" = "Все изменения в индексе"
-"Bring back what was just thrown away" = "Вернуть то, что только что отменено"
 "Could not read the changes: {error}" = "Не удалось прочитать изменения: {error}"
 "Git: Show All Changes" = "Git: показать все изменения"
 "Not Staged" = "Не в индексе"
@@ -309,7 +308,6 @@
 "{name} exists again; it was left as it is." = "{name} снова существует; файл оставлен как есть."
 "{n} changed files" = { one = "{n} изменённый файл", few = "{n} изменённых файла", many = "{n} изменённых файлов" }
 "{n} files could not be shown." = { one = "{n} файл не удалось показать.", few = "{n} файла не удалось показать.", many = "{n} файлов не удалось показать." }
-"{n} files with merge conflicts are not shown; resolve them in the editor." = { one = "{n} файл с конфликтом слияния не показан; разрешите конфликт в редакторе.", few = "{n} файла с конфликтами слияния не показаны; разрешите конфликты в редакторе.", many = "{n} файлов с конфликтами слияния не показаны; разрешите конфликты в редакторе." }
 "{n} more new files are not shown." = { one = "Ещё {n} новый файл не показан.", few = "Ещё {n} новых файла не показаны.", many = "Ещё {n} новых файлов не показаны." }
 "Get the Installer" = "Скачать установщик"
 "My Scheme {n}" = "Моя схема {n}"
@@ -333,3 +331,13 @@
 "The language server that offered this has stopped." = "Языковой сервер, который это предложил, остановился."
 "Type hints" = "Подсказки типов"
 "Type the name of a function, type or variable…" = "Введите имя функции, типа или переменной…"
+"The file changed on disk; look at it again and choose once more." = "Файл изменился на диске; посмотрите на него ещё раз и выберите снова."
+"This conflict is gone." = "Этого конфликта уже нет."
+"{n} files with conflicts" = { one = "{n} файл с конфликтами", few = "{n} файла с конфликтами", many = "{n} файлов с конфликтами" }
+"Take back the last change made here" = "Отменить последнее действие здесь"
+"{n} files with merge conflicts cannot be shown here; resolve them in the editor." = { one = "{n} файл с конфликтом слияния нельзя показать здесь; разрешите конфликт в редакторе.", few = "{n} файла с конфликтами слияния нельзя показать здесь; разрешите конфликты в редакторе.", many = "{n} файлов с конфликтами слияния нельзя показать здесь; разрешите конфликты в редакторе." }
+"No conflict markers are left" = "Меток конфликта не осталось"
+"{n} conflicts left" = { one = "остался {n} конфликт", few = "осталось {n} конфликта", many = "осталось {n} конфликтов" }
+"Mark Resolved" = "Отметить решённым"
+"Put the file into the index, which tells git the conflict is over" = "Добавить файл в индекс — так git узнаёт, что конфликт решён"
+"Resolve the conflicts in the list of all changes" = "Решить конфликты в списке всех изменений"

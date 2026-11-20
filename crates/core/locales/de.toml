@@ -291,7 +291,6 @@
 "Wercode is free and open source. If it saves you time and you want to help it grow, you can send USDT on the TRON network (TRC-20) to this address:" = "Wercode ist kostenlos und quelloffen. Wenn es Ihnen Zeit spart und Sie seine Entwicklung unterstützen möchten, können Sie USDT im TRON-Netzwerk (TRC-20) an diese Adresse senden:"
 "All Changes" = "Alle Änderungen"
 "All Staged Changes" = "Alle bereitgestellten Änderungen"
-"Bring back what was just thrown away" = "Gerade Verworfenes zurückholen"
 "Could not read the changes: {error}" = "Die Änderungen konnten nicht gelesen werden: {error}"
 "Git: Show All Changes" = "Git: Alle Änderungen anzeigen"
 "Not Staged" = "Nicht bereitgestellt"
@@ -309,7 +308,6 @@
 "{name} exists again; it was left as it is." = "{name} existiert wieder; die Datei bleibt, wie sie ist."
 "{n} changed files" = { one = "{n} geänderte Datei", other = "{n} geänderte Dateien" }
 "{n} files could not be shown." = { one = "{n} Datei konnte nicht angezeigt werden.", other = "{n} Dateien konnten nicht angezeigt werden." }
-"{n} files with merge conflicts are not shown; resolve them in the editor." = { one = "{n} Datei mit Merge-Konflikten wird nicht angezeigt; bitte im Editor auflösen.", other = "{n} Dateien mit Merge-Konflikten werden nicht angezeigt; bitte im Editor auflösen." }
 "{n} more new files are not shown." = { one = "{n} weitere neue Datei wird nicht angezeigt.", other = "{n} weitere neue Dateien werden nicht angezeigt." }
 "Get the Installer" = "Installationsprogramm herunterladen"
 "My Scheme {n}" = "Mein Schema {n}"
@@ -333,3 +331,13 @@
 "The language server that offered this has stopped." = "Der Sprachserver, der das angeboten hat, wurde beendet."
 "Type hints" = "Typhinweise"
 "Type the name of a function, type or variable…" = "Name einer Funktion, eines Typs oder einer Variable eingeben…"
+"The file changed on disk; look at it again and choose once more." = "Die Datei hat sich auf der Festplatte geändert; sehen Sie sie erneut an und wählen Sie noch einmal."
+"This conflict is gone." = "Diesen Konflikt gibt es nicht mehr."
+"{n} files with conflicts" = { one = "{n} Datei mit Konflikten", other = "{n} Dateien mit Konflikten" }
+"Take back the last change made here" = "Die letzte Änderung hier zurücknehmen"
+"{n} files with merge conflicts cannot be shown here; resolve them in the editor." = { one = "{n} Datei mit Merge-Konflikten kann hier nicht angezeigt werden; bitte im Editor auflösen.", other = "{n} Dateien mit Merge-Konflikten können hier nicht angezeigt werden; bitte im Editor auflösen." }
+"No conflict markers are left" = "Keine Konfliktmarkierungen mehr"
+"{n} conflicts left" = { one = "{n} Konflikt übrig", other = "{n} Konflikte übrig" }
+"Mark Resolved" = "Als gelöst markieren"
+"Put the file into the index, which tells git the conflict is over" = "Die Datei in den Index aufnehmen; so erfährt git, dass der Konflikt gelöst ist"
+"Resolve the conflicts in the list of all changes" = "Die Konflikte in der Liste aller Änderungen lösen"

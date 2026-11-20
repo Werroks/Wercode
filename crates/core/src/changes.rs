@@ -109,10 +109,20 @@ pub struct Changes {
     /// The top folder of the repository, where git runs.
     pub top: PathBuf,
     pub files: Vec<FilePatch>,
-    /// Files with merge conflicts; they are left out.
-    pub conflicts: usize,
+    /// Files git could not merge, on the side of the folder only; they are
+    /// not among `files`.
+    pub conflicts: Vec<Conflicted>,
     /// New files past the limit; they are left out.
     pub hidden: usize,
+}
+
+/// A file git could not merge, as it is in the folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflicted {
+    /// Absolute.
+    pub path: PathBuf,
+    /// Its text with the conflict markers; `None` when it is not text or too large.
+    pub text: Option<String>,
 }
 
 /// Reads the changes of the repository containing `dir`. Blocks; call it off
@@ -131,12 +141,142 @@ pub fn read(dir: &Path, side: Side) -> Result<Changes, String> {
     if !out.status.success() {
         return Err(t("git could not list the changes.").into());
     }
-    let (files, conflicts) = parse(&top, &out.stdout);
-    let mut changes = Changes { top, files, conflicts, hidden: 0 };
+    let (files, _) = parse(&top, &out.stdout);
+    let mut changes = Changes { top, files, conflicts: Vec::new(), hidden: 0 };
     if side == Side::Unstaged {
+        add_conflicts(&mut changes);
         add_untracked(&mut changes);
     }
     Ok(changes)
+}
+
+/// The files git could not merge, with their text.
+fn add_conflicts(changes: &mut Changes) {
+    let listed = git::output(git::git(&changes.top).args(["diff", "--name-only", "--diff-filter=U", "-z"]));
+    let names = listed.map(|out| String::from_utf8_lossy(&out).into_owned()).unwrap_or_default();
+    for name in names.split('\0').filter(|n| !n.is_empty()) {
+        let path = changes.top.join(name);
+        let text = std::fs::metadata(&path)
+            .ok()
+            .filter(|m| m.is_file() && m.len() <= MAX_NEW_FILE)
+            .and_then(|_| std::fs::read(&path).ok())
+            .filter(|bytes| !bytes.iter().take(8000).any(|b| *b == 0))
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+        changes.conflicts.push(Conflicted { path, text });
+    }
+}
+
+/// Which side of a merge conflict stays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    /// The branch the merge happens on, between `<<<<<<<` and `=======`.
+    Ours,
+    /// The change coming in, between `=======` and `>>>>>>>`.
+    Theirs,
+    /// Ours, then theirs.
+    Both,
+}
+
+/// One conflict in a text, as indices of its lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Region {
+    /// From the `<<<<<<<` line to the `>>>>>>>` line, both included.
+    whole: std::ops::Range<usize>,
+    ours: std::ops::Range<usize>,
+    theirs: std::ops::Range<usize>,
+}
+
+/// Whether a line is a conflict marker: seven of the same sign, then a space
+/// and a label, or nothing.
+fn marker(line: &str, sign: &str) -> bool {
+    let content = line.trim_end_matches(['\n', '\r']);
+    content.strip_prefix(sign).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+}
+
+/// The conflicts in a text, in order, read the way git writes them (with or
+/// without the `|||||||` part of the common ancestor). `None` when the
+/// markers do not make whole conflicts.
+fn regions(lines: &[&str]) -> Option<Vec<Region>> {
+    #[derive(PartialEq)]
+    enum Part {
+        Ours,
+        Base,
+        Theirs,
+    }
+    let mut found = Vec::new();
+    let mut open: Option<(Part, Region)> = None;
+    for (ix, line) in lines.iter().enumerate() {
+        let (opening, base, separator, closing) =
+            (marker(line, "<<<<<<<"), marker(line, "|||||||"), marker(line, "======="), marker(line, ">>>>>>>"));
+        match open.as_mut() {
+            None if opening => open = Some((Part::Ours, Region { whole: ix..ix, ours: ix + 1..ix + 1, theirs: ix + 1..ix + 1 })),
+            None if base || closing => return None,
+            None => {}
+            Some(_) if opening => return None,
+            Some((part, region)) => match part {
+                Part::Ours if base => {
+                    region.ours.end = ix;
+                    *part = Part::Base;
+                }
+                Part::Ours | Part::Base if separator => {
+                    if *part == Part::Ours {
+                        region.ours.end = ix;
+                    }
+                    region.theirs = ix + 1..ix + 1;
+                    *part = Part::Theirs;
+                }
+                Part::Theirs if closing => {
+                    region.theirs.end = ix;
+                    region.whole.end = ix + 1;
+                    found.extend(open.take().map(|(_, region)| region));
+                }
+                _ => {}
+            },
+        }
+    }
+    open.is_none().then_some(found)
+}
+
+/// How many conflicts a text has; `None` when its markers are broken.
+pub fn conflict_count(text: &str) -> Option<usize> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    regions(&lines).map(|found| found.len())
+}
+
+/// The text with conflict `ix` replaced by the side it keeps.
+pub fn resolve(text: &str, ix: usize, keep: Keep) -> Option<String> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let region = regions(&lines)?.into_iter().nth(ix)?;
+    let kept = match keep {
+        Keep::Ours => vec![region.ours.clone()],
+        Keep::Theirs => vec![region.theirs.clone()],
+        Keep::Both => vec![region.ours.clone(), region.theirs.clone()],
+    };
+    let mut out = String::with_capacity(text.len());
+    lines[..region.whole.start].iter().for_each(|l| out.push_str(l));
+    // A marker follows every line of a part, so each has its line ending.
+    for range in kept {
+        lines[range].iter().for_each(|l| out.push_str(l));
+    }
+    lines[region.whole.end..].iter().for_each(|l| out.push_str(l));
+    Some(out)
+}
+
+/// Keeps one side of conflict `ix` in a file whose text was `seen`. Once
+/// no conflict is left the file goes into the index, which is how git
+/// learns it is resolved.
+pub fn resolve_conflict(top: &Path, path: &Path, seen: &str, ix: usize, keep: Keep) -> Result<Option<Undo>, String> {
+    let now = std::fs::read(path).map_err(|e| e.to_string())?;
+    if now != seen.as_bytes() {
+        return Err(t("The file changed on disk; look at it again and choose once more.").into());
+    }
+    let text = resolve(seen, ix, keep).ok_or_else(|| t("This conflict is gone.").to_string())?;
+    std::fs::write(path, &text).map_err(|e| e.to_string())?;
+    let staged = conflict_count(&text) == Some(0);
+    if staged {
+        git::stage(top, &[path.to_path_buf()])?;
+    }
+    Ok(Some(Undo::Conflict { path: path.to_path_buf(), text: seen.to_string(), staged }))
 }
 
 /// The files git does not track yet and does not ignore, shown as all new.
@@ -443,6 +583,9 @@ pub enum Undo {
     Patch(Vec<u8>),
     /// A new file that went to the trash, with what was in it.
     File { path: PathBuf, bytes: Vec<u8> },
+    /// A conflict that was resolved: the text before, and whether that put
+    /// the file into the index.
+    Conflict { path: PathBuf, text: String, staged: bool },
 }
 
 /// Puts one hunk into the index. A new file goes in whole.
@@ -505,6 +648,13 @@ pub fn undo(top: &Path, undo: &Undo) -> Result<(), String> {
                 let _ = std::fs::create_dir_all(parent);
             }
             std::fs::write(path, bytes).map_err(|e| e.to_string())
+        }
+        Undo::Conflict { path, text, staged } => {
+            if *staged {
+                // Git kept the sides when the file was added; this makes it unmerged again.
+                git::run(top, &["update-index", "--unresolve"], std::slice::from_ref(path))?;
+            }
+            std::fs::write(path, text).map_err(|e| e.to_string())
         }
     }
 }
@@ -698,6 +848,81 @@ mod tests {
         unstage_hunk(&staged.top, &staged.files[0], 0).unwrap();
         assert!(read(&fresh, Side::Staged).unwrap().files.is_empty());
         assert!(read(&fresh, Side::Unstaged).unwrap().files[0].untracked);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_conflict_keeps_the_side_chosen() {
+        let two = "a\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\nb\r\n<<<<<<< HEAD\nx\n||||||| base\nw\n=======\ny\n>>>>>>> feature";
+        assert_eq!(conflict_count(two), Some(2));
+        assert_eq!(resolve(two, 0, Keep::Ours).unwrap(), two.replace("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\n", "ours\n"));
+        assert_eq!(resolve(two, 0, Keep::Theirs).unwrap(), two.replace("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\n", "theirs\n"));
+        // The ancestor's lines go; the file's last marker had no line ending.
+        assert_eq!(resolve(two, 1, Keep::Both).unwrap(), "a\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\nb\r\nx\ny\n");
+        assert_eq!(conflict_count(&resolve(two, 1, Keep::Theirs).unwrap()), Some(1));
+        assert_eq!(resolve(two, 2, Keep::Ours), None);
+        // Empty sides, and a separator line outside a conflict is plain text.
+        assert_eq!(resolve("<<<<<<< a\n=======\nnew\n>>>>>>> b\n", 0, Keep::Ours).unwrap(), "");
+        assert_eq!(conflict_count("title\n=======\n"), Some(0));
+        // Broken markers are not taken apart.
+        for broken in ["<<<<<<< a\nx\n", ">>>>>>> b\n", "<<<<<<< a\n<<<<<<< b\n", "<<<<<<<x\n"] {
+            assert_ne!(conflict_count(broken), Some(1), "{broken:?}");
+        }
+    }
+
+    #[test]
+    fn conflicts_are_resolved_staged_and_brought_back() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("wercode-conflicts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]);
+        for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
+            git(&dir, &["config", key, value]);
+        }
+        let file = dir.join("a.txt");
+        let lines: String = (1..=12).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&file, &lines).unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "first"]);
+        git(&dir, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(&file, lines.replace("line 2\n", "feature 2\n").replace("line 11\n", "feature 11\n")).unwrap();
+        git(&dir, &["commit", "-q", "-am", "feature"]);
+        git(&dir, &["checkout", "-q", "main"]);
+        std::fs::write(&file, lines.replace("line 2\n", "main 2\n").replace("line 11\n", "main 11\n")).unwrap();
+        git(&dir, &["commit", "-q", "-am", "main"]);
+        let merge = Command::new("git").arg("-C").arg(&dir).args(["merge", "-q", "feature"]).output().unwrap();
+        assert!(!merge.status.success());
+
+        let changes = read(&dir, Side::Unstaged).unwrap();
+        assert!(changes.files.is_empty());
+        assert_eq!(changes.conflicts.len(), 1);
+        let seen = changes.conflicts[0].text.clone().unwrap();
+        assert_eq!(conflict_count(&seen), Some(2));
+
+        // One of two: the file is written, git still calls it unmerged.
+        let undo_first = resolve_conflict(&changes.top, &file, &seen, 0, Keep::Theirs).unwrap().unwrap();
+        assert!(text(&file).contains("feature 2\n") && !text(&file).contains("main 2\n"));
+        assert!(matches!(undo_first, Undo::Conflict { staged: false, .. }));
+        assert_eq!(read(&dir, Side::Unstaged).unwrap().conflicts.len(), 1);
+        // What was seen must still be what is on disk.
+        assert!(resolve_conflict(&changes.top, &file, &seen, 0, Keep::Ours).is_err());
+
+        // The last one: the file goes into the index and the conflict is over.
+        let now = read(&dir, Side::Unstaged).unwrap().conflicts[0].text.clone().unwrap();
+        let undo_last = resolve_conflict(&changes.top, &file, &now, 0, Keep::Both).unwrap().unwrap();
+        assert!(text(&file).contains("main 11\nfeature 11\n"));
+        assert!(read(&dir, Side::Unstaged).unwrap().conflicts.is_empty());
+        assert_eq!(read(&dir, Side::Staged).unwrap().files.len(), 1);
+
+        // Undo makes it a conflict again, with the text it had.
+        undo(&changes.top, &undo_last).unwrap();
+        let back = read(&dir, Side::Unstaged).unwrap();
+        assert_eq!(back.conflicts.len(), 1);
+        assert_eq!(back.conflicts[0].text.as_deref(), Some(now.as_str()));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

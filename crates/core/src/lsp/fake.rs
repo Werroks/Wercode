@@ -6,6 +6,12 @@
 //! Asked about a word, it says which word it is, and that the word is
 //! defined where the file first has it. It offers the words of the file to
 //! complete with, and formats by cutting the spaces at the ends of lines.
+//!
+//! It offers to replace `bad` with `good` (a quick fix with its change), to
+//! shout the line (a change sent only when asked for) and to say hi (a
+//! command, after which it asks the editor to put `hi` at the top). It
+//! renames a word wherever the open files have it, lists `fn` and `struct`
+//! lines as symbols, and notes `: i32` after the name in a `let` line.
 
 use std::collections::HashMap;
 use std::io;
@@ -73,6 +79,38 @@ fn range(number: usize, line: &str, start: usize, end: usize) -> Value {
     json!({"start": {"line": number, "character": units(start)}, "end": {"line": number, "character": units(end)}})
 }
 
+/// `fn` and `struct` lines as symbols; `fn` lines indented under a
+/// `struct` line are inside it.
+fn symbols(text: &str) -> Value {
+    let mut top: Vec<Value> = Vec::new();
+    for (number, line) in text.split('\n').enumerate() {
+        let trimmed = line.trim_start();
+        let (kind, rest) = match (trimmed.strip_prefix("fn "), trimmed.strip_prefix("struct ")) {
+            (Some(rest), _) => (12, rest),
+            (_, Some(rest)) => (23, rest),
+            _ => continue,
+        };
+        let name = rest.split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or_default();
+        let at = line.find(name).unwrap_or(0);
+        let symbol = json!({
+            "name": name,
+            "kind": kind,
+            "range": range(number, line, 0, line.len()),
+            "selectionRange": range(number, line, at, at + name.len()),
+            "children": [],
+        });
+        let nested = line.starts_with(' ') && top.last().is_some_and(|last| last["kind"] == 23);
+        match top.last_mut() {
+            Some(parent) if nested => {
+                parent["children"].as_array_mut().unwrap().push(symbol);
+                parent["range"]["end"] = json!({"line": number, "character": line.encode_utf16().count()});
+            }
+            _ => top.push(symbol),
+        }
+    }
+    Value::Array(top)
+}
+
 /// Answers on standard input and output until told to exit.
 pub fn serve() -> ! {
     let stdin = io::stdin();
@@ -90,6 +128,12 @@ pub fn serve() -> ! {
                     "definitionProvider": {"workDoneProgress": false},
                     "completionProvider": {"triggerCharacters": ["."]},
                     "documentFormattingProvider": true,
+                    "codeActionProvider": {"resolveProvider": true},
+                    "executeCommandProvider": {"commands": ["fake.hi"]},
+                    "renameProvider": true,
+                    "documentSymbolProvider": true,
+                    "workspaceSymbolProvider": true,
+                    "inlayHintProvider": true,
                 }});
                 send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
             }
@@ -158,6 +202,97 @@ pub fn serve() -> ! {
                     }
                 }
                 send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": edits}));
+            }
+            Some("textDocument/codeAction") => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+                let mut actions = Vec::new();
+                for diagnostic in params["context"]["diagnostics"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                    if diagnostic["message"] == "bad word" {
+                        let edit = json!({"changes": {uri: [{"range": diagnostic["range"], "newText": "good"}]}});
+                        actions.push(json!({"title": "Replace bad with good", "kind": "quickfix", "isPreferred": true, "edit": edit}));
+                    }
+                }
+                let line = params["range"]["start"]["line"].clone();
+                actions.push(json!({"title": "Shout the line", "kind": "refactor", "data": {"uri": uri, "line": line}}));
+                actions.push(json!({"title": "Say hi", "command": "fake.hi", "arguments": [uri]}));
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": actions}));
+            }
+            Some("codeAction/resolve") => {
+                let uri = params["data"]["uri"].as_str().unwrap_or_default();
+                let number = params["data"]["line"].as_u64().unwrap_or_default() as usize;
+                let text = texts.get(uri).map(String::as_str).unwrap_or_default();
+                let line = text.split('\n').nth(number).unwrap_or_default();
+                let mut action = params.clone();
+                let change = json!({"range": range(number, line, 0, line.len()), "newText": line.to_uppercase()});
+                action["edit"] = json!({"documentChanges": [{"textDocument": {"uri": uri, "version": null}, "edits": [change]}]});
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": action}));
+            }
+            Some("workspace/executeCommand") => {
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": null}));
+                let uri = params["arguments"][0].clone();
+                let top = json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}});
+                let edit = json!({"changes": {uri.as_str().unwrap_or_default(): [{"range": top, "newText": "hi\n"}]}});
+                send(&mut out, json!({"jsonrpc": "2.0", "id": "edit", "method": "workspace/applyEdit", "params": {"edit": edit}}));
+            }
+            Some("textDocument/rename") => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+                let text = texts.get(uri).map(String::as_str).unwrap_or_default();
+                let new_name = params["newName"].as_str().unwrap_or_default();
+                let result = match word_at(text, &params["position"]) {
+                    Some((line, start, end)) => {
+                        let word = &line[start..end];
+                        let mut changes = serde_json::Map::new();
+                        for (doc, text) in &texts {
+                            let mut edits = Vec::new();
+                            for (number, line) in text.split('\n').enumerate() {
+                                for (at, _) in line.match_indices(word) {
+                                    edits.push(json!({"range": range(number, line, at, at + word.len()), "newText": new_name}));
+                                }
+                            }
+                            if !edits.is_empty() {
+                                changes.insert(doc.clone(), Value::Array(edits));
+                            }
+                        }
+                        json!({"changes": changes})
+                    }
+                    None => Value::Null,
+                };
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            Some("textDocument/documentSymbol") => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+                let text = texts.get(uri).map(String::as_str).unwrap_or_default();
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": symbols(text)}));
+            }
+            Some("workspace/symbol") => {
+                let query = params["query"].as_str().unwrap_or_default();
+                let mut found = Vec::new();
+                for (uri, text) in &texts {
+                    for (number, line) in text.split('\n').enumerate() {
+                        if let Some(name) = line.trim_start().strip_prefix("fn ").map(|rest| rest.split('(').next().unwrap_or(rest))
+                            && name.contains(query)
+                        {
+                            let at = line.find(name).unwrap_or(0);
+                            let location = json!({"uri": uri, "range": range(number, line, at, at + name.len())});
+                            found.push(json!({"name": name, "kind": 12, "location": location}));
+                        }
+                    }
+                }
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": found}));
+            }
+            Some("textDocument/inlayHint") => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+                let text = texts.get(uri).map(String::as_str).unwrap_or_default();
+                let mut hints = Vec::new();
+                for (number, line) in text.split('\n').enumerate() {
+                    if let Some(rest) = line.trim_start().strip_prefix("let ") {
+                        let name = rest.split([' ', '=']).next().unwrap_or_default();
+                        let end = line.find(name).unwrap_or(0) + name.len();
+                        let units = line[..end].encode_utf16().count();
+                        hints.push(json!({"position": {"line": number, "character": units}, "label": [{"value": ": i32"}], "kind": 1}));
+                    }
+                }
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": hints}));
             }
             Some("exit") => std::process::exit(0),
             Some(_) if id.is_some() => send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": null})),

@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::specs::{self, Program, Spec};
-use super::{Edit, Hover, Problem, Severity, Shared, Status, Target, path_from_uri, rpc, uri_from_path};
+use super::{
+    Action, Edit, Event, FileEdits, Hint, Hover, Problem, Severity, Shared, Status, Symbol, Target, path_from_uri, rpc,
+    uri_from_path,
+};
 
 /// How long a server may take to finish after it was asked to stop.
 const STOP_WAIT: Duration = Duration::from_secs(2);
@@ -44,6 +47,20 @@ pub(super) enum Question {
     Completion(Box<dyn FnOnce(Value) + Send>),
     /// How the whole file should be laid out, indented by `tab_size` spaces.
     Format { tab_size: u32, reply: Box<dyn FnOnce(Vec<Edit>) + Send> },
+    /// What the server offers to do with the code from the place up to `end`.
+    CodeActions { end: (u32, u32), reply: Box<dyn FnOnce(Vec<Action>) + Send> },
+    /// The rest of an action the server sent without its changes.
+    Resolve { action: Value, reply: Box<dyn FnOnce(Option<Action>) + Send> },
+    /// A command of the server's, to run.
+    Execute(Value),
+    /// What renaming the thing at the place to `new_name` changes.
+    Rename { new_name: String, reply: Box<dyn FnOnce(Result<Vec<FileEdits>, String>) + Send> },
+    /// The named things in the file.
+    Symbols(Box<dyn FnOnce(Vec<Symbol>) + Send>),
+    /// The notes for lines from the place's line to `last`.
+    Hints { last: u32, reply: Box<dyn FnOnce(Vec<Hint>) + Send> },
+    /// Named things across the project whose names fit `query`.
+    ProjectSymbols { query: String, reply: Box<dyn FnOnce(Vec<Symbol>) + Send> },
 }
 
 impl Question {
@@ -53,8 +70,16 @@ impl Question {
             Question::Definition(_) => "textDocument/definition",
             Question::Completion(_) => "textDocument/completion",
             Question::Format { .. } => "textDocument/formatting",
+            Question::CodeActions { .. } => "textDocument/codeAction",
+            Question::Resolve { .. } => "codeAction/resolve",
+            Question::Execute(_) => "workspace/executeCommand",
+            Question::Rename { .. } => "textDocument/rename",
+            Question::Symbols(_) => "textDocument/documentSymbol",
+            Question::Hints { .. } => "textDocument/inlayHint",
+            Question::ProjectSymbols { .. } => "workspace/symbol",
         }
     }
+
 
     fn unanswered(self) {
         match self {
@@ -62,6 +87,13 @@ impl Question {
             Question::Definition(reply) => reply(Vec::new()),
             Question::Completion(reply) => reply(Value::Null),
             Question::Format { reply, .. } => reply(Vec::new()),
+            Question::CodeActions { reply, .. } => reply(Vec::new()),
+            Question::Resolve { reply, .. } => reply(None),
+            Question::Execute(_) => {}
+            Question::Rename { reply, .. } => reply(Ok(Vec::new())),
+            Question::Symbols(reply) => reply(Vec::new()),
+            Question::Hints { reply, .. } => reply(Vec::new()),
+            Question::ProjectSymbols { reply, .. } => reply(Vec::new()),
         }
     }
 }
@@ -303,6 +335,16 @@ struct Session {
     defines: bool,
     completes: bool,
     formats: bool,
+    acts: bool,
+    resolves: bool,
+    executes: bool,
+    renames: bool,
+    lists_symbols: bool,
+    finds_symbols: bool,
+    hints: bool,
+    /// The problems the server last reported for each file, as it wrote
+    /// them: a quick fix is asked for with the problems it fixes.
+    reported: HashMap<PathBuf, Vec<Value>>,
     /// Questions sent to the server and not answered yet, by request, with
     /// the file each is about.
     asked: HashMap<i64, (PathBuf, Question)>,
@@ -351,8 +393,29 @@ impl Session {
                         "documentationFormat": ["markdown", "plaintext"],
                     }},
                     "formatting": {"dynamicRegistration": false},
+                    "codeAction": {
+                        "codeActionLiteralSupport": {"codeActionKind": {"valueSet": [
+                            "", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite",
+                            "source", "source.organizeImports", "source.fixAll",
+                        ]}},
+                        "isPreferredSupport": true,
+                        "dataSupport": true,
+                        "disabledSupport": true,
+                        "resolveSupport": {"properties": ["edit"]},
+                    },
+                    "rename": {"prepareSupport": false},
+                    "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+                    "inlayHint": {"dynamicRegistration": false},
                 },
-                "workspace": {"workspaceFolders": true, "configuration": false},
+                "workspace": {
+                    "workspaceFolders": true,
+                    "configuration": false,
+                    "applyEdit": true,
+                    "workspaceEdit": {"documentChanges": true},
+                    "symbol": {"dynamicRegistration": false},
+                    "executeCommand": {"dynamicRegistration": false},
+                    "inlayHint": {"refreshSupport": false},
+                },
                 "window": {"workDoneProgress": true},
             },
         });
@@ -392,7 +455,7 @@ impl Session {
                     return false;
                 }
                 if let Some((path, question)) = id.as_i64().and_then(|id| self.asked.remove(&id)) {
-                    self.answered(&path, question, &message["result"]);
+                    self.answered(&path, question, &message);
                 }
             }
             (None, None) => {}
@@ -420,6 +483,13 @@ impl Session {
         self.defines = can("definitionProvider");
         self.completes = can("completionProvider");
         self.formats = can("documentFormattingProvider");
+        self.acts = can("codeActionProvider");
+        self.resolves = capabilities["codeActionProvider"]["resolveProvider"].as_bool().unwrap_or(false);
+        self.executes = capabilities["executeCommandProvider"].is_object();
+        self.renames = can("renameProvider");
+        self.lists_symbols = can("documentSymbolProvider");
+        self.finds_symbols = can("workspaceSymbolProvider");
+        self.hints = can("inlayHintProvider");
         self.notify("initialized", json!({}));
         self.initialized = true;
         self.report_progress();
@@ -444,9 +514,19 @@ impl Session {
             "window/workDoneProgress/create"
             | "client/registerCapability"
             | "client/unregisterCapability"
-            | "window/showMessageRequest" => Value::Null,
+            | "window/showMessageRequest"
+            | "workspace/inlayHint/refresh"
+            | "workspace/codeLens/refresh"
+            | "workspace/semanticTokens/refresh"
+            | "workspace/diagnostic/refresh" => Value::Null,
             "window/showDocument" => json!({"success": false}),
-            "workspace/applyEdit" => json!({"applied": false}),
+            "workspace/applyEdit" => {
+                let files = self.workspace_edit(&params["edit"]);
+                if let Some(shared) = self.shared() {
+                    (shared.notify)(Event::Edit(files));
+                }
+                json!({"applied": true})
+            }
             _ => {
                 self.write(json!({
                     "jsonrpc": "2.0",
@@ -501,6 +581,8 @@ impl Session {
         let Some(uri) = params["uri"].as_str() else { return };
         let open = self.docs.iter().find(|(_, doc)| doc.uri == uri);
         let Some(path) = open.map(|(path, _)| path.clone()).or_else(|| path_from_uri(uri)) else { return };
+        let raw = params["diagnostics"].as_array().cloned().unwrap_or_default();
+        self.reported.insert(path.clone(), raw);
         let lines: Option<Vec<&str>> = open.map(|(_, doc)| doc.text.split('\n').collect());
         let problems: Vec<Problem> = params["diagnostics"]
             .as_array()
@@ -518,27 +600,91 @@ impl Session {
             Question::Definition(_) => self.defines,
             Question::Completion(_) => self.completes,
             Question::Format { .. } => self.formats,
+            Question::CodeActions { .. } => self.acts,
+            Question::Resolve { .. } => self.resolves,
+            Question::Execute(_) => self.executes,
+            Question::Rename { .. } => self.renames,
+            Question::Symbols(_) => self.lists_symbols,
+            Question::Hints { .. } => self.hints,
+            Question::ProjectSymbols { .. } => self.finds_symbols,
         };
-        let Some(doc) = self.docs.get(&path).filter(|_| self.initialized && able) else {
+        if !self.initialized || !able {
             return question.unanswered();
-        };
-        let text = doc.text.split('\n').nth(line as usize).unwrap_or_default();
+        }
         let params = match &question {
-            Question::Format { tab_size, .. } => json!({
-                "textDocument": {"uri": doc.uri},
-                "options": {"tabSize": tab_size, "insertSpaces": true},
-            }),
-            _ => json!({
-                "textDocument": {"uri": doc.uri},
-                "position": {"line": line, "character": units(text, column, self.encoding)},
-            }),
+            Question::Resolve { action, .. } => action.clone(),
+            Question::Execute(command) => {
+                let mut params = json!({"command": command["command"]});
+                if let Some(arguments) = command.get("arguments") {
+                    params["arguments"] = arguments.clone();
+                }
+                params
+            }
+            Question::ProjectSymbols { query, .. } => json!({"query": query}),
+            _ => {
+                let Some(doc) = self.docs.get(&path) else { return question.unanswered() };
+                let lines: Vec<&str> = doc.text.split('\n').collect();
+                let at = |line: u32, column: u32| {
+                    let text = lines.get(line as usize).copied().unwrap_or_default();
+                    json!({"line": line, "character": units(text, column, self.encoding)})
+                };
+                let document = json!({"uri": doc.uri});
+                match &question {
+                    Question::Format { tab_size, .. } => json!({
+                        "textDocument": document,
+                        "options": {"tabSize": tab_size, "insertSpaces": true},
+                    }),
+                    Question::CodeActions { end, .. } => {
+                        // The problems on those lines, which quick fixes are for.
+                        let reported = self.reported.get(&path).map(Vec::as_slice).unwrap_or_default();
+                        let near: Vec<&Value> = reported
+                            .iter()
+                            .filter(|d| {
+                                let from = d["range"]["start"]["line"].as_u64().unwrap_or(0) as u32;
+                                let to = d["range"]["end"]["line"].as_u64().unwrap_or(0) as u32;
+                                from <= end.0 && to >= line
+                            })
+                            .collect();
+                        json!({
+                            "textDocument": document,
+                            "range": {"start": at(line, column), "end": at(end.0, end.1)},
+                            "context": {"diagnostics": near, "triggerKind": 1},
+                        })
+                    }
+                    Question::Rename { new_name, .. } => json!({
+                        "textDocument": document,
+                        "position": at(line, column),
+                        "newName": new_name,
+                    }),
+                    Question::Symbols(_) => json!({"textDocument": document}),
+                    Question::Hints { last, .. } => {
+                        // To the start of the line after the last, or the end of the file.
+                        let count = lines.len() as u32;
+                        let end = if last + 1 < count {
+                            json!({"line": last + 1, "character": 0})
+                        } else {
+                            let final_line = count.saturating_sub(1);
+                            let text = lines.get(final_line as usize).copied().unwrap_or_default();
+                            at(final_line, text.chars().count() as u32)
+                        };
+                        json!({"textDocument": document, "range": {"start": {"line": line, "character": 0}, "end": end}})
+                    }
+                    _ => json!({"textDocument": document, "position": at(line, column)}),
+                }
+            }
         };
+        if matches!(question, Question::Execute(_)) {
+            // Its answer says nothing to wait for; what it changes comes as an edit.
+            self.request(question.method(), params);
+            return;
+        }
         let id = self.request(question.method(), params);
         self.asked.insert(id, (path, question));
     }
 
     /// Hands the server's answer to whoever asked.
-    fn answered(&mut self, path: &Path, question: Question, result: &Value) {
+    fn answered(&mut self, path: &Path, question: Question, message: &Value) {
+        let result = &message["result"];
         match question {
             Question::Hover(reply) => {
                 let text = hover_text(&result["contents"]);
@@ -581,7 +727,146 @@ impl Session {
                 };
                 reply(result.as_array().map(|edits| edits.iter().filter_map(edit).collect()).unwrap_or_default());
             }
+            Question::CodeActions { reply, .. } => {
+                let actions = result.as_array().map(Vec::as_slice).unwrap_or_default();
+                reply(actions.iter().filter(|a| a.get("disabled").is_none()).filter_map(|a| self.action(path, a)).collect());
+            }
+            Question::Resolve { reply, .. } => reply(self.action(path, result)),
+            Question::Execute(_) => {}
+            Question::Rename { reply, .. } => match message.get("error") {
+                Some(error) => {
+                    reply(Err(error["message"].as_str().unwrap_or_default().to_string()));
+                }
+                None => reply(Ok(self.workspace_edit(result))),
+            },
+            Question::Symbols(reply) => {
+                let lines: Option<Vec<&str>> = self.docs.get(path).map(|doc| doc.text.split('\n').collect());
+                let items = result.as_array().map(Vec::as_slice).unwrap_or_default();
+                reply(items.iter().filter_map(|item| self.symbol(item, path, lines.as_deref())).collect());
+            }
+            Question::Hints { reply, .. } => {
+                let lines: Option<Vec<&str>> = self.docs.get(path).map(|doc| doc.text.split('\n').collect());
+                let items = result.as_array().map(Vec::as_slice).unwrap_or_default();
+                let hints = items.iter().filter_map(|hint| {
+                    let (line, column) = place(hint.get("position")?, lines.as_deref(), self.encoding)?;
+                    let label = match &hint["label"] {
+                        Value::String(text) => text.clone(),
+                        Value::Array(parts) => parts.iter().filter_map(|p| p["value"].as_str()).collect(),
+                        _ => return None,
+                    };
+                    Some(Hint { line, column, label: label.trim().to_string(), kind: hint["kind"].as_u64().map(|k| k as u32) })
+                });
+                reply(hints.collect());
+            }
+            Question::ProjectSymbols { reply, .. } => {
+                let items = result.as_array().map(Vec::as_slice).unwrap_or_default();
+                let found = items.iter().filter_map(|item| {
+                    let location = item.get("location")?;
+                    let uri = location["uri"].as_str()?;
+                    let file = path_from_uri(uri)?;
+                    let lines: Option<Vec<&str>> = self.docs.get(&file).map(|doc| doc.text.split('\n').collect());
+                    // A symbol may come without its range, to be asked for later: the top of the file.
+                    let (start, end) = match location.get("range") {
+                        Some(range) => (
+                            place(range.get("start")?, lines.as_deref(), self.encoding)?,
+                            place(range.get("end")?, lines.as_deref(), self.encoding)?,
+                        ),
+                        None => ((0, 0), (0, 0)),
+                    };
+                    Some(Symbol {
+                        name: item["name"].as_str()?.to_string(),
+                        detail: None,
+                        kind: item["kind"].as_u64().unwrap_or(0) as u32,
+                        path: file,
+                        start,
+                        end,
+                        name_at: start,
+                        container: item["containerName"].as_str().filter(|c| !c.is_empty()).map(String::from),
+                        children: Vec::new(),
+                    })
+                });
+                reply(found.collect());
+            }
         }
+    }
+
+    /// An action from the server's answer: a `CodeAction`, or a bare `Command`.
+    fn action(&self, path: &Path, raw: &Value) -> Option<Action> {
+        let title = raw["title"].as_str()?.trim().to_string();
+        Some(Action {
+            title,
+            kind: raw["kind"].as_str().map(String::from),
+            preferred: raw["isPreferred"].as_bool().unwrap_or(false),
+            edits: self.workspace_edit(&raw["edit"]),
+            server: self.id,
+            path: path.to_path_buf(),
+            raw: raw.clone(),
+        })
+    }
+
+    /// A named thing from a `DocumentSymbol` (with what is inside it) or a
+    /// `SymbolInformation`.
+    fn symbol(&self, item: &Value, path: &Path, lines: Option<&[&str]>) -> Option<Symbol> {
+        let range = item.get("range").or_else(|| item.get("location").and_then(|l| l.get("range")))?;
+        let start = place(range.get("start")?, lines, self.encoding)?;
+        let end = place(range.get("end")?, lines, self.encoding)?;
+        let name_at = item
+            .get("selectionRange")
+            .and_then(|r| r.get("start"))
+            .and_then(|at| place(at, lines, self.encoding))
+            .unwrap_or(start);
+        let children = item["children"].as_array().map(Vec::as_slice).unwrap_or_default();
+        Some(Symbol {
+            name: item["name"].as_str()?.to_string(),
+            detail: item["detail"].as_str().filter(|d| !d.is_empty()).map(String::from),
+            kind: item["kind"].as_u64().unwrap_or(0) as u32,
+            path: path.to_path_buf(),
+            start,
+            end,
+            name_at,
+            container: item["containerName"].as_str().filter(|c| !c.is_empty()).map(String::from),
+            children: children.iter().filter_map(|child| self.symbol(child, path, lines)).collect(),
+        })
+    }
+
+    /// The changes of a `WorkspaceEdit`, file by file, with columns counted
+    /// in characters of each file as it is now.
+    fn workspace_edit(&self, edit: &Value) -> Vec<FileEdits> {
+        let mut lists: Vec<(&str, &Value)> = Vec::new();
+        if let Some(changes) = edit["changes"].as_object() {
+            lists.extend(changes.iter().map(|(uri, edits)| (uri.as_str(), edits)));
+        }
+        for change in edit["documentChanges"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            if let Some(uri) = change["textDocument"]["uri"].as_str() {
+                lists.push((uri, &change["edits"]));
+            }
+        }
+        let mut out: Vec<FileEdits> = Vec::new();
+        for (uri, edits) in lists {
+            let named = path_from_uri(uri);
+            let same = |path: &Path| named.as_deref().is_some_and(|named| same_file(named, path));
+            let open = self.docs.iter().find(|(path, doc)| doc.uri == uri || same(path));
+            let Some(path) = open.map(|(path, _)| path.clone()).or(named.clone()) else { continue };
+            let on_disk = match open {
+                None => std::fs::read_to_string(&path).ok().map(|text| text.replace("\r\n", "\n")),
+                Some(_) => None,
+            };
+            let text = open.map(|(_, doc)| doc.text.as_str()).or(on_disk.as_deref());
+            let lines: Option<Vec<&str>> = text.map(|text| text.split('\n').collect());
+            let converted = edits.as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|edit| {
+                Some(Edit {
+                    start: place(edit["range"].get("start")?, lines.as_deref(), self.encoding)?,
+                    end: place(edit["range"].get("end")?, lines.as_deref(), self.encoding)?,
+                    text: edit["newText"].as_str()?.to_string(),
+                })
+            });
+            match out.iter_mut().find(|file| file.path == path) {
+                Some(file) => file.edits.extend(converted),
+                None => out.push(FileEdits { path, edits: converted.collect() }),
+            }
+        }
+        out.retain(|file| !file.edits.is_empty());
+        out
     }
 
     /// A place in a file, from a `Location` or a `LocationLink`.
@@ -724,6 +1009,14 @@ fn run(id: usize, spec: Spec, root: PathBuf, sender: Sender<Command>, receiver: 
         defines: false,
         completes: false,
         formats: false,
+        acts: false,
+        resolves: false,
+        executes: false,
+        renames: false,
+        lists_symbols: false,
+        finds_symbols: false,
+        hints: false,
+        reported: HashMap::new(),
         asked: HashMap::new(),
     };
     session.initialize();

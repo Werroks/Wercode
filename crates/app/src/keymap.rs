@@ -3,10 +3,11 @@
 
 use std::rc::Rc;
 
-use gpui_kit::component::input::{GoToDefinition, ShowCompletions};
+use gpui_kit::component::input::{GoToDefinition, ShowCompletions, ToggleCodeActions};
 use gpui_kit::*;
 
-use crate::editor::Save;
+use crate::editor::{RenameSymbol, Save};
+use crate::symbols::{GoToProjectSymbol, GoToSymbol};
 use crate::lsp::RestartLanguageServers;
 use crate::panel::git::{Commit, Fetch, Pull, Push, ShowAllChanges, StageAll};
 use crate::term::{
@@ -85,6 +86,11 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("editor.save", "EditorView", Save, ["ctrl-s"]),
         shortcut!("editor.go_to_definition", "EditorView", GoToDefinition, ["f12"]),
         shortcut!("editor.show_completions", "EditorView", ShowCompletions, ["ctrl-space"]),
+        shortcut!("editor.quick_fix", "EditorView", ToggleCodeActions, ["ctrl-."]),
+        shortcut!("editor.rename", "EditorView", RenameSymbol, ["f2"]),
+        // R as in Sublime; Ctrl+Shift+O opens a folder here.
+        shortcut!("editor.go_to_symbol", "EditorView", GoToSymbol, ["ctrl-r"]),
+        shortcut!("workspace.go_to_project_symbol", "Workspace", GoToProjectSymbol, []),
     ]
 }
 

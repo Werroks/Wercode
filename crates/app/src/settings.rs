@@ -532,6 +532,12 @@ impl Render for SettingsView {
                         switch("settings-format-on-save", settings.format_on_save, |s, on| s.format_on_save = on),
                         cx,
                     ))
+                    .child(Self::row(
+                        t("Type hints"),
+                        t("Show what language servers note in the code, such as the types of variables, in grey at the end of their lines."),
+                        switch("settings-inlay-hints", settings.inlay_hints, |s, on| s.inlay_hints = on),
+                        cx,
+                    ))
                     .child(updates)
                     .when_some(self.error.clone(), |d, error| {
                         d.child(div().id("settings-error").text_xs().text_color(danger).child(error))

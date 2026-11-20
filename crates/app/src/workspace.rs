@@ -11,7 +11,7 @@ use futures::channel::mpsc;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
-use gpui_kit::component::input::{GoToDefinition, Input, InputEvent, InputState};
+use gpui_kit::component::input::{GoToDefinition, Input, InputEvent, InputState, ToggleCodeActions};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -23,7 +23,8 @@ use wercode_core::state::{self, Layout, State};
 use wercode_core::tasks::{self, Task as ProjectTask};
 use wercode_core::watch::{self, Watch};
 
-use crate::editor::Save;
+use crate::editor::{RenameSymbol, Save};
+use crate::symbols::{GoToProjectSymbol, GoToSymbol, SymbolPicker, SymbolsEvent};
 use crate::lsp::RestartLanguageServers;
 use crate::panel::git as git_panel;
 use crate::panel::problems::severity_icon;
@@ -174,6 +175,10 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("File: Go to File\u{2026}"), Box::new(QuickOpen)),
         (t("File: Save"), Box::new(Save)),
         (t("Editor: Go to Definition"), Box::new(GoToDefinition)),
+        (t("Editor: Quick Fix\u{2026}"), Box::new(ToggleCodeActions)),
+        (t("Editor: Rename Symbol\u{2026}"), Box::new(RenameSymbol)),
+        (t("Go to Symbol in File\u{2026}"), Box::new(GoToSymbol)),
+        (t("Go to Symbol in Project\u{2026}"), Box::new(GoToProjectSymbol)),
         (t("View: Toggle Side Panel"), Box::new(TogglePanel)),
         (t("View: Show Files"), Box::new(ShowFiles)),
         (t("Search: Find in Files"), Box::new(ShowSearch)),
@@ -265,6 +270,8 @@ pub struct Workspace {
     /// The command of the task that was run last in this window.
     last_task: Option<String>,
     branches: Option<BranchMenu>,
+    /// The list of named things in code to go to, while it is showing.
+    symbols: Option<(Entity<SymbolPicker>, Subscription)>,
     /// The settings screen, while it is showing.
     settings: Option<(Entity<SettingsView>, Subscription)>,
     /// The user has agreed to close the window; do not ask again.
@@ -316,6 +323,7 @@ impl Workspace {
             tasks: None,
             last_task: None,
             branches: None,
+            symbols: None,
             settings: None,
             closing: false,
             forwarding: false,
@@ -537,6 +545,36 @@ impl Workspace {
 
     fn close_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.branches.take().is_some() {
+            self.focus_terminals(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Lists the named things of the file that is showing, or searches the
+    /// whole project for one, to go to it.
+    fn open_symbols(&mut self, project_wide: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        let Some(project) = &self.project else { return };
+        let Some(servers) = crate::lsp::checker(cx).map(|checker| checker.read(cx).servers().clone()) else { return };
+        let root = project.root.clone();
+        let file = project.terminals.read(cx).shown_file(cx);
+        // Without a file showing there is only the project to search.
+        let file = if project_wide { None } else { file };
+        let picker = cx.new(|cx| SymbolPicker::new(servers, root, file, window, cx));
+        let subscription = cx.subscribe_in(&picker, window, |this, _, event: &SymbolsEvent, window, cx| match event {
+            SymbolsEvent::Open { path, line, column } => {
+                this.symbols = None;
+                this.open_file(path.clone(), Some((*line, *column)), window, cx);
+                cx.notify();
+            }
+            SymbolsEvent::Close => this.close_symbols(window, cx),
+        });
+        self.symbols = Some((picker, subscription));
+        cx.notify();
+    }
+
+    fn close_symbols(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.symbols.take().is_some() {
             self.focus_terminals(window, cx);
             cx.notify();
         }
@@ -1493,6 +1531,7 @@ impl Workspace {
                 this.close_finder(window, cx);
                 this.close_settings(window, cx);
                 this.close_branches(window, cx);
+                this.close_symbols(window, cx);
                 cx.notify();
             }),
         )
@@ -2127,6 +2166,8 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+            .on_action(cx.listener(|this, _: &GoToSymbol, window, cx| this.open_symbols(false, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToProjectSymbol, window, cx| this.open_symbols(true, window, cx)))
             .on_action(cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)))
             .on_action(cx.listener(|this, _: &git_panel::Pull, window, cx| this.git_remote(Remote::Pull, window, cx)))
             .on_action(cx.listener(|this, _: &git_panel::Push, window, cx| this.git_remote(Remote::Push, window, cx)))
@@ -2186,6 +2227,9 @@ impl Render for Workspace {
             .when_some(self.palette.clone(), |d, palette| d.child(self.render_palette(&palette, cx)))
             .when_some(self.finder.as_ref(), |d, finder| d.child(self.render_finder(finder, cx)))
             .when_some(self.tasks.as_ref(), |d, list| d.child(self.render_tasks(list, cx)))
+            .when_some(self.symbols.as_ref().map(|(picker, _)| picker.clone()), |d, picker| {
+                d.child(self.backdrop("symbols-backdrop", cx).flex().justify_center().items_start().child(picker))
+            })
             .when_some(self.branches.as_ref(), |d, menu| d.child(self.render_branches(menu, cx)))
             .when_some(self.settings.as_ref().map(|(view, _)| view.clone()), |d, view| {
                 d.child(self.render_settings(&view, cx))
@@ -2976,6 +3020,75 @@ three
         assert!(shown);
         cx.run_until_parked();
         assert_eq!(area.read_with(cx, |a, cx| a.shown_file(cx)), Some(other.clone()));
+        servers.stop_all(std::time::Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn language_servers_fix_rename_outline_and_note(cx: &mut TestAppContext) {
+        use wercode_core::lsp::Status;
+        let root = project_dir("lsp-smart");
+        let file = root.join("main.rs");
+        std::fs::write(&file, "struct Point\n  fn len(\nfn main() {\n    let x = bad;\n    helper();\n}\n").unwrap();
+        let f = open_checked(cx, "lsp-smart");
+        let servers = cx.update(|cx| crate::lsp::checker(cx).unwrap()).read_with(cx, |c, _| c.servers().clone());
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(file.clone(), Some((2, 4)), window, cx));
+        })
+        .unwrap();
+        let area = f.workspace.read_with(cx, |w, _| w.terminals());
+        let editor = area.read_with(cx, |a, cx| a.editor_for(&file, cx)).unwrap();
+        wait_until(cx, "the server", |cx| {
+            cx.update(|_| servers.report(&file)).is_some_and(|r| r.servers.first().is_some_and(|s| s.1 == Status::Ready))
+        });
+        let text = |cx: &mut TestAppContext| editor.read_with(cx, |e, cx| e.text(cx));
+        // The outline is asked for a moment after the server speaks; the test clock moves by hand.
+        let later = |cx: &mut TestAppContext| cx.executor().advance_clock(std::time::Duration::from_millis(300));
+
+        // Above the code, the things the cursor is inside; at line ends, the notes.
+        wait_until(cx, "the path to the cursor", |cx| {
+            later(cx);
+            editor.read_with(cx, |e, cx| e.crumbs(cx)) == ["Point", "len"]
+        });
+        wait_until(cx, "the notes", |cx| editor.read_with(cx, |e, _| e.hint_labels()) == [": i32"]);
+
+        // A quick fix for the problem on the line changes the text.
+        cx.update_window(f.window, |_, window, cx| editor.update(cx, |e, cx| e.go_to(4, Some(13), window, cx))).unwrap();
+        cx.run_until_parked();
+        let done = cx.update_window(f.window, |_, window, cx| editor.update(cx, |e, cx| e.fix("Replace bad with good", window, cx))).unwrap();
+        let fixed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let heard = fixed.clone();
+        cx.update(|cx| cx.foreground_executor().spawn(async move { heard.set(done.await) }).detach());
+        wait_until(cx, "the fix", |cx| text(cx).contains("let x = good;"));
+        assert!(fixed.get());
+
+        // F2 renames the name under the cursor through the server.
+        cx.update_window(f.window, |_, window, cx| editor.update(cx, |e, cx| e.go_to(5, Some(6), window, cx))).unwrap();
+        cx.run_until_parked();
+        press(cx, f.window, &["f2"]);
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |e, _| e.is_renaming()));
+        cx.update_window(f.window, |_, window, cx| window.input("assist", cx)).unwrap();
+        press(cx, f.window, &["enter"]);
+        wait_until(cx, "the rename", |cx| text(cx).contains("    assist();"));
+        assert!(!editor.read_with(cx, |e, _| e.is_renaming()));
+        // Escape leaves the name as it was.
+        press(cx, f.window, &["f2"]);
+        cx.run_until_parked();
+        press(cx, f.window, &["escape"]);
+        cx.run_until_parked();
+        assert!(!editor.read_with(cx, |e, _| e.is_renaming()));
+
+        // Ctrl+R lists the things of the file; picking one goes to it.
+        press(cx, f.window, &["ctrl-r"]);
+        let picker = f.workspace.read_with(cx, |w, _| w.symbols.as_ref().map(|(p, _)| p.clone())).expect("the list");
+        wait_until(cx, "the list of things", |cx| picker.read_with(cx, |p, _| p.listed()) == ["Point", "len", "main"]);
+        cx.update_window(f.window, |_, window, cx| window.input("ma", cx)).unwrap();
+        wait_until(cx, "the list to follow", |cx| picker.read_with(cx, |p, _| p.listed()) == ["main"]);
+        press(cx, f.window, &["enter"]);
+        cx.run_until_parked();
+        assert!(f.workspace.read_with(cx, |w, _| w.symbols.is_none()));
+        assert_eq!(editor.read_with(cx, |e, cx| e.cursor(cx)), (2, 3));
         servers.stop_all(std::time::Duration::from_secs(5));
         let _ = std::fs::remove_dir_all(&f.dir);
     }

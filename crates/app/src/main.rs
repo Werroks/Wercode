@@ -3,6 +3,7 @@
 
 mod assets;
 mod changes;
+mod symbols;
 mod diff;
 mod editor;
 mod keymap;

@@ -80,6 +80,61 @@ pub struct Edit {
     pub text: String,
 }
 
+/// Changes a server wants made to one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEdits {
+    pub path: PathBuf,
+    pub edits: Vec<Edit>,
+}
+
+/// Something a server offers to do at a place: a quick fix ("add the
+/// missing import"), a refactoring, or a change to the whole file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Action {
+    pub title: String,
+    /// `quickfix`, `refactor.extract`, `source.organizeImports` and the like.
+    pub kind: Option<String>,
+    /// The server thinks this is the fix to take.
+    pub preferred: bool,
+    /// The changes, when the server sent them right away.
+    pub edits: Vec<FileEdits>,
+    /// The server that offered it and the file it was asked about.
+    server: usize,
+    path: PathBuf,
+    /// The action as the server wrote it, for asking the rest of it later.
+    raw: Value,
+}
+
+/// A named thing in code: a function, a type, a field, a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    /// More about it, such as a signature.
+    pub detail: Option<String>,
+    /// The protocol's `SymbolKind`: 5 class, 6 method, 12 function, 13 variable...
+    pub kind: u32,
+    pub path: PathBuf,
+    /// Where the whole of it starts and ends, and where its name is: 0-based
+    /// lines, columns in characters.
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+    pub name_at: (u32, u32),
+    /// What it is inside of, for a symbol found across the project.
+    pub container: Option<String>,
+    pub children: Vec<Symbol>,
+}
+
+/// A note a server wants shown in the code, such as the type of a variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hint {
+    /// Where it goes: a 0-based line and a column in characters.
+    pub line: u32,
+    pub column: u32,
+    pub label: String,
+    /// The protocol's kind: 1 a type, 2 a parameter name; `None` for others.
+    pub kind: Option<u32>,
+}
+
 /// How a server is doing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -99,6 +154,8 @@ pub enum Status {
 pub enum Event {
     /// What the servers say about this file changed.
     Problems(PathBuf),
+    /// A server asked for these changes to files, after a command it ran.
+    Edit(Vec<FileEdits>),
     /// A server started, stopped, or is busy with something else.
     Status,
 }
@@ -398,6 +455,132 @@ impl Servers {
         self.ask(path, 0, 0, reply, |answer| answer.is_empty(), move |reply| Question::Format { tab_size, reply });
     }
 
+    /// Asks what the servers offer to do with the code between two places
+    /// in an open file: quick fixes for the problems there, refactorings.
+    /// Every server's offers come back together.
+    pub fn code_actions(
+        &self,
+        path: &Path,
+        start: (u32, u32),
+        end: (u32, u32),
+        reply: impl FnOnce(Vec<Action>) + Send + 'static,
+    ) {
+        self.gather(path, start, reply, move |reply| Question::CodeActions { end, reply });
+    }
+
+    /// Gets the changes of an action, asking its server for them if it sent
+    /// none yet, and has the server run its command if it has one (the
+    /// server then sends the changes it makes as [`Event::Edit`]).
+    pub fn perform(&self, action: &Action, reply: impl FnOnce(Result<Vec<FileEdits>, String>) + Send + 'static) {
+        let state = self.shared.lock();
+        let Some(server) = state.servers.iter().find(|s| s.id == action.server) else {
+            drop(state);
+            return reply(Err(crate::i18n::t("The language server that offered this has stopped.").into()));
+        };
+        let commands = server.commands.clone();
+        drop(state);
+        let path = action.path.clone();
+        let execute = move |commands: &mpsc::Sender<Command>, raw: &Value| {
+            // A command of its own, or an action that carries one.
+            let command = match &raw["command"] {
+                Value::String(_) => raw.clone(),
+                Value::Object(_) => raw["command"].clone(),
+                _ => return,
+            };
+            let question = Question::Execute(command);
+            let _ = commands.send(Command::Ask { path: path.clone(), line: 0, column: 0, question });
+        };
+        let resolvable =
+            action.edits.is_empty() && action.raw.get("data").is_some() && !action.raw["command"].is_string();
+        if !resolvable {
+            execute(&commands, &action.raw);
+            return reply(Ok(action.edits.clone()));
+        }
+        let asking = commands.clone();
+        let resolved: Box<dyn FnOnce(Option<Action>) + Send> = Box::new(move |resolved| {
+            let Some(resolved) = resolved else { return reply(Ok(Vec::new())) };
+            execute(&commands, &resolved.raw);
+            reply(Ok(resolved.edits));
+        });
+        let question = Question::Resolve { action: action.raw.clone(), reply: resolved };
+        let _ = asking.send(Command::Ask { path: action.path.clone(), line: 0, column: 0, question });
+    }
+
+    /// Asks the servers of an open file to rename what is at a place, in
+    /// every file that uses it. The changes come back; nothing is changed yet.
+    pub fn rename(
+        &self,
+        path: &Path,
+        line: u32,
+        column: u32,
+        new_name: &str,
+        reply: impl FnOnce(Result<Vec<FileEdits>, String>) + Send + 'static,
+    ) {
+        /// An answer to a rename; no answer means nothing to change.
+        struct Renaming(Result<Vec<FileEdits>, String>);
+        impl Default for Renaming {
+            fn default() -> Self {
+                Renaming(Ok(Vec::new()))
+            }
+        }
+        let new_name = new_name.to_string();
+        let empty = |answer: &Renaming| answer.0.as_ref().is_ok_and(Vec::is_empty);
+        let reply = move |answer: Renaming| reply(answer.0);
+        self.ask(path, line, column, reply, empty, move |reply| Question::Rename {
+            new_name: new_name.clone(),
+            reply: Box::new(move |answer| reply(Renaming(answer))),
+        });
+    }
+
+    /// The named things in an open file (functions, types, fields), the way
+    /// they nest.
+    pub fn symbols(&self, path: &Path, reply: impl FnOnce(Vec<Symbol>) + Send + 'static) {
+        self.gather(path, (0, 0), reply, Question::Symbols);
+    }
+
+    /// The notes the servers want shown in lines `first..=last` of an open
+    /// file, such as the types of variables.
+    pub fn hints(&self, path: &Path, first: u32, last: u32, reply: impl FnOnce(Vec<Hint>) + Send + 'static) {
+        self.gather(path, (first, 0), reply, move |reply| Question::Hints { last, reply });
+    }
+
+    /// Named things across the files of a project whose names fit `query`.
+    pub fn project_symbols(&self, root: &Path, query: &str, reply: impl FnOnce(Vec<Symbol>) + Send + 'static) {
+        let state = self.shared.lock();
+        let servers: Vec<&Server> =
+            state.servers.iter().filter(|s| s.project == root || s.root.starts_with(root)).collect();
+        let parts = Gathering::new(servers.len(), reply);
+        for (server, part) in servers.into_iter().zip(parts) {
+            let question = Question::ProjectSymbols { query: query.to_string(), reply: part };
+            let _ = server.commands.send(Command::Ask { path: root.to_path_buf(), line: 0, column: 0, question });
+        }
+    }
+
+    /// Whether an editor has the file open.
+    pub fn is_open(&self, path: &Path) -> bool {
+        self.shared.lock().docs.contains_key(path)
+    }
+
+    /// Asks each server of a file and puts every answer together.
+    fn gather<T: Send + 'static>(
+        &self,
+        path: &Path,
+        at: (u32, u32),
+        reply: impl FnOnce(Vec<T>) + Send + 'static,
+        question: impl Fn(Box<dyn FnOnce(Vec<T>) + Send>) -> Question,
+    ) {
+        let state = self.shared.lock();
+        let servers: Vec<&Server> = match state.docs.get(path) {
+            Some(doc) => state.servers.iter().filter(|s| doc.servers.contains(&s.id)).collect(),
+            None => Vec::new(),
+        };
+        let parts = Gathering::new(servers.len(), reply);
+        for (server, part) in servers.into_iter().zip(parts) {
+            let ask = Command::Ask { path: path.to_path_buf(), line: at.0, column: at.1, question: question(part) };
+            let _ = server.commands.send(ask);
+        }
+    }
+
     /// Asks each server of a file; the first answer that is not empty wins.
     fn ask<T: Default + Send + 'static>(
         &self,
@@ -668,6 +851,87 @@ impl Servers {
     }
 }
 
+/// Answers from several servers put together: the reply goes out once each
+/// has answered or gone away.
+struct Gathering<T> {
+    left: usize,
+    items: Vec<T>,
+    reply: Option<Box<dyn FnOnce(Vec<T>) + Send>>,
+}
+
+/// One server's share of a [`Gathering`]: dropped unanswered, it counts as
+/// an answer with nothing in it.
+struct Part<T: Send + 'static> {
+    gathering: Arc<Mutex<Gathering<T>>>,
+}
+
+impl<T: Send + 'static> Gathering<T> {
+    /// The replies to hand to `count` servers. With no servers, `reply` is
+    /// called at once with nothing.
+    fn new(count: usize, reply: impl FnOnce(Vec<T>) + Send + 'static) -> Vec<Box<dyn FnOnce(Vec<T>) + Send>> {
+        if count == 0 {
+            reply(Vec::new());
+            return Vec::new();
+        }
+        let gathering =
+            Arc::new(Mutex::new(Gathering { left: count, items: Vec::new(), reply: Some(Box::new(reply)) }));
+        (0..count)
+            .map(|_| {
+                let part = Part { gathering: gathering.clone() };
+                Box::new(move |items: Vec<T>| part.give(items)) as Box<dyn FnOnce(Vec<T>) + Send>
+            })
+            .collect()
+    }
+}
+
+impl<T: Send + 'static> Part<T> {
+    fn give(self, items: Vec<T>) {
+        self.gathering.lock().unwrap_or_else(|p| p.into_inner()).items.extend(items);
+        // Dropping the part counts the answer.
+    }
+}
+
+impl<T: Send + 'static> Drop for Part<T> {
+    fn drop(&mut self) {
+        let done = {
+            let mut gathering = self.gathering.lock().unwrap_or_else(|p| p.into_inner());
+            gathering.left -= 1;
+            if gathering.left > 0 {
+                None
+            } else {
+                let items = std::mem::take(&mut gathering.items);
+                gathering.reply.take().map(|reply| (reply, items))
+            }
+        };
+        if let Some((reply, items)) = done {
+            reply(items);
+        }
+    }
+}
+
+/// Makes the changes in a text with LF line endings. Places are 0-based
+/// lines and columns in characters, in the text as it was.
+pub fn apply_edits(text: &str, edits: &[Edit]) -> String {
+    let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    let offset = |(line, column): (u32, u32)| -> usize {
+        let Some(&start) = starts.get(line as usize) else { return text.len() };
+        let end = starts.get(line as usize + 1).map_or(text.len(), |next| next - 1);
+        let line_text = &text[start..end];
+        start + line_text.char_indices().nth(column as usize).map_or(line_text.len(), |(i, _)| i)
+    };
+    let mut sorted: Vec<&Edit> = edits.iter().collect();
+    // From the end of the text up, so one change does not move the places of the next.
+    sorted.sort_by(|a, b| b.start.cmp(&a.start));
+    let mut out = text.to_string();
+    for edit in sorted {
+        let (from, to) = (offset(edit.start), offset(edit.end));
+        if from <= to && to <= out.len() {
+            out.replace_range(from..to, &edit.text);
+        }
+    }
+    out
+}
+
 /// The `file:` address of a path, as servers want it.
 pub fn uri_from_path(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
@@ -798,6 +1062,102 @@ mod tests {
         while !done() {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             let _ = events.recv_timeout(Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn edits_are_made_from_the_end_up() {
+        let edit = |start: (u32, u32), end: (u32, u32), text: &str| Edit { start, end, text: text.into() };
+        let text = "let \u{1F600} = bad;\nbad bad\n";
+        let edits = [edit((0, 8), (0, 11), "good"), edit((1, 0), (1, 3), "x"), edit((1, 4), (1, 7), "y"), edit((2, 0), (2, 0), "end\n")];
+        assert_eq!(apply_edits(text, &edits), "let \u{1F600} = good;\nx y\nend\n");
+    }
+
+    #[test]
+    fn a_server_fixes_renames_lists_and_notes() {
+        let dir = std::env::temp_dir().join(format!("wercode-lsp-smart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (file, other) = (dir.join("main.rs"), dir.join("other.rs"));
+        let (sender, events) = mpsc::channel();
+        let servers = Servers::new(vec![fake_spec()], move |event| {
+            let _ = sender.send(event);
+        });
+        let guard = servers.project(&dir);
+        let text = "struct Point\n  fn len(\nfn main() {\n    let \u{1F600}x = bad;\n}\n";
+        servers.open(&dir, &file, text.into());
+        servers.open(&dir, &other, "fn helper() { bad }\n".into());
+        wait(&events, "the problems", || servers.problems(&file).len() == 1);
+        fn recv<T>(r: &mpsc::Receiver<T>) -> T {
+            r.recv_timeout(Duration::from_secs(30)).unwrap()
+        }
+
+        // Quick fixes for the problem on the line, from every server together.
+        let (asked, answers) = mpsc::channel();
+        servers.code_actions(&file, (3, 0), (3, 0), move |found| asked.send(found).unwrap());
+        let actions: Vec<Action> = recv(&answers);
+        let titles: Vec<&str> = actions.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["Replace bad with good", "Shout the line", "Say hi"]);
+        assert!(actions[0].preferred);
+        // The emoji is two UTF-16 units for the server and one character here.
+        let good = Edit { start: (3, 13), end: (3, 16), text: "good".into() };
+        assert_eq!(actions[0].edits, vec![FileEdits { path: file.clone(), edits: vec![good.clone()] }]);
+
+        // Its changes as they are; the next one's asked for; the last one's
+        // command makes the server send its change by itself.
+        let perform = |action: &Action| {
+            let (asked, answers) = mpsc::channel();
+            servers.perform(action, move |found| asked.send(found).unwrap());
+            recv(&answers).unwrap()
+        };
+        assert_eq!(perform(&actions[0]), actions[0].edits);
+        let shout = Edit { start: (3, 0), end: (3, 17), text: "    LET \u{1F600}X = BAD;".into() };
+        assert_eq!(perform(&actions[1]), vec![FileEdits { path: file.clone(), edits: vec![shout] }]);
+        assert_eq!(perform(&actions[2]), Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let sent = loop {
+            assert!(Instant::now() < deadline, "timed out waiting for the command's edit");
+            if let Ok(Event::Edit(files)) = events.recv_timeout(Duration::from_millis(100)) {
+                break Some(files);
+            }
+        };
+        let hi = Edit { start: (0, 0), end: (0, 0), text: "hi\n".into() };
+        assert_eq!(sent.unwrap(), vec![FileEdits { path: file.clone(), edits: vec![hi] }]);
+
+        // A rename reaches every open file that has the name.
+        let (asked, answers) = mpsc::channel();
+        servers.rename(&file, 3, 14, "fine", move |found| asked.send(found).unwrap());
+        let mut renamed = recv(&answers).unwrap();
+        renamed.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(renamed.iter().map(|f| f.path.clone()).collect::<Vec<_>>(), [file.clone(), other.clone()]);
+        assert_eq!(renamed[0].edits, vec![Edit { text: "fine".into(), ..good }]);
+        assert_eq!(apply_edits("fn helper() { bad }\n", &renamed[1].edits), "fn helper() { fine }\n");
+
+        // The things in the file, the way they nest, and across the project.
+        let (asked, answers) = mpsc::channel();
+        servers.symbols(&file, move |found| asked.send(found).unwrap());
+        let symbols: Vec<Symbol> = recv(&answers);
+        assert_eq!(symbols.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Point", "main"]);
+        assert_eq!((symbols[0].kind, symbols[0].children[0].name.as_str()), (23, "len"));
+        assert_eq!((symbols[0].start, symbols[0].end, symbols[0].name_at), ((0, 0), (1, 9), (0, 7)));
+        let (asked, answers) = mpsc::channel();
+        servers.project_symbols(&dir, "help", move |found| asked.send(found).unwrap());
+        let found: Vec<Symbol> = recv(&answers);
+        assert_eq!(found.iter().map(|s| (s.name.as_str(), s.path.clone())).collect::<Vec<_>>(), [("helper", other.clone())]);
+
+        // Notes in the lines asked about.
+        let (asked, answers) = mpsc::channel();
+        servers.hints(&file, 0, 4, move |found| asked.send(found).unwrap());
+        let hints: Vec<Hint> = recv(&answers);
+        assert_eq!(hints, vec![Hint { line: 3, column: 10, label: ": i32".into(), kind: Some(1) }]);
+        assert!(servers.is_open(&file) && !servers.is_open(&dir.join("nope.rs")));
+
+        drop(guard);
+        servers.stop_all(Duration::from_secs(5));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::remove_dir_all(&dir).is_err() {
+            assert!(Instant::now() < deadline, "the server did not stop");
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 

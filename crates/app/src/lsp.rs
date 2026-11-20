@@ -7,7 +7,8 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui_kit::*;
-use wercode_core::lsp::{self, Event, Servers, Spec};
+use wercode_core::document;
+use wercode_core::lsp::{self, Edit, Event, FileEdits, Servers, Spec};
 
 use crate::theme::AppState;
 
@@ -22,6 +23,9 @@ const QUIT_WAIT: Duration = Duration::from_millis(1500);
 pub enum CheckerEvent {
     /// What the servers say about this file changed.
     Problems(PathBuf),
+    /// Changes a language server wants in a file an editor has open: a
+    /// quick fix, a rename.
+    Edits(PathBuf, Vec<Edit>),
 }
 
 pub struct Checker {
@@ -61,6 +65,10 @@ pub fn init_with(specs: Vec<Spec>, cx: &mut App) {
     let checker = cx.new(|cx| {
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
+                if let Event::Edit(files) = event {
+                    cx.update(|cx| apply_file_edits(files, cx));
+                    continue;
+                }
                 let alive = this.update(cx, |_, cx| {
                     if let Event::Problems(path) = event {
                         cx.emit(CheckerEvent::Problems(path));
@@ -97,4 +105,35 @@ pub fn init_with(specs: Vec<Spec>, cx: &mut App) {
 /// Keeps a project's servers running while a window shows it.
 pub fn project(root: &Path, cx: &App) -> Option<lsp::ProjectGuard> {
     checker(cx).map(|checker| checker.read(cx).servers.project(root))
+}
+
+/// Makes the changes a language server asked for: in the editors that have
+/// a file open (where they can be undone), and on disk for the others.
+pub fn apply_file_edits(files: Vec<FileEdits>, cx: &mut App) {
+    let Some(checker) = checker(cx) else { return };
+    let servers = checker.read(cx).servers.clone();
+    let (open, closed): (Vec<FileEdits>, Vec<FileEdits>) = files.into_iter().partition(|file| servers.is_open(&file.path));
+    checker.update(cx, |_, cx| {
+        for file in open {
+            cx.emit(CheckerEvent::Edits(file.path, file.edits));
+        }
+    });
+    if !closed.is_empty() {
+        cx.background_executor()
+            .spawn(async move {
+                for file in closed {
+                    if let Err(error) = write_edits(&file) {
+                        eprintln!("could not change {}: {error}", file.path.display());
+                    }
+                }
+            })
+            .detach();
+    }
+}
+
+/// Changes a file on disk, keeping its line endings and byte-order mark.
+fn write_edits(file: &FileEdits) -> Result<(), String> {
+    let doc = document::load(&file.path).map_err(|e| e.message())?;
+    let text = lsp::apply_edits(&doc.text, &file.edits);
+    document::save(&file.path, &text, doc.format).map(drop)
 }

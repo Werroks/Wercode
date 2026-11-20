@@ -19,7 +19,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Wercode: an editor above a terminal, with the git panel and the commit graph on the left" width="900">
+  <img src="docs/demo.gif" alt="Wercode: cargo run in the terminal, git merge stops on a conflict, Accept Both resolves it, cargo run shows both changes and the merge appears in the commit graph" width="900"><br>
+  <sub>A merge conflict, start to finish: run, merge, <b>Accept Both</b>, run again, commit.</sub>
 </p>
 
 ---
@@ -101,6 +102,10 @@ development or notebooks. Wercode does not do these, and is not trying to be a
 smaller VS Code.
 
 ## What is inside
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="Wercode: an editor above a terminal, with the git panel and the commit graph on the left" width="900">
+</p>
 
 **Agents in the terminal**
 - Claude Code and Codex work right in the terminal, the way they do in Cursor: **Shift+Enter**

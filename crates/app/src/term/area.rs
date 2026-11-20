@@ -1,5 +1,5 @@
 //! The centre of the window: tabs. A tab holds terminals, split into panes,
-//! or one file open in the editor. The tabs sit in one row, or, when the
+//! or a file open in the editor, with maybe a second one beside it. The tabs sit in one row, or, when the
 //! settings ask for it, files sit above and the terminals in a panel below.
 
 use std::cell::{Cell, RefCell};
@@ -16,7 +16,7 @@ use gpui_kit::*;
 
 use wercode_core::changes::Side;
 use wercode_core::{file_icons, fs_ops, shell};
-use wercode_core::state::{Layout, PaneLayout, TabLayout};
+use wercode_core::state::{self, Layout, PaneLayout, TabLayout};
 
 use super::view::{TerminalView, TerminalViewEvent};
 use super::{
@@ -25,7 +25,7 @@ use super::{
 };
 use crate::changes::{ChangesEvent, ChangesView};
 use crate::diff::DiffView;
-use crate::editor::{EditorEvent, EditorView};
+use crate::editor::{EditorEvent, EditorView, SplitEditorDown, SplitEditorRight};
 use crate::panel::DraggedPath;
 use crate::theme::AppState;
 use wercode_core::i18n::{t, tf, tn};
@@ -170,13 +170,29 @@ impl Node {
     }
 }
 
+/// A second file shown beside the first in one tab.
+struct Beside {
+    editor: Entity<EditorView>,
+    /// `Horizontal` puts the files side by side, `Vertical` one above the other.
+    axis: Axis,
+    /// Share of the space taken by the first file.
+    ratio: f32,
+    /// Where the two were last laid out, for turning a drag into a ratio.
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+}
+
 enum Body {
     Terminals {
         root: Node,
         /// The pane that has (or last had) the keyboard.
         active: Pane,
     },
-    Editor(Entity<EditorView>),
+    Editor {
+        first: Entity<EditorView>,
+        beside: Option<Beside>,
+        /// The second file has (or last had) the keyboard.
+        second_active: bool,
+    },
     /// The changes to a file, read-only.
     Diff(Entity<DiffView>),
     /// Every change in the repository, with buttons for each piece.
@@ -187,6 +203,8 @@ enum Body {
 pub enum AreaEvent {
     /// A tab changed the repository (staged or threw away a change).
     GitChanged,
+    /// A file is to be chosen to show beside the one showing.
+    PickBeside(Axis),
 }
 
 struct Tab {
@@ -244,6 +262,7 @@ impl Tab {
     fn has_focus(&self, window: &Window, cx: &App) -> bool {
         match &self.body {
             Body::Terminals { .. } => self.panes().iter().any(|p| p.focus_handle(cx).is_focused(window)),
+            Body::Editor { .. } => self.editors().iter().any(|e| e.focus_handle(cx).contains_focused(window, cx)),
             _ => self.focus_handle(cx).contains_focused(window, cx),
         }
     }
@@ -251,21 +270,32 @@ impl Tab {
     fn active_pane(&self) -> Option<&Pane> {
         match &self.body {
             Body::Terminals { active, .. } => Some(active),
-            Body::Editor(_) | Body::Diff(_) | Body::Changes(_) => None,
+            Body::Editor { .. } | Body::Diff(_) | Body::Changes(_) => None,
         }
     }
 
+    /// The file that has (or last had) the keyboard in an editor tab.
     fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.body {
             Body::Terminals { .. } | Body::Diff(_) | Body::Changes(_) => None,
-            Body::Editor(editor) => Some(editor),
+            Body::Editor { first, beside, second_active } => {
+                Some(beside.as_ref().filter(|_| *second_active).map_or(first, |beside| &beside.editor))
+            }
+        }
+    }
+
+    /// Every file open in this tab: one, or two side by side.
+    fn editors(&self) -> Vec<&Entity<EditorView>> {
+        match &self.body {
+            Body::Editor { first, beside, .. } => std::iter::once(first).chain(beside.iter().map(|b| &b.editor)).collect(),
+            _ => Vec::new(),
         }
     }
 
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match &self.body {
             Body::Terminals { active, .. } => active.focus_handle(cx),
-            Body::Editor(editor) => editor.focus_handle(cx),
+            Body::Editor { .. } => self.editor().map(|e| e.focus_handle(cx)).unwrap_or_else(|| cx.focus_handle()),
             Body::Diff(diff) => diff.focus_handle(cx),
             Body::Changes(changes) => changes.focus_handle(cx),
         }
@@ -307,6 +337,8 @@ pub struct TerminalArea {
     dock_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// A terminal tab whose name is being typed.
     renaming: Option<Renaming>,
+    /// The tab whose line between two files is being dragged, by id.
+    beside_dragging: Option<usize>,
 }
 
 impl EventEmitter<AreaEvent> for TerminalArea {}
@@ -340,6 +372,7 @@ impl TerminalArea {
             dock_dragging: false,
             dock_bounds: Rc::default(),
             renaming: None,
+            beside_dragging: None,
         };
         if let Some(layout) = layout {
             this.restore(layout, window, cx);
@@ -451,7 +484,14 @@ impl TerminalArea {
                 Body::Terminals { root, .. } => {
                     Some(TabLayout::Terminals { panes: root.layout(cx), name: tab.name.clone() })
                 }
-                Body::Editor(editor) => Some(TabLayout::File { path: editor.read(cx).path().to_path_buf() }),
+                Body::Editor { first, beside, .. } => Some(TabLayout::File {
+                    path: first.read(cx).path().to_path_buf(),
+                    beside: beside.as_ref().map(|beside| state::Beside {
+                        path: beside.editor.read(cx).path().to_path_buf(),
+                        stacked: beside.axis == Axis::Vertical,
+                        ratio: beside.ratio,
+                    }),
+                }),
                 Body::Diff(_) | Body::Changes(_) => None,
             })
             .collect();
@@ -571,9 +611,23 @@ impl TerminalArea {
         for tab in &layout.tabs {
             match tab {
                 // A file that is gone is simply not reopened.
-                TabLayout::File { path } => {
-                    if path.is_file() {
-                        self.push_editor(path.clone(), window, cx);
+                TabLayout::File { path, beside } => {
+                    let second = beside.as_ref().filter(|b| b.path.is_file() && &b.path != path);
+                    let index = match (path.is_file(), second) {
+                        (true, _) => self.push_editor(path.clone(), window, cx),
+                        (false, Some(second)) => {
+                            self.push_editor(second.path.clone(), window, cx);
+                            continue;
+                        }
+                        (false, None) => continue,
+                    };
+                    if let Some(second) = second {
+                        let editor = self.new_editor(second.path.clone(), window, cx);
+                        let axis = if second.stacked { Axis::Vertical } else { Axis::Horizontal };
+                        let ratio = if second.ratio.is_finite() { second.ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO) } else { 0.5 };
+                        if let Body::Editor { beside, .. } = &mut self.tabs[index].body {
+                            *beside = Some(Beside { editor, axis, ratio, bounds: Rc::default() });
+                        }
                     }
                 }
                 TabLayout::Terminals { panes, name } => {
@@ -622,8 +676,8 @@ impl TerminalArea {
         }
     }
 
-    /// Adds a tab with `path` open in the editor and returns its index.
-    fn push_editor(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> usize {
+    /// Opens `path` in an editor that is not in a tab yet.
+    fn new_editor(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Entity<EditorView> {
         let root = self.root_dir.clone();
         let editor = cx.new(|cx| EditorView::new(path, root, window, cx));
         let subscription = cx.subscribe_in(&editor, window, |this, _, event: &EditorEvent, window, cx| match event {
@@ -631,9 +685,191 @@ impl TerminalArea {
             EditorEvent::Open { path, at } => this.open_path(path.clone(), Some(at.0), Some(at.1), window, cx),
         });
         self.subscriptions.insert(editor.entity_id(), subscription);
+        editor
+    }
+
+    /// Adds a tab with `path` open in the editor and returns its index.
+    fn push_editor(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let editor = self.new_editor(path, window, cx);
+        self.push_open_editor(editor)
+    }
+
+    /// Gives an editor that is already open a tab of its own.
+    fn push_open_editor(&mut self, editor: Entity<EditorView>) -> usize {
         let id = self.id();
-        self.tabs.push(Tab { id, name: None, body: Body::Editor(editor) });
+        self.tabs.push(Tab { id, name: None, body: Body::Editor { first: editor, beside: None, second_active: false } });
         self.tabs.len() - 1
+    }
+
+    /// The tab a file is open in, and whether it is the second file there.
+    fn find_file(&self, path: &Path, cx: &App) -> Option<(usize, bool)> {
+        self.tabs.iter().enumerate().find_map(|(index, tab)| {
+            tab.editors().iter().position(|e| e.read(cx).path() == path).map(|at| (index, at == 1))
+        })
+    }
+
+    /// Shows which of the two files of a tab has the keyboard.
+    fn set_second_active(&mut self, index: usize, second: bool) {
+        if let Some(Body::Editor { beside, second_active, .. }) = self.tabs.get_mut(index).map(|t| &mut t.body) {
+            *second_active = second && beside.is_some();
+        }
+    }
+
+    /// The file tab another file can go beside: the one showing.
+    fn beside_target(&self, cx: &App) -> Option<usize> {
+        let index = if Self::docked(cx) { self.shown(false)? } else { self.active };
+        matches!(self.tabs.get(index)?.body, Body::Editor { .. }).then_some(index)
+    }
+
+    /// Asks the window to choose a file to show beside the one showing; with
+    /// no file showing, the file is simply opened.
+    fn split_editor(&mut self, axis: Axis, cx: &mut Context<Self>) {
+        cx.emit(AreaEvent::PickBeside(axis));
+    }
+
+    /// Shows a file beside the file showing, in the same tab. A file that has
+    /// a tab of its own moves over; the file that was beside before gets a
+    /// tab of its own, so nothing is closed.
+    pub fn open_beside(&mut self, path: PathBuf, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        if path.is_dir() {
+            return;
+        }
+        let Some(target) = self.beside_target(cx) else {
+            self.open_path(path, None, None, window, cx);
+            return;
+        };
+        let target_id = self.tabs[target].id;
+        let editor = match self.find_file(&path, cx) {
+            Some((index, second)) if index == target || self.tabs[index].editors().len() > 1 => {
+                // Already beside something: shown where it is.
+                self.set_second_active(index, second);
+                self.select_tab(index, window, cx);
+                return;
+            }
+            Some((index, _)) => {
+                let tab = self.tabs.remove(index);
+                if self.active > index {
+                    self.active -= 1;
+                }
+                let Body::Editor { first, .. } = tab.body else { return };
+                first
+            }
+            None => self.new_editor(path, window, cx),
+        };
+        self.put_beside(target_id, editor, axis, window, cx);
+    }
+
+    /// Puts an open editor beside the file of tab `target_id`.
+    fn put_beside(
+        &mut self,
+        target_id: usize,
+        editor: Entity<EditorView>,
+        axis: Axis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.tabs.iter().position(|t| t.id == target_id) else {
+            let index = self.push_open_editor(editor);
+            self.select_tab(index, window, cx);
+            return;
+        };
+        let Body::Editor { beside, second_active, .. } = &mut self.tabs[target].body else { return };
+        let old = beside.replace(Beside { editor, axis, ratio: 0.5, bounds: Rc::default() });
+        *second_active = true;
+        if let Some(old) = old {
+            self.push_open_editor(old.editor);
+        }
+        let target = self.tabs.iter().position(|t| t.id == target_id).unwrap_or(target);
+        self.select_tab(target, window, cx);
+    }
+
+    /// A tab dragged onto a file: its file goes beside that one.
+    fn drop_beside(&mut self, dragged: usize, target_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if dragged == target_id {
+            return;
+        }
+        let Some(index) = self.tabs.iter().position(|t| t.id == dragged) else { return };
+        if self.tabs[index].editors().len() != 1 {
+            return;
+        }
+        let tab = self.tabs.remove(index);
+        if self.active > index {
+            self.active -= 1;
+        }
+        let Body::Editor { first, .. } = tab.body else { return };
+        self.put_beside(target_id, first, Axis::Horizontal, window, cx);
+    }
+
+    /// Closes the files of an editor tab: both, or with `half` one of two.
+    /// Unsaved edits are asked about first.
+    fn close_files(&mut self, id: usize, half: Option<bool>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return };
+        let all: Vec<Entity<EditorView>> = tab.editors().into_iter().cloned().collect();
+        let half = half.filter(|_| all.len() > 1);
+        let closing: Vec<_> = match half {
+            None => all,
+            Some(second) => all.into_iter().skip(usize::from(second)).take(1).collect(),
+        };
+        let done = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| match half {
+            None => this.remove_tab(id, window, cx),
+            Some(second) => this.remove_half(id, second, window, cx),
+        };
+        let dirty: Vec<_> = closing.into_iter().filter(|e| e.read(cx).is_dirty()).collect();
+        if dirty.is_empty() {
+            done(self, window, cx);
+            return;
+        }
+        let title = match dirty.as_slice() {
+            [one] => tf("Save changes to {name}?", &[("name", &one.read(cx).file_name())]),
+            _ => tn(dirty.len() as u64, "Save changes to {n} file?", "Save changes to {n} files?", &[]),
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(t("Your changes will be lost if you do not save them.")),
+            &[t("Save"), t("Don't Save"), t("Cancel")],
+            cx,
+        );
+        let this = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, cx| match answer.await {
+            Ok(0) => {
+                let left = Rc::new(Cell::new(dirty.len()));
+                for editor in dirty {
+                    let (left, this) = (left.clone(), this.clone());
+                    let _ = editor.update_in(cx, |editor, window, cx| {
+                        let saved = move |window: &mut Window, cx: &mut App| {
+                            left.set(left.get() - 1);
+                            if left.get() == 0 {
+                                let _ = this.update(cx, |this, cx| done(this, window, cx));
+                            }
+                        };
+                        editor.save(saved, window, cx);
+                    });
+                }
+            }
+            Ok(1) => {
+                let _ = this.update_in(cx, |this, window, cx| done(this, window, cx));
+            }
+            _ => {}
+        })
+        .detach();
+    }
+
+    /// Takes one of the two files out of a tab; the other gets the whole tab.
+    fn remove_half(&mut self, id: usize, second: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|t| t.id == id) else { return };
+        let Body::Editor { first, beside, second_active } = &mut self.tabs[index].body else { return };
+        let Some(other) = beside.take() else {
+            self.remove_tab(id, window, cx);
+            return;
+        };
+        let gone = if second { other.editor } else { std::mem::replace(first, other.editor) };
+        *second_active = false;
+        self.subscriptions.remove(&gone.entity_id());
+        if self.active == index {
+            self.focus_active(window, cx);
+        }
+        cx.notify();
     }
 
     /// Saves every file that has unsaved edits. `then` runs once all of them
@@ -646,7 +882,7 @@ impl TerminalArea {
         cx: &mut Context<Self>,
     ) {
         let unsaved: Vec<_> =
-            self.tabs.iter().filter_map(|t| t.editor()).filter(|e| e.read(cx).is_dirty()).cloned().collect();
+            self.tabs.iter().flat_map(|t| t.editors()).filter(|e| e.read(cx).is_dirty()).cloned().collect();
         if unsaved.is_empty() {
             then(window, cx);
             return;
@@ -674,7 +910,7 @@ impl TerminalArea {
 
     /// How many open files have edits that are not saved.
     pub fn unsaved_count(&self, cx: &App) -> usize {
-        self.tabs.iter().filter_map(|t| t.editor()).filter(|e| e.read(cx).is_dirty()).count()
+        self.tabs.iter().flat_map(|t| t.editors()).filter(|e| e.read(cx).is_dirty()).count()
     }
 
     /// Opens a file in an editor tab, or shows the tab it is already in. The
@@ -691,9 +927,11 @@ impl TerminalArea {
             cx.open_with_system(&path);
             return;
         }
-        let open = self.tabs.iter().position(|t| t.editor().is_some_and(|e| e.read(cx).path() == path));
-        let index = match open {
-            Some(index) => index,
+        let index = match self.find_file(&path, cx) {
+            Some((index, second)) => {
+                self.set_second_active(index, second);
+                index
+            }
             None => self.push_editor(path, window, cx),
         };
         if let (Some(line), Some(editor)) = (line, self.tabs[index].editor().cloned()) {
@@ -743,14 +981,14 @@ impl TerminalArea {
     /// Git has a new commit or another branch: open files count their
     /// changed lines from it.
     pub fn git_changed(&mut self, cx: &mut Context<Self>) {
-        for editor in self.tabs.iter().filter_map(|t| t.editor()) {
+        for editor in self.tabs.iter().flat_map(|t| t.editors()) {
             editor.update(cx, |editor, cx| editor.git_changed(cx));
         }
     }
 
     /// A file or folder was renamed: tabs of files under the old name follow it.
     pub fn path_renamed(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
-        for editor in self.tabs.iter().filter_map(|t| t.editor()) {
+        for editor in self.tabs.iter().flat_map(|t| t.editors()) {
             let moved = editor.read(cx).path().strip_prefix(from).ok().map(|rest| {
                 if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) }
             });
@@ -782,7 +1020,7 @@ impl TerminalArea {
     /// The editor tab of a file, if it is open.
     #[cfg(test)]
     pub fn editor_for(&self, path: &Path, cx: &App) -> Option<Entity<EditorView>> {
-        self.tabs.iter().filter_map(|t| t.editor()).find(|e| e.read(cx).path() == path).cloned()
+        self.tabs.iter().flat_map(|t| t.editors()).find(|e| e.read(cx).path() == path).cloned()
     }
 
     #[cfg(test)]
@@ -905,12 +1143,17 @@ impl TerminalArea {
     }
 
     fn split_active(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        // With one row of tabs a file splits too: another file goes beside
+        // it. Below the files the split keys stay with the terminal.
+        if !Self::docked(cx) && self.tabs.get(self.active).is_some_and(|t| t.editor().is_some()) {
+            self.split_editor(axis, cx);
+            return;
+        }
         self.turn_to_terminal(cx);
         let Some(tab) = self.tabs.get(self.active) else { return };
         if tab.panes().len() >= MAX_PANES {
             return;
         }
-        // Only terminals split; a file takes its whole tab.
         let Some(source) = tab.active_pane().cloned() else { return };
         let cwd = source.read(cx).cwd().unwrap_or_else(|| self.root_dir.clone());
         // A split runs the same shell as the terminal it came from.
@@ -984,9 +1227,9 @@ impl TerminalArea {
     /// Closes a pane or a tab, asking first if that would kill a running program.
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         if let CloseTarget::Tab(id) = target
-            && let Some(editor) = self.tabs.iter().find(|t| t.id == id).and_then(|t| t.editor().cloned())
+            && self.tabs.iter().any(|t| t.id == id && t.editor().is_some())
         {
-            self.close_editor(id, editor, window, cx);
+            self.close_files(id, None, window, cx);
             return;
         }
         // Nothing to lose in a tab of changes.
@@ -1030,41 +1273,10 @@ impl TerminalArea {
         }
     }
 
-    /// Closes a file's tab; with unsaved edits it asks what to do with them.
-    fn close_editor(&mut self, id: usize, editor: Entity<EditorView>, window: &mut Window, cx: &mut Context<Self>) {
-        if !editor.read(cx).is_dirty() {
-            self.remove_tab(id, window, cx);
-            return;
-        }
-        let title = tf("Save changes to {name}?", &[("name", &editor.read(cx).file_name())]);
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &title,
-            Some(t("Your changes will be lost if you do not save them.")),
-            &[t("Save"), t("Don't Save"), t("Cancel")],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| match answer.await {
-            Ok(0) => {
-                let _ = editor.update_in(cx, |editor, window, cx| {
-                    let saved = move |window: &mut Window, cx: &mut App| {
-                        let _ = this.update(cx, |this, cx| this.remove_tab(id, window, cx));
-                    };
-                    editor.save(saved, window, cx);
-                });
-            }
-            Ok(1) => {
-                let _ = this.update_in(cx, |this, window, cx| this.remove_tab(id, window, cx));
-            }
-            _ => {}
-        })
-        .detach();
-    }
-
     fn remove_tab(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.tabs.iter().position(|t| t.id == id) else { return };
         let tab = self.tabs.remove(index);
-        if let Some(editor) = tab.editor() {
+        for editor in tab.editors() {
             self.subscriptions.remove(&editor.entity_id());
         }
         if let Body::Changes(changes) = &tab.body {
@@ -1115,9 +1327,13 @@ impl TerminalArea {
         cx.notify();
     }
 
-    /// Closes the terminal that has the keyboard, or the file in an editor tab.
+    /// Closes the terminal that has the keyboard, or the file that has it.
     fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(self.active) else { return };
+        if let Body::Editor { second_active, .. } = &tab.body {
+            self.close_files(tab.id, Some(*second_active), window, cx);
+            return;
+        }
         let target = match tab.active_pane() {
             Some(pane) => CloseTarget::Pane(pane.entity_id()),
             None => CloseTarget::Tab(tab.id),
@@ -1135,6 +1351,25 @@ impl TerminalArea {
     }
 
     fn on_drag(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.beside_dragging {
+            if event.pressed_button != Some(MouseButton::Left) {
+                self.beside_dragging = None;
+                return;
+            }
+            let Some(Body::Editor { beside: Some(beside), .. }) = self.tabs.iter_mut().find(|t| t.id == id).map(|t| &mut t.body)
+            else {
+                return;
+            };
+            let bounds = beside.bounds.get();
+            let ratio = match beside.axis {
+                Axis::Horizontal if bounds.size.width > px(0.) => (event.position.x - bounds.origin.x) / bounds.size.width,
+                Axis::Vertical if bounds.size.height > px(0.) => (event.position.y - bounds.origin.y) / bounds.size.height,
+                _ => return,
+            };
+            beside.ratio = ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO);
+            cx.notify();
+            return;
+        }
         if self.dock_dragging {
             let bounds = self.dock_bounds.get();
             if event.pressed_button != Some(MouseButton::Left) {
@@ -1292,11 +1527,15 @@ impl TerminalArea {
                     let label = tab.name.clone().map(SharedString::from).unwrap_or_else(|| active.read(cx).label());
                     (label, None, false)
                 }
-                Body::Editor(editor) => {
-                    let editor = editor.read(cx);
-                    let name = editor.file_name();
+                Body::Editor { first, beside, .. } => {
+                    let name = first.read(cx).file_name();
                     let picture = file_icons::for_file(&name).and_then(crate::assets::file_icon);
-                    (SharedString::from(name), picture, editor.is_dirty())
+                    let label = match beside {
+                        Some(beside) => format!("{name} | {}", beside.editor.read(cx).file_name()),
+                        None => name,
+                    };
+                    let unsaved = tab.editors().iter().any(|e| e.read(cx).is_dirty());
+                    (SharedString::from(label), picture, unsaved)
                 }
                 Body::Diff(diff) => {
                     let diff = diff.read(cx);
@@ -1388,6 +1627,8 @@ impl TerminalArea {
             Group::Files => true,
             Group::Terminals => false,
         };
+        // A file in the editor can have another one beside it.
+        let on_editor = on_file && shown.and_then(|index| self.tabs.get(index)).is_some_and(|t| t.editor().is_some());
         let close = if on_file {
             button("close-file", IconName::Close, t("Close this file (Ctrl+Shift+W)"))
         } else {
@@ -1447,6 +1688,16 @@ impl TerminalArea {
                     .gap_1()
                     .px_2()
                     .child(close)
+                    .when(on_editor, |d| {
+                        d.child(
+                            button("split-editor-right", IconName::PanelRight, t("Open another file beside this one"))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.split_editor(Axis::Horizontal, cx))),
+                        )
+                        .child(
+                            button("split-editor-down", IconName::PanelBottom, t("Open another file below this one"))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.split_editor(Axis::Vertical, cx))),
+                        )
+                    })
                     .when(!on_file, |d| {
                         d.child(
                             button("split-right", IconName::PanelRight, t("Split right (Ctrl+Shift+D)")).on_click(
@@ -1485,11 +1736,92 @@ impl TerminalArea {
             )
     }
 
+    /// One file, or two with a line to drag between them. A tab dropped on
+    /// it puts its file beside this one.
+    fn render_editors(&self, tab: &Tab, cx: &mut Context<Self>) -> AnyElement {
+        let Body::Editor { first, beside, second_active } = &tab.body else { return div().into_any_element() };
+        let tab_id = tab.id;
+        let drop = cx.listener(move |this, dragged: &DraggedTab, window, cx| this.drop_beside(dragged.id, tab_id, window, cx));
+        let Some(beside) = beside else {
+            return div()
+                .id(("editor-body", tab_id))
+                .size_full()
+                .drag_over::<DraggedTab>(|style, _, _, _| style.opacity(0.6))
+                .on_drop(drop)
+                .child(first.clone())
+                .into_any_element();
+        };
+        let horizontal = beside.axis == Axis::Horizontal;
+        let (ratio, bounds) = (beside.ratio, beside.bounds.clone());
+        let theme = cx.theme();
+        let (line, accent, background) = (theme.border, theme.primary, theme.background);
+        let half = |editor: &Entity<EditorView>, second: bool, cx: &mut Context<Self>| {
+            let active = second == *second_active;
+            div()
+                .relative()
+                .size_full()
+                .child(editor.clone())
+                // A thin line over the file that has the keyboard.
+                .when(active, |d| d.child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(accent)))
+                .child(
+                    div().absolute().top(px(4.)).right(px(16.)).rounded_sm().bg(background.opacity(0.8)).occlude().child(
+                        Button::new(("close-half", tab_id * 2 + usize::from(second)))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(t("Close this file"))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.close_files(tab_id, Some(second), window, cx)
+                            })),
+                    ),
+                )
+        };
+        let first = div()
+            .flex_none()
+            .overflow_hidden()
+            .map(|d| if horizontal { d.h_full().w(relative(ratio)) } else { d.w_full().h(relative(ratio)) })
+            .child(half(first, false, cx));
+        let second = div().flex_1().min_w_0().min_h_0().overflow_hidden().child(half(&beside.editor, true, cx));
+        let divider = div()
+            .id(("editor-divider", tab_id))
+            .flex_none()
+            .flex()
+            .bg(background)
+            .map(|d| {
+                if horizontal {
+                    d.h_full().w(px(DIVIDER)).justify_center().cursor_col_resize()
+                } else {
+                    d.w_full().h(px(DIVIDER)).flex_col().justify_center().cursor_row_resize()
+                }
+            })
+            .child(div().bg(line).map(|d| if horizontal { d.h_full().w(px(1.)) } else { d.w_full().h(px(1.)) }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.beside_dragging = Some(tab_id);
+                    cx.stop_propagation();
+                }),
+            );
+        div()
+            .id(("editor-body", tab_id))
+            .size_full()
+            .relative()
+            .flex()
+            .when(!horizontal, |d| d.flex_col())
+            .drag_over::<DraggedTab>(|style, _, _, _| style.opacity(0.6))
+            .on_drop(drop)
+            .child(canvas(move |laid_out, _, _| bounds.set(laid_out), |_, _, _, _| {}).absolute().size_full())
+            .child(first)
+            .child(divider)
+            .child(second)
+            .into_any_element()
+    }
+
     /// What the tab at `index` shows under its tab bar.
     fn render_body(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match self.tabs.get(index).map(|t| &t.body) {
             Some(Body::Terminals { root, .. }) => self.render_node(root, true, cx),
-            Some(Body::Editor(editor)) => editor.clone().into_any_element(),
+            Some(Body::Editor { .. }) => self.render_editors(&self.tabs[index], cx),
             Some(Body::Diff(diff)) => diff.clone().into_any_element(),
             Some(Body::Changes(changes)) => changes.clone().into_any_element(),
             None => div().into_any_element(),
@@ -1625,6 +1957,16 @@ impl Render for TerminalArea {
         {
             *active = focused;
         }
+        // And whichever of two files was clicked has the keyboard in its tab.
+        for tab in &mut self.tabs {
+            if let Body::Editor { first, beside: Some(beside), second_active } = &mut tab.body {
+                if beside.editor.focus_handle(cx).contains_focused(window, cx) {
+                    *second_active = true;
+                } else if first.focus_handle(cx).contains_focused(window, cx) {
+                    *second_active = false;
+                }
+            }
+        }
 
         // With two tabs on screen, the one that was clicked into is the active one.
         let docked = Self::docked(cx);
@@ -1677,8 +2019,11 @@ impl Render for TerminalArea {
                 cx.listener(|this, _: &MouseUpEvent, _, _| {
                     this.dragging = None;
                     this.dock_dragging = false;
+                    this.beside_dragging = None;
                 }),
             )
+            .on_action(cx.listener(|this, _: &SplitEditorRight, _, cx| this.split_editor(Axis::Horizontal, cx)))
+            .on_action(cx.listener(|this, _: &SplitEditorDown, _, cx| this.split_editor(Axis::Vertical, cx)))
             .on_action(cx.listener(move |this, _: &NewTab, window, cx| {
                 if idle {
                     this.add_tab(window, cx);
@@ -2160,7 +2505,7 @@ two
         // Split right, then the right half split down.
         let PaneLayout::Split { stacked: false, second, .. } = panes else { panic!("{panes:?}") };
         assert!(matches!(**second, PaneLayout::Split { stacked: true, .. }));
-        assert_eq!(layout.tabs[2], TabLayout::File { path: file.clone() });
+        assert_eq!(layout.tabs[2], TabLayout::File { path: file.clone(), beside: None });
 
         // A layout from the state file: a folder and a file that are gone are
         // left out, a broken ratio is repaired, and no tab gets a fifth terminal.
@@ -2176,9 +2521,9 @@ two
             dock_ratio: None,
             terminal_hidden: false,
             tabs: vec![
-                TabLayout::File { path: dir.join("gone.txt") },
+                TabLayout::File { path: dir.join("gone.txt"), beside: None },
                 TabLayout::Terminals { panes: *crowded, name: None },
-                TabLayout::File { path: file.clone() },
+                TabLayout::File { path: file.clone(), beside: None },
             ],
             active: 7,
         };
@@ -2192,13 +2537,88 @@ two
         let layout = restored.read_with(cx, |a, cx| a.layout(cx));
         assert_eq!(layout.tabs.len(), 2);
         assert_eq!(layout.active, 1);
-        assert_eq!(layout.tabs[1], TabLayout::File { path: file.clone() });
+        assert_eq!(layout.tabs[1], TabLayout::File { path: file.clone(), beside: None });
         let TabLayout::Terminals { panes, .. } = &layout.tabs[0] else { panic!("{layout:?}") };
         assert_eq!(panes.terminals(), 4);
         let PaneLayout::Split { stacked: false, ratio, first, second } = panes else { panic!("{panes:?}") };
         assert_eq!(*ratio, 0.5);
         assert!(matches!(**first, PaneLayout::Split { stacked: true, ratio, .. } if ratio == 0.25));
         assert!(matches!(**second, PaneLayout::Split { stacked: true, ratio, .. } if ratio == 0.9));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    async fn two_files_share_a_tab(cx: &mut TestAppContext) {
+        use super::{AreaEvent, Axis, Cell, Context, Rc, Window};
+        use wercode_core::state::{Beside as Saved, Layout, TabLayout};
+        let (window, area) = open(cx);
+        let dir = std::env::temp_dir().join(format!("wercode-beside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let [a, b, c] = ["a.txt", "b.txt", "c.txt"].map(|name| {
+            std::fs::write(dir.join(name), format!("{name}\n")).unwrap();
+            dir.join(name)
+        });
+        let run = |cx: &mut TestAppContext, f: &dyn Fn(&mut TerminalArea, &mut Window, &mut Context<TerminalArea>)| {
+            cx.update_window(window, |_, window, cx| area.update(cx, |area, cx| f(area, window, cx))).unwrap();
+            cx.run_until_parked();
+        };
+        let tabs = |cx: &mut TestAppContext| area.read_with(cx, |a, cx| a.layout(cx).tabs);
+        let shown = |cx: &mut TestAppContext| area.read_with(cx, |a, cx| a.shown_file(cx));
+        let file = |path: &std::path::PathBuf, beside: Option<(&std::path::PathBuf, bool)>| TabLayout::File {
+            path: path.clone(),
+            beside: beside.map(|(path, stacked)| Saved { path: path.clone(), stacked, ratio: 0.5 }),
+        };
+
+        run(cx, &|area, window, cx| {
+            area.open_path(b.clone(), None, None, window, cx);
+            area.open_path(a.clone(), None, None, window, cx);
+        });
+        assert_eq!(tabs(cx).len(), 3);
+        // A file with a tab of its own moves over beside the one showing, and has the keyboard.
+        run(cx, &|area, window, cx| area.open_beside(b.clone(), Axis::Horizontal, window, cx));
+        assert_eq!(tabs(cx), [tabs(cx)[0].clone(), file(&a, Some((&b, false)))]);
+        assert_eq!(shown(cx), Some(b.clone()));
+        // Another file beside takes the place; the one before gets its tab back.
+        run(cx, &|area, window, cx| area.open_beside(c.clone(), Axis::Vertical, window, cx));
+        assert_eq!(tabs(cx)[1..], [file(&a, Some((&c, true))), file(&b, None)]);
+        // Opening a file of the pair shows that half.
+        run(cx, &|area, window, cx| area.open_path(a.clone(), None, None, window, cx));
+        assert_eq!(shown(cx), Some(a.clone()));
+        assert_eq!(area.read_with(cx, |a, _| a.active), 1);
+
+        // The split keys in a file ask the window for a file to put beside it.
+        let picked = Rc::new(Cell::new(None));
+        let seen = picked.clone();
+        let _watch = cx.update(|cx| {
+            cx.subscribe(&area, move |_, event: &AreaEvent, _| {
+                if let AreaEvent::PickBeside(axis) = event {
+                    seen.set(Some(*axis));
+                }
+            })
+        });
+        press(cx, window, &["ctrl-shift-e"]);
+        assert_eq!(picked.get(), Some(Axis::Vertical));
+        press(cx, window, &["ctrl-shift-d"]);
+        assert_eq!(picked.get(), Some(Axis::Horizontal));
+
+        // Closing the file with the keyboard leaves the other one the whole tab.
+        press(cx, window, &["ctrl-shift-w"]);
+        assert_eq!(tabs(cx)[1..], [file(&c, None), file(&b, None)]);
+        // A tab dropped on a file goes beside it.
+        let (b_tab, c_tab) = area.read_with(cx, |a, _| (a.tabs[2].id, a.tabs[1].id));
+        run(cx, &|area, window, cx| area.drop_beside(b_tab, c_tab, window, cx));
+        assert_eq!(tabs(cx)[1..], [file(&c, Some((&b, false)))]);
+
+        // Written down and put back the same way; a second file that is gone is left out.
+        let saved = Layout { tabs: vec![file(&a, Some((&c, true))), file(&b, Some((&dir.join("gone.txt"), false)))], ..Layout::default() };
+        let root = dir.clone();
+        let (_, restored) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| TerminalArea::new(root, Some(&saved), window, cx))
+            })
+            .unwrap()
+        });
+        assert_eq!(restored.read_with(cx, |a, cx| a.layout(cx).tabs), [file(&a, Some((&c, true))), file(&b, None)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

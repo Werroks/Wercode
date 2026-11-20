@@ -23,7 +23,7 @@ use wercode_core::state::{self, Layout, State};
 use wercode_core::tasks::{self, Task as ProjectTask};
 use wercode_core::watch::{self, Watch};
 
-use crate::editor::{RenameSymbol, Save};
+use crate::editor::{RenameSymbol, Save, SplitEditorDown, SplitEditorRight};
 use crate::symbols::{GoToProjectSymbol, GoToSymbol, SymbolPicker, SymbolsEvent};
 use crate::lsp::RestartLanguageServers;
 use crate::panel::git as git_panel;
@@ -179,6 +179,8 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("Editor: Go to Definition"), Box::new(GoToDefinition)),
         (t("Editor: Quick Fix\u{2026}"), Box::new(ToggleCodeActions)),
         (t("Editor: Rename Symbol\u{2026}"), Box::new(RenameSymbol)),
+        (t("Editor: Open a File to the Side\u{2026}"), Box::new(SplitEditorRight)),
+        (t("Editor: Open a File Below\u{2026}"), Box::new(SplitEditorDown)),
         (t("Go to Symbol in File\u{2026}"), Box::new(GoToSymbol)),
         (t("Go to Symbol in Project\u{2026}"), Box::new(GoToProjectSymbol)),
         (t("View: Toggle Side Panel"), Box::new(TogglePanel)),
@@ -254,6 +256,8 @@ struct WorktreeMenu {
 /// The list for opening a file by a few letters of its name.
 struct FileFinder {
     state: Entity<CommandState>,
+    /// The chosen file goes beside the file showing, this way.
+    beside: Option<Axis>,
     /// Paths inside the project, with forward slashes. `None` until the
     /// folder has been read.
     files: Option<Arc<Vec<String>>>,
@@ -369,6 +373,9 @@ impl Workspace {
                 let (terminals, root) = (project.terminals.clone(), project.root.clone());
                 match event {
                     FilesEvent::Open(path) => this.open_file(path.clone(), None, window, cx),
+                    FilesEvent::OpenBeside(path) => {
+                        terminals.update(cx, |area, cx| area.open_beside(path.clone(), Axis::Horizontal, window, cx));
+                    }
                     FilesEvent::Insert(path) => {
                         terminals.update(cx, |area, cx| area.insert_path(path, window, cx));
                     }
@@ -419,8 +426,9 @@ impl Workspace {
             // A fetch, pull or push shows in the status bar while it runs.
             cx.observe(&changes, |_, _, cx| cx.notify()),
             // The tab of all changes staged or threw something away.
-            cx.subscribe(&terminals, |this, _, event: &AreaEvent, cx| match event {
+            cx.subscribe_in(&terminals, window, |this, _, event: &AreaEvent, window, cx| match event {
                 AreaEvent::GitChanged => this.refresh_git(cx),
+                AreaEvent::PickBeside(axis) => this.open_finder_beside(Some(*axis), window, cx),
             }),
             // Tabs opened, closed or split are written down for the next launch.
             cx.observe(&terminals, |this, _, cx| {
@@ -1335,6 +1343,12 @@ impl Workspace {
     /// Shows the list of the project's files. The folder is read in the
     /// background; what is typed meanwhile is applied when it arrives.
     fn open_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_finder_beside(None, window, cx);
+    }
+
+    /// The list for opening a file by name; with `beside`, the file chosen
+    /// is shown next to the one showing, in the same tab.
+    fn open_finder_beside(&mut self, beside: Option<Axis>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = &self.project else { return };
         let root = project.root.clone();
         self.switcher_open = false;
@@ -1361,7 +1375,7 @@ impl Workspace {
             });
         })
         .detach();
-        self.finder = Some(FileFinder { state, files: None, shown: Vec::new(), cancel });
+        self.finder = Some(FileFinder { state, beside, files: None, shown: Vec::new(), cancel });
         cx.notify();
     }
 
@@ -1468,6 +1482,7 @@ impl Workspace {
     /// Opens the file in row `row` of the list and closes the list.
     fn finder_confirm(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(finder), Some(project)) = (&self.finder, &self.project) else { return };
+        let (beside, terminals) = (finder.beside, project.terminals.clone());
         let path = finder
             .files
             .as_ref()
@@ -1476,9 +1491,10 @@ impl Workspace {
         self.close_finder_quietly();
         self.tasks = None;
         cx.notify();
-        match path {
-            Some(path) => self.open_file(path, None, window, cx),
-            None => self.focus_terminals(window, cx),
+        match (path, beside) {
+            (Some(path), Some(axis)) => terminals.update(cx, |area, cx| area.open_beside(path, axis, window, cx)),
+            (Some(path), None) => self.open_file(path, None, window, cx),
+            (None, _) => self.focus_terminals(window, cx),
         }
     }
 
@@ -1898,6 +1914,12 @@ impl Workspace {
                 .shadow_lg()
                 .overflow_hidden()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .when_some(finder.beside, |d, axis| {
+                    d.child(div().id("finder-beside").px_3().pt_2().text_xs().text_color(muted).child(match axis {
+                        Axis::Horizontal => t("Choose a file to show to the right of the one showing."),
+                        Axis::Vertical => t("Choose a file to show below the one showing."),
+                    }))
+                })
                 .child(
                     Command::new(&finder.state)
                         .items(items)
@@ -3530,7 +3552,7 @@ three
         cx.run_until_parked();
         let area = f.workspace.read_with(cx, |w, _| w.terminals());
         let layout = area.read_with(cx, |a, cx| a.layout(cx));
-        assert_eq!(layout.tabs.last(), Some(&TabLayout::File { path: root.join("src").join("a.rs") }));
+        assert_eq!(layout.tabs.last(), Some(&TabLayout::File { path: root.join("src").join("a.rs"), beside: None }));
         assert_eq!(layout.active, 1);
 
         // Options narrow it down; a pattern that is not valid says so.
@@ -3623,9 +3645,9 @@ three
         let moved = root.join("lib").join("old.rs");
         assert!(moved.is_file() && !old.exists());
         let tab = |cx: &mut TestAppContext| area.read_with(cx, |a, cx| a.layout(cx).tabs.last().cloned());
-        assert_eq!(tab(cx), Some(TabLayout::File { path: moved.clone() }));
+        assert_eq!(tab(cx), Some(TabLayout::File { path: moved.clone(), beside: None }));
         rename(cx, &moved, "new.rs");
-        assert_eq!(tab(cx), Some(TabLayout::File { path: root.join("lib").join("new.rs") }));
+        assert_eq!(tab(cx), Some(TabLayout::File { path: root.join("lib").join("new.rs"), beside: None }));
         wait_until(cx, "the renamed folder in the tree", |cx| files.read_with(cx, |p, cx| p.shows(&root.join("lib"), cx)));
 
         // A name that is taken is refused and said so; nothing moves.
@@ -3808,7 +3830,7 @@ three
         };
         let layout = saved.layouts.get(&root).expect("the tabs were saved");
         assert_eq!(shape(layout), (vec![2, 1, 0], 1));
-        assert_eq!(layout.tabs[2], TabLayout::File { path: path.clone() });
+        assert_eq!(layout.tabs[2], TabLayout::File { path: path.clone(), beside: None });
 
         let state_path = f.state_path.clone();
         let (_, reopened) = cx.update(|cx| {
@@ -3978,7 +4000,7 @@ four
         cx.run_until_parked();
         assert!(f.workspace.read_with(cx, |w, _| w.finder.is_none()));
         let last = area.read_with(cx, |a, cx| a.layout(cx).tabs.last().cloned());
-        assert_eq!(last, Some(TabLayout::File { path: root.join("src").join("beta.rs") }));
+        assert_eq!(last, Some(TabLayout::File { path: root.join("src").join("beta.rs"), beside: None }));
         let _ = std::fs::remove_dir_all(&f.dir);
     }
 

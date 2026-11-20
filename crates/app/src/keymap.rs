@@ -6,7 +6,7 @@ use std::rc::Rc;
 use gpui_kit::component::input::{GoToDefinition, ShowCompletions, ToggleCodeActions};
 use gpui_kit::*;
 
-use crate::editor::{RenameSymbol, Save};
+use crate::editor::{RenameSymbol, Save, SplitEditorDown, SplitEditorRight};
 use crate::symbols::{GoToProjectSymbol, GoToSymbol};
 use crate::lsp::RestartLanguageServers;
 use crate::panel::git::{Commit, Fetch, Pull, Push, ShowAllChanges, StageAll};
@@ -91,6 +91,9 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("editor.show_completions", "EditorView", ShowCompletions, ["ctrl-space"], t("Editor: Show Completions")),
         shortcut!("editor.quick_fix", "EditorView", ToggleCodeActions, ["ctrl-."], t("Editor: Quick Fix\u{2026}")),
         shortcut!("editor.rename", "EditorView", RenameSymbol, ["f2"], t("Editor: Rename Symbol\u{2026}")),
+        // With one row of tabs the terminal's split keys do this in a file too.
+        shortcut!("editor.split_right", "EditorView", SplitEditorRight, [], t("Editor: Open a File to the Side\u{2026}")),
+        shortcut!("editor.split_down", "EditorView", SplitEditorDown, [], t("Editor: Open a File Below\u{2026}")),
         // R as in Sublime; Ctrl+Shift+O opens a folder here.
         shortcut!("editor.go_to_symbol", "EditorView", GoToSymbol, ["ctrl-r"], t("Go to Symbol in File\u{2026}")),
         shortcut!("workspace.go_to_project_symbol", "Workspace", GoToProjectSymbol, [], t("Go to Symbol in Project\u{2026}")),

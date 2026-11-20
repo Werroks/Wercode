@@ -33,7 +33,23 @@ pub enum TabLayout {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
-    File { path: PathBuf },
+    File {
+        path: PathBuf,
+        /// A second file shown beside the first in the same tab.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        beside: Option<Beside>,
+    },
+}
+
+/// The second file of a tab that shows two.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Beside {
+    pub path: PathBuf,
+    /// One above the other instead of side by side.
+    #[serde(default)]
+    pub stacked: bool,
+    /// Share of the space taken by the first file.
+    pub ratio: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -193,7 +209,8 @@ mod tests {
         assert_eq!(split.terminals(), 2);
         let tabs = vec![
             TabLayout::Terminals { panes: split, name: Some("server".into()) },
-            TabLayout::File { path: dir.join("a.rs") },
+            TabLayout::File { path: dir.join("a.rs"), beside: None },
+            TabLayout::File { path: dir.join("b.rs"), beside: Some(Beside { path: dir.join("c.rs"), stacked: true, ratio: 0.4 }) },
         ];
         s.layouts.insert(dir.clone(), Layout { tabs, active: 1, ..Layout::default() });
         save_to(&path, &s).unwrap();

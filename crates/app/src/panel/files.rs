@@ -33,6 +33,8 @@ enum Naming {
 pub enum FilesEvent {
     /// A file was clicked.
     Open(PathBuf),
+    /// Show the file beside the one showing, in the same tab.
+    OpenBeside(PathBuf),
     /// Type this path into the terminal.
     Insert(PathBuf),
     /// Open the file in the program named by `$EDITOR`, in a terminal tab.
@@ -545,6 +547,9 @@ impl Render for FilesPanel {
                                 this.start_naming(Naming::Folder, path, window, cx)
                             }))
                             .separator()
+                        })
+                        .when(!folder, |menu| {
+                            menu.item(item(t("Open to the Side"), |_, path, _, cx| cx.emit(FilesEvent::OpenBeside(path))))
                         })
                         .item(item(t("Insert Path into Terminal"), |_, path, _, cx| cx.emit(FilesEvent::Insert(path))))
                         .when(!folder && editor.is_some(), |menu| {

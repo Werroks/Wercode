@@ -365,3 +365,12 @@
 "WORKTREES" = "WORKTREES"
 "Worktrees: a folder for each branch" = "Worktrees: ein Ordner für jeden Branch"
 "its folder is gone" = "sein Ordner ist weg"
+"Choose a file to show below the one showing." = "Wählen Sie eine Datei, die unter der angezeigten erscheinen soll."
+"Choose a file to show to the right of the one showing." = "Wählen Sie eine Datei, die rechts neben der angezeigten erscheinen soll."
+"Close this file" = "Diese Datei schließen"
+"Editor: Open a File Below…" = "Editor: Datei darunter öffnen…"
+"Editor: Open a File to the Side…" = "Editor: Datei daneben öffnen…"
+"Open another file below this one" = "Eine weitere Datei darunter öffnen"
+"Open another file beside this one" = "Eine weitere Datei daneben öffnen"
+"Open to the Side" = "Daneben öffnen"
+"Save changes to {n} files?" = { one = "Änderungen an {n} Datei speichern?", other = "Änderungen an {n} Dateien speichern?" }

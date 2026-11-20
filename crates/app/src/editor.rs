@@ -34,7 +34,11 @@ actions!(
     [
         Save,
         /// Renames the name under the cursor wherever the project uses it.
-        RenameSymbol
+        RenameSymbol,
+        /// Chooses another file to show to the right of this one, in the same tab.
+        SplitEditorRight,
+        /// Chooses another file to show below this one, in the same tab.
+        SplitEditorDown
     ]
 );
 

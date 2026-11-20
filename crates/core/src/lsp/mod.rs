@@ -2,12 +2,14 @@
 //! errors and warnings (`rust-analyzer`, `pyright`, `gopls` and the like).
 //!
 //! Wercode does not bundle them. A server installed on the computer is
-//! found on `PATH` and started for the files of its language when one of them
+//! found on `PATH`, or one Wercode fetched into its own folder
+//! ([`download`]), and started for the files of its language when one of them
 //! is opened; what it reports is kept here by file. Each server runs in its
 //! own process with a thread here that talks to it, so nothing waits for a
 //! server on the thread that draws the window.
 
 mod client;
+pub mod download;
 #[doc(hidden)]
 pub mod fake;
 mod rpc;
@@ -169,6 +171,9 @@ pub struct Report {
     pub servers: Vec<(String, Status)>,
     /// When no server for the language is installed: a command that installs one.
     pub install: Option<String>,
+    /// When no server for the language is installed: the one Wercode can
+    /// fetch into its own folder, by name.
+    pub download: Option<String>,
 }
 
 /// An open file.
@@ -680,14 +685,16 @@ impl Servers {
         let doc = state.docs.get(path);
         let mut servers = Vec::new();
         let mut install = None;
+        let mut download = None;
         let mut working = false;
         for (index, spec) in self.shared.specs.iter().enumerate().filter(|(_, s)| s.languages.contains(&language)) {
             let server =
                 doc.and_then(|doc| state.servers.iter().find(|s| s.spec == index && doc.servers.contains(&s.id)));
             match server {
                 Some(server) if server.status == Status::Missing => {
-                    if spec.offer && install.is_none() {
+                    if spec.offer && install.is_none() && download.is_none() {
                         install = spec.install.clone();
+                        download = spec.download.as_ref().map(|_| spec.name.clone());
                     }
                 }
                 Some(server) => {
@@ -698,10 +705,13 @@ impl Servers {
             }
         }
         let language = language_name(language);
-        if servers.is_empty() && install.is_none() && doc.is_none() {
+        if servers.is_empty() && install.is_none() && download.is_none() && doc.is_none() {
             return None;
         }
-        Some(Report { language, servers, install: if working { None } else { install } })
+        if working {
+            (install, download) = (None, None);
+        }
+        Some(Report { language, servers, install, download })
     }
 
     /// Looks again for servers that were not installed, for the files that
@@ -739,6 +749,11 @@ impl Servers {
     }
 
     /// Stops every server and starts them again for the open files.
+    /// How Wercode can fetch the server named `name`, if it can.
+    pub fn download_of(&self, name: &str) -> Option<download::Download> {
+        self.shared.specs.iter().find(|spec| spec.name == name)?.download.clone()
+    }
+
     pub fn restart(&self) {
         self.stop_servers();
         {
@@ -1042,6 +1057,7 @@ mod tests {
             languages: vec!["rust"],
             markers: vec!["Cargo.toml"],
             install: None,
+            download: None,
             offer: true,
         }
     }

@@ -1,6 +1,7 @@
 //! The language servers every window shares, and what they report: the
 //! editor underlines it, the status bar counts it, the problems panel lists it.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -28,8 +29,17 @@ pub enum CheckerEvent {
     Edits(PathBuf, Vec<Edit>),
 }
 
+/// A server Wercode is fetching into its own folder, or could not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fetching {
+    Running,
+    Failed(String),
+}
+
 pub struct Checker {
     servers: Servers,
+    /// Servers being fetched, or whose fetch failed, by name.
+    fetching: HashMap<String, Fetching>,
     _events: Task<()>,
     _retry: Task<()>,
 }
@@ -39,6 +49,43 @@ impl EventEmitter<CheckerEvent> for Checker {}
 impl Checker {
     pub fn servers(&self) -> &Servers {
         &self.servers
+    }
+
+    pub fn fetching(&self, name: &str) -> Option<&Fetching> {
+        self.fetching.get(name)
+    }
+
+    /// Fetches a language server into Wercode's own folder and starts it
+    /// for the files waiting for it.
+    pub fn fetch(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.fetching.get(&name) == Some(&Fetching::Running) {
+            return;
+        }
+        let Some(download) = self.servers.download_of(&name) else { return };
+        self.fetching.insert(name.clone(), Fetching::Running);
+        cx.notify();
+        let servers = self.servers.clone();
+        cx.spawn(async move |this, cx| {
+            let fetched = name.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let result = lsp::download::install(&fetched, &download).map(drop);
+                    if result.is_ok() {
+                        servers.retry_missing();
+                    }
+                    result
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => drop(this.fetching.remove(&name)),
+                    Err(error) => drop(this.fetching.insert(name, Fetching::Failed(error))),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -88,7 +135,7 @@ pub fn init_with(specs: Vec<Spec>, cx: &mut App) {
                 cx.background_executor().spawn(async move { servers.retry_missing() }).await;
             }
         });
-        Checker { servers: servers.clone(), _events: events, _retry: retry }
+        Checker { servers: servers.clone(), fetching: HashMap::new(), _events: events, _retry: retry }
     });
     cx.set_global(Shared(checker));
 

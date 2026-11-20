@@ -144,16 +144,28 @@ fn probe(path: &Path, args: &[String]) -> bool {
     }
 }
 
-/// The first of the spec's programs found on this computer.
+/// The first of the spec's programs found on this computer, else the one
+/// Wercode fetched into its own folder.
 fn find(spec: &Spec) -> Option<(Program, PathBuf)> {
-    spec.programs.iter().find_map(|program| {
+    let works = |path: &Path| spec.probe.as_ref().is_none_or(|args| probe(path, args));
+    let on_computer = spec.programs.iter().find_map(|program| {
         let path = specs::find_program(&program.program)?;
-        if let Some(args) = &spec.probe
-            && !probe(&path, args)
-        {
+        works(&path).then(|| (program.clone(), path))
+    });
+    on_computer.or_else(|| {
+        spec.download.as_ref()?;
+        let fetched = super::download::installed(&spec.name)?;
+        let base = spec.programs.first()?;
+        // A server run by Node is asked for its version through Node, so the probe is for programs alone.
+        if fetched.args.is_empty() && !works(&fetched.program) {
             return None;
         }
-        Some((program.clone(), path))
+        let program = Program {
+            program: fetched.program.to_string_lossy().into_owned(),
+            args: fetched.args.iter().cloned().chain(base.args.iter().cloned()).collect(),
+            env: base.env.clone(),
+        };
+        Some((program, fetched.program))
     })
 }
 

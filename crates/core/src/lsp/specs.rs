@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use super::download::{Asset, Download};
+
 /// One way to run a server.
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -30,6 +32,9 @@ pub struct Spec {
     pub markers: Vec<&'static str>,
     /// A command that installs the server, run in a terminal when asked.
     pub install: Option<String>,
+    /// How Wercode fetches the server into its own folder, without
+    /// anything installed on the computer; then `install` is not needed.
+    pub download: Option<Download>,
     /// Whether to offer the install when the server is missing. A second
     /// server for the same language (a linter next to a type checker) is
     /// used when it is there, and not asked for when it is not.
@@ -54,8 +59,61 @@ fn spec(
         languages: languages.to_vec(),
         markers: markers.to_vec(),
         install: install.map(Into::into),
+        download: None,
         offer: true,
     }
+}
+
+/// Rust's name for a computer as release files of Rust programs spell it.
+fn target(os: &str, arch: &str) -> Option<&'static str> {
+    Some(match (os, arch) {
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        _ => return None,
+    })
+}
+
+fn rust_analyzer_asset(os: &str, arch: &str) -> Option<Asset> {
+    let ending = if os == "windows" { "zip" } else { "gz" };
+    Some(Asset::Exact(format!("rust-analyzer-{}.{ending}", target(os, arch)?)))
+}
+
+fn ruff_asset(os: &str, arch: &str) -> Option<Asset> {
+    let ending = if os == "windows" { "zip" } else { "tar.gz" };
+    Some(Asset::Exact(format!("ruff-{}.{ending}", target(os, arch)?)))
+}
+
+/// Taplo has had a "full" build with the language server next to a plain
+/// one; the full one is taken when the release has it.
+fn taplo_asset(os: &str, arch: &str) -> Option<Asset> {
+    let (platform, ending) = match (os, arch) {
+        ("windows", "x86_64") => ("windows-x86_64", ".zip"),
+        ("macos", "x86_64") => ("darwin-x86_64", ".gz"),
+        ("macos", "aarch64") => ("darwin-aarch64", ".gz"),
+        ("linux", "x86_64") => ("linux-x86_64", ".gz"),
+        ("linux", "aarch64") => ("linux-aarch64", ".gz"),
+        _ => return None,
+    };
+    let names = [format!("taplo-full-{platform}"), format!("taplo-{platform}")];
+    Some(Asset::Around(names.into_iter().map(|name| (format!("{name}{ending}"), ending.to_string())).collect()))
+}
+
+fn clangd_asset(os: &str, arch: &str) -> Option<Asset> {
+    let start = match (os, arch) {
+        ("windows", "x86_64") => "clangd-windows-",
+        ("macos", _) => "clangd-mac-",
+        ("linux", "x86_64") => "clangd-linux-",
+        _ => return None,
+    };
+    Some(Asset::Around(vec![(start.to_string(), ".zip".to_string())]))
+}
+
+fn npm(packages: &'static [&'static str], package: &'static str, bin: &'static str) -> Option<Download> {
+    Some(Download::Npm { packages, package, bin })
 }
 
 fn clangd_install() -> Option<&'static str> {
@@ -75,9 +133,11 @@ pub fn builtin() -> Vec<Spec> {
     const PYTHON_MARKERS: &[&str] =
         &["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "pyrightconfig.json"];
     const VSCODE: &str = "npm install -g vscode-langservers-extracted";
+    const EXTRACTED: &[&str] = &["vscode-langservers-extracted"];
     vec![
         Spec {
             probe: Some(vec!["--version".into()]),
+            download: Some(Download::GitHub { repo: "rust-lang/rust-analyzer", asset: rust_analyzer_asset, binary: "rust-analyzer" }),
             ..spec(
                 "rust-analyzer",
                 vec![program("rust-analyzer", &[])],
@@ -86,14 +146,19 @@ pub fn builtin() -> Vec<Spec> {
                 Some("rustup component add rust-analyzer"),
             )
         },
-        spec(
-            "typescript-language-server",
-            vec![program("typescript-language-server", &["--stdio"])],
-            JS,
-            NODE_MARKERS,
-            Some("npm install -g typescript typescript-language-server"),
-        ),
-        spec(
+        Spec {
+            download: npm(&["typescript-language-server", "typescript"], "typescript-language-server", "typescript-language-server"),
+            ..spec(
+                "typescript-language-server",
+                vec![program("typescript-language-server", &["--stdio"])],
+                JS,
+                NODE_MARKERS,
+                Some("npm install -g typescript typescript-language-server"),
+            )
+        },
+        Spec {
+            download: npm(&["pyright"], "pyright", "pyright-langserver"),
+            ..spec(
             "pyright",
             vec![
                 program("basedpyright-langserver", &["--stdio"]),
@@ -103,9 +168,11 @@ pub fn builtin() -> Vec<Spec> {
             &["python"],
             PYTHON_MARKERS,
             Some("npm install -g pyright"),
-        ),
+        )
+        },
         Spec {
             offer: false,
+            download: Some(Download::GitHub { repo: "astral-sh/ruff", asset: ruff_asset, binary: "ruff" }),
             ..spec(
                 "ruff",
                 vec![program("ruff", &["server"])],
@@ -121,55 +188,76 @@ pub fn builtin() -> Vec<Spec> {
             &["go.work", "go.mod"],
             Some("go install golang.org/x/tools/gopls@latest"),
         ),
-        spec(
-            "clangd",
-            vec![program("clangd", &[])],
-            &["c", "cpp"],
-            &["compile_commands.json", "compile_flags.txt", ".clangd", "CMakeLists.txt"],
-            clangd_install(),
-        ),
-        spec(
-            "vscode-json-language-server",
-            vec![program("vscode-json-language-server", &["--stdio"])],
-            &["json", "jsonc"],
-            NODE_MARKERS,
-            Some(VSCODE),
-        ),
-        spec(
-            "vscode-css-language-server",
-            vec![program("vscode-css-language-server", &["--stdio"])],
-            &["css", "scss", "less"],
-            NODE_MARKERS,
-            Some(VSCODE),
-        ),
-        spec(
-            "vscode-html-language-server",
-            vec![program("vscode-html-language-server", &["--stdio"])],
-            &["html"],
-            NODE_MARKERS,
-            Some(VSCODE),
-        ),
-        spec(
-            "yaml-language-server",
-            vec![program("yaml-language-server", &["--stdio"])],
-            &["yaml"],
-            &[],
-            Some("npm install -g yaml-language-server"),
-        ),
-        spec(
-            "bash-language-server",
-            vec![program("bash-language-server", &["start"])],
-            &["shellscript"],
-            &[],
-            Some("npm install -g bash-language-server"),
-        ),
-        spec(
-            "taplo",
-            vec![program("taplo", &["lsp", "stdio"])],
-            &["toml"],
-            &[],
-            Some("cargo install taplo-cli --locked --features lsp"),
-        ),
+        Spec {
+            download: Some(Download::GitHub { repo: "clangd/clangd", asset: clangd_asset, binary: "clangd" }),
+            ..spec(
+                "clangd",
+                vec![program("clangd", &[])],
+                &["c", "cpp"],
+                &["compile_commands.json", "compile_flags.txt", ".clangd", "CMakeLists.txt"],
+                clangd_install(),
+            )
+        },
+        Spec {
+            download: npm(EXTRACTED, "vscode-langservers-extracted", "vscode-json-language-server"),
+            ..spec(
+                "vscode-json-language-server",
+                vec![program("vscode-json-language-server", &["--stdio"])],
+                &["json", "jsonc"],
+                NODE_MARKERS,
+                Some(VSCODE),
+            )
+        },
+        Spec {
+            download: npm(EXTRACTED, "vscode-langservers-extracted", "vscode-css-language-server"),
+            ..spec(
+                "vscode-css-language-server",
+                vec![program("vscode-css-language-server", &["--stdio"])],
+                &["css", "scss", "less"],
+                NODE_MARKERS,
+                Some(VSCODE),
+            )
+        },
+        Spec {
+            download: npm(EXTRACTED, "vscode-langservers-extracted", "vscode-html-language-server"),
+            ..spec(
+                "vscode-html-language-server",
+                vec![program("vscode-html-language-server", &["--stdio"])],
+                &["html"],
+                NODE_MARKERS,
+                Some(VSCODE),
+            )
+        },
+        Spec {
+            download: npm(&["yaml-language-server"], "yaml-language-server", "yaml-language-server"),
+            ..spec(
+                "yaml-language-server",
+                vec![program("yaml-language-server", &["--stdio"])],
+                &["yaml"],
+                &[],
+                Some("npm install -g yaml-language-server"),
+            )
+        },
+        Spec {
+            download: npm(&["bash-language-server"], "bash-language-server", "bash-language-server"),
+            ..spec(
+                "bash-language-server",
+                vec![program("bash-language-server", &["start"])],
+                &["shellscript"],
+                &[],
+                Some("npm install -g bash-language-server"),
+            )
+        },
+        Spec {
+            download: Some(Download::GitHub { repo: "tamasfe/taplo", asset: taplo_asset, binary: "taplo" }),
+            ..spec(
+                "taplo",
+                vec![program("taplo", &["lsp", "stdio"])],
+                &["toml"],
+                &[],
+                Some("cargo install taplo-cli --locked --features lsp"),
+            )
+        },
         spec("ruby-lsp", vec![program("ruby-lsp", &[])], &["ruby"], &["Gemfile"], Some("gem install ruby-lsp")),
     ]
 }

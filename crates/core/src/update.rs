@@ -106,7 +106,7 @@ pub fn newer_release(manifest: &str, current: &str, platform: &str) -> Result<Op
     }))
 }
 
-fn curl() -> Command {
+pub(crate) fn curl() -> Command {
     let mut cmd = Command::new("curl");
     cmd.args(["--fail", "--silent", "--show-error", "--location", "--proto", "=https", "--retry", "2"])
         .args(["--connect-timeout", "20"])
@@ -122,7 +122,7 @@ fn curl() -> Command {
     cmd
 }
 
-fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
+pub(crate) fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
     let out = cmd.output().map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => t("curl was not found; it is needed to download updates").to_string(),
         _ => tf("curl could not start: {error}", &[("error", &e)]),

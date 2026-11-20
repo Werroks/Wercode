@@ -680,7 +680,7 @@ impl Render for SettingsView {
                     ))
                     .child(Self::row(
                         t("Check code"),
-                        t("Underline errors and warnings in open files, using the language servers installed on this computer."),
+                        t("Underline errors and warnings in open files, using the language servers on this computer or ones Wercode downloads."),
                         switch("settings-language-servers", settings.language_servers, |s, on| s.language_servers = on),
                         cx,
                     ))

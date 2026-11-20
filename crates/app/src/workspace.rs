@@ -2145,6 +2145,39 @@ impl Workspace {
         };
         let text = |text: String| div().max_w(px(420.)).truncate().child(text);
 
+        // A server Wercode can fetch itself: the button does that, and what
+        // happens shows here until the server starts.
+        if let Some(name) = report.download.clone() {
+            let fetching = checker.read(cx).fetching(&name).cloned();
+            let fetch = {
+                let (checker, name) = (checker.clone(), name.clone());
+                action("status-server-install", t("Install")).on_click(move |_: &ClickEvent, _, cx| {
+                    checker.update(cx, |checker, cx| checker.fetch(name.clone(), cx));
+                })
+            };
+            return Some(match fetching {
+                Some(crate::lsp::Fetching::Running) => item
+                    .child(Icon::new(Lucide::LoaderCircle).xsmall())
+                    .child(text(tf("Installing {name}\u{2026}", &[("name", &name)])))
+                    .into_any_element(),
+                Some(crate::lsp::Fetching::Failed(error)) => item
+                    .text_color(danger)
+                    .child(Icon::new(IconName::TriangleAlert).xsmall())
+                    .child(text(tf("Could not install {name}: {error}", &[("name", &name), ("error", &error)])))
+                    .child(fetch.tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(t("Try again")).build(window, cx)
+                    }))
+                    .into_any_element(),
+                None => item
+                    .child(Icon::new(Lucide::Info).xsmall())
+                    .child(text(tf("No language server for {language}", &[("language", &report.language)])))
+                    .child(fetch.tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tf("Download {name} into Wercode's own folder", &[("name", &name)]))
+                            .build(window, cx)
+                    }))
+                    .into_any_element(),
+            });
+        }
         if let Some(command) = report.install {
             let install = action("status-server-install", t("Install")).on_click(cx.listener(
                 move |this, _: &ClickEvent, window, cx| this.run_in_terminal(&command, window, cx),
@@ -3276,8 +3309,9 @@ mod tests {
     }
 
     /// Opens a window on `project_dir(name)` with checking set up: a server
-    /// for Rust that calls `bad` an error and `meh` a warning, and a server
-    /// for Python that is not installed.
+    /// for Rust that calls `bad` an error and `meh` a warning, a server for
+    /// Python that is not installed, and one for Go that Wercode would fetch
+    /// but has no download for this computer.
     fn open_checked(cx: &mut TestAppContext, name: &str) -> Fixture {
         use wercode_core::lsp::{Program, Spec, fake};
         cx.executor().allow_parking();
@@ -3293,6 +3327,7 @@ mod tests {
             languages: vec!["rust"],
             markers: vec![],
             install: None,
+            download: None,
             offer: true,
         };
         let missing = Spec {
@@ -3302,10 +3337,21 @@ mod tests {
             install: Some("echo install-it".into()),
             ..fake.clone()
         };
+        let fetchable = Spec {
+            name: "fetchable".into(),
+            languages: vec!["go"],
+            install: None,
+            download: Some(wercode_core::lsp::download::Download::GitHub {
+                repo: "example/none",
+                asset: |_, _| None,
+                binary: "none",
+            }),
+            ..missing.clone()
+        };
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::apply(Settings::default(), cx);
-            crate::lsp::init_with(vec![fake, missing], cx);
+            crate::lsp::init_with(vec![fake, missing, fetchable], cx);
         });
         open(cx, name)
     }
@@ -3361,6 +3407,23 @@ mod tests {
         let tabs = area.read_with(cx, |a, _| a.tab_count());
         cx.update_window(f.window, |_, window, cx| window.click("status-server-install", cx)).unwrap();
         assert_eq!(area.read_with(cx, |a, _| a.tab_count()), tabs + 1);
+
+        // One Wercode can fetch is fetched by the same button; what went wrong is said there.
+        let code = root.join("main.go");
+        std::fs::write(&code, "package main\n").unwrap();
+        cx.update_window(f.window, |_, window, cx| {
+            f.workspace.update(cx, |w, cx| w.open_file(code.clone(), None, window, cx));
+        })
+        .unwrap();
+        wait_until(cx, "the offer to fetch", |cx| {
+            cx.update(|_| servers.report(&code)).is_some_and(|r| r.download.as_deref() == Some("fetchable"))
+        });
+        let tabs = area.read_with(cx, |a, _| a.tab_count());
+        cx.update_window(f.window, |_, window, cx| window.click("status-server-install", cx)).unwrap();
+        wait_until(cx, "the fetch to fail", |cx| {
+            checker.read_with(cx, |c, _| matches!(c.fetching("fetchable"), Some(crate::lsp::Fetching::Failed(_))))
+        });
+        assert_eq!(area.read_with(cx, |a, _| a.tab_count()), tabs, "nothing runs in a terminal");
 
         // Turned off in the settings, nothing is underlined or counted.
         cx.update(|cx| crate::theme::change_settings(cx, |s| s.language_servers = false)).unwrap();

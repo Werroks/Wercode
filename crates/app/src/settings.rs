@@ -33,7 +33,9 @@ pub struct SettingsView {
     focus: FocusHandle,
     font: Entity<InputState>,
     /// Colour schemes: the value for the setting, and the name to show.
-    schemes: Vec<(&'static str, String)>,
+    schemes: Vec<(String, String)>,
+    /// Why the chosen scheme, one of the user's own, could not be used.
+    scheme_error: Option<String>,
     shells: Vec<Found>,
     error: Option<String>,
     /// The donation address was just copied; the button says so for a moment.
@@ -59,13 +61,13 @@ impl SettingsView {
                 this.apply_font(cx);
             }
         });
-        let schemes = wercode_core::theme::builtin_ids()
-            .map(|id| (id, wercode_core::theme::load(id).name))
-            .collect();
+        let schemes = wercode_core::theme::available();
+        let scheme_error = scheme_error(&cx.global::<AppState>().settings.theme);
         Self {
             focus: cx.focus_handle(),
             font,
             schemes,
+            scheme_error,
             shells: shell::available(),
             error: None,
             copied: None,
@@ -76,7 +78,35 @@ impl SettingsView {
 
     fn change(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Settings)) {
         self.error = theme::change_settings(cx, change).err();
+        self.scheme_error = scheme_error(&cx.global::<AppState>().settings.theme);
         cx.notify();
+    }
+
+    /// Writes a new scheme of the user's, starting from the one in use,
+    /// chooses it, and opens its file to be changed.
+    fn new_scheme(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = wercode_core::theme::user_dir() else { return };
+        let taken =
+            |id: &str| self.schemes.iter().any(|(known, _)| known == id) || dir.join(format!("{id}.toml")).exists();
+        let Some(id) = (1..).map(|n| if n == 1 { "my-scheme".to_string() } else { format!("my-scheme-{n}") }).find(|id| !taken(id))
+        else {
+            return;
+        };
+        let current = cx.global::<AppState>().settings.theme.clone();
+        let base = if wercode_core::theme::builtin_ids().any(|b| b == current) { current } else { "black".to_string() };
+        let number = id.strip_prefix("my-scheme-").unwrap_or("1").to_string();
+        let name = tf("My Scheme {n}", &[("n", &number)]);
+        let path = dir.join(format!("{id}.toml"));
+        let written =
+            std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, wercode_core::theme::starter(&name, &base)));
+        if let Err(e) = written {
+            self.error = Some(tf("Could not write {file}: {error}", &[("file", &path.display()), ("error", &e)]));
+            cx.notify();
+            return;
+        }
+        self.schemes = wercode_core::theme::available();
+        self.change(cx, |s| s.theme = id);
+        cx.emit(SettingsEvent::OpenFile(path));
     }
 
     fn apply_font(&mut self, cx: &mut Context<Self>) {
@@ -270,11 +300,29 @@ impl Render for SettingsView {
         let theme = cx.theme();
         let (muted, border, danger) = (theme.muted_foreground, theme.border, theme.danger);
 
-        let schemes = h_flex().flex_wrap().gap_1().children(self.schemes.iter().enumerate().map(|(index, (id, name))| {
-            let id = *id;
-            Self::choice(("settings-scheme", index), name.clone(), settings.theme == id)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.change(cx, |s| s.theme = id.into())))
-        }));
+        let schemes = h_flex()
+            .flex_wrap()
+            .gap_1()
+            .children(self.schemes.iter().enumerate().map(|(index, (id, name))| {
+                let id = id.clone();
+                Self::choice(("settings-scheme", index), name.clone(), settings.theme == id).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        let id = id.clone();
+                        this.change(cx, |s| s.theme = id)
+                    },
+                ))
+            }))
+            .child(
+                Button::new("settings-new-scheme")
+                    .small()
+                    .ghost()
+                    .icon(IconName::Plus)
+                    .label(t("New Scheme\u{2026}"))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_scheme(cx))),
+            );
+        let schemes = v_flex().gap_1().child(schemes).when_some(self.scheme_error.clone(), |d, error| {
+            d.child(div().id("settings-scheme-error").text_xs().text_color(danger).child(error))
+        });
 
         let font_size = h_flex()
             .gap_2()
@@ -433,7 +481,12 @@ impl Render for SettingsView {
                         languages,
                         cx,
                     ))
-                    .child(Self::row(t("Colour scheme"), "", schemes, cx))
+                    .child(Self::row(
+                        t("Colour scheme"),
+                        t("Your own schemes are .toml files in the themes folder next to settings.toml. A colour a scheme leaves out comes from the one named in based_on."),
+                        schemes,
+                        cx,
+                    ))
                     .child(Self::row(t("Font size"), t("Text in the terminal and in the editor."), font_size, cx))
                     .child(Self::row(
                         t("Font"),
@@ -525,4 +578,12 @@ impl Render for SettingsView {
                 )
             })
     }
+}
+
+/// Why the scheme the settings name cannot be used, if it is one of the
+/// user's own and its file is broken.
+fn scheme_error(id: &str) -> Option<String> {
+    wercode_core::theme::load_checked(id)
+        .err()
+        .map(|error| tf("The scheme {name} could not be read: {error}", &[("name", &id), ("error", &error)]))
 }

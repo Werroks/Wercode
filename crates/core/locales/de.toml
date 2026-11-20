@@ -312,3 +312,8 @@
 "{n} files with merge conflicts are not shown; resolve them in the editor." = { one = "{n} Datei mit Merge-Konflikten wird nicht angezeigt; bitte im Editor auflösen.", other = "{n} Dateien mit Merge-Konflikten werden nicht angezeigt; bitte im Editor auflösen." }
 "{n} more new files are not shown." = { one = "{n} weitere neue Datei wird nicht angezeigt.", other = "{n} weitere neue Dateien werden nicht angezeigt." }
 "Get the Installer" = "Installationsprogramm herunterladen"
+"My Scheme {n}" = "Mein Schema {n}"
+"New Scheme…" = "Neues Schema…"
+"The scheme {name} could not be read: {error}" = "Das Schema {name} konnte nicht gelesen werden: {error}"
+"There is no scheme named {name}." = "Es gibt kein Schema namens {name}."
+"Your own schemes are .toml files in the themes folder next to settings.toml. A colour a scheme leaves out comes from the one named in based_on." = "Eigene Schemata sind .toml-Dateien im Ordner themes neben settings.toml. Eine Farbe, die ein Schema auslässt, kommt aus dem in based_on genannten."

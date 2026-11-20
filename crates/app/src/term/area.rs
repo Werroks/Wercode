@@ -2060,6 +2060,32 @@ two
     }
 
     #[gpui_kit::test]
+    async fn a_picture_opens_as_a_picture(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, area) = open(cx);
+        let dir = std::env::temp_dir().join(format!("wercode-picture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dot.png");
+        // A 1x1 PNG.
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89, 0, 0, 0, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF,
+            0xC0, 0xF0, 0x1F, 0, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44,
+            0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&path, png).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            area.update(cx, |a, cx| a.open_path(path.clone(), None, None, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let editor = area.read_with(cx, |a, _| a.tabs[1].editor().unwrap().clone());
+        assert!(editor.read_with(cx, |e, _| e.has_picture()));
+        assert!(!editor.read_with(cx, |e, _| e.is_dirty()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
     async fn editor_undoes_redoes_finds_and_replaces(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let (window, area) = open(cx);

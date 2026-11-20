@@ -216,6 +216,9 @@ pub struct EditorView {
     changed_on_disk: bool,
     /// Why the file is not shown: too large, not text, unreadable.
     problem: Option<String>,
+    /// The file is a picture: shown as one, never edited.
+    picture_kind: Option<ImageFormat>,
+    picture: Option<Arc<Image>>,
     error: Option<String>,
     /// Where to put the cursor once the text has arrived (0-based line, column).
     pending_position: Option<(u32, u32)>,
@@ -248,12 +251,14 @@ impl EventEmitter<EditorEvent> for EditorView {}
 
 impl Focusable for EditorView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        if self.problem.is_some() { self.focus.clone() } else { self.state.focus_handle(cx) }
+        if self.problem.is_some() || self.picture_kind.is_some() { self.focus.clone() } else { self.state.focus_handle(cx) }
     }
 }
 
 impl EditorView {
     pub fn new(path: PathBuf, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let picture_kind = picture_format(&path);
+        let is_picture = picture_kind.is_some();
         let language = document::language(&path);
         let state = cx.new(|cx| EditorState::new(window, cx).language(language));
         let marks = state.update(cx, |state, cx| state.create_gutter_decorations_collection(Vec::new(), cx));
@@ -280,7 +285,8 @@ impl EditorView {
                 }
             })
         });
-        let servers = checker.map(|checker| checker.read(cx).servers().clone());
+        // A picture has no code for the servers to check.
+        let servers = checker.filter(|_| !is_picture).map(|checker| checker.read(cx).servers().clone());
         if let Some(servers) = &servers {
             connect(&state, servers, &path, cx.weak_entity(), cx);
         }
@@ -305,6 +311,8 @@ impl EditorView {
             dirty: false,
             changed_on_disk: false,
             problem: None,
+            picture_kind,
+            picture: None,
             error: None,
             pending_position: None,
             servers,
@@ -367,6 +375,25 @@ impl EditorView {
     /// Reads the file from disk, replacing what is in the editor.
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.path.clone();
+        if let Some(format) = self.picture_kind {
+            cx.spawn_in(window, async move |this, cx| {
+                let read = cx.background_executor().spawn(async move { document::load_picture(&path) }).await;
+                let _ = this.update(cx, |this, cx| {
+                    match read {
+                        Ok((bytes, modified)) => {
+                            this.picture = Some(Arc::new(Image::from_bytes(format, bytes)));
+                            this.modified = modified;
+                            this.problem = None;
+                        }
+                        Err(error) => this.problem = Some(error.message()),
+                    }
+                    cx.emit(EditorEvent::Changed);
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
         cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_executor().spawn(async move { document::load(&path) }).await;
             let _ = this.update_in(cx, |this, window, cx| this.show(result, window, cx));
@@ -453,7 +480,7 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.loaded || self.problem.is_some() {
+        if !self.loaded || self.problem.is_some() || self.picture_kind.is_some() {
             return;
         }
         let wanted = cx.try_global::<AppState>().is_some_and(|state| state.settings.format_on_save);
@@ -524,7 +551,9 @@ impl EditorView {
                         }
                         // The settings file itself: what was written takes effect now.
                         let settings = cx.try_global::<AppState>().and_then(|state| state.settings_path.clone());
-                        if settings.as_deref() == Some(this.path.as_path()) {
+                        // A scheme of the user's: its colours show at once too.
+                        let scheme = wercode_core::theme::user_dir().is_some_and(|dir| this.path.parent() == Some(dir.as_path()));
+                        if settings.as_deref() == Some(this.path.as_path()) || scheme {
                             cx.defer(crate::theme::reload_settings);
                         }
                         then(window, cx);
@@ -744,6 +773,19 @@ mod tests {
     }
 }
 
+/// How GPUI reads a picture file, for the files a tab shows as pictures.
+fn picture_format(path: &Path) -> Option<ImageFormat> {
+    Some(match document::picture_kind(path)? {
+        "png" => ImageFormat::Png,
+        "jpeg" => ImageFormat::Jpeg,
+        "gif" => ImageFormat::Gif,
+        "webp" => ImageFormat::Webp,
+        "bmp" => ImageFormat::Bmp,
+        "ico" => ImageFormat::Ico,
+        _ => ImageFormat::Tiff,
+    })
+}
+
 /// A problem as the editor shows it: a wavy line, and the message when the
 /// pointer rests on it.
 fn diagnostic(problem: &Problem) -> Diagnostic {
@@ -798,6 +840,20 @@ impl Render for EditorView {
                     )
                     .into_any_element()
             }
+            None if self.picture_kind.is_some() => div()
+                .id("editor-picture")
+                .track_focus(&self.focus)
+                .size_full()
+                .p_4()
+                .flex()
+                .items_center()
+                .justify_center()
+                .children(
+                    self.picture
+                        .clone()
+                        .map(|picture| img(picture).max_w_full().max_h_full().object_fit(ObjectFit::ScaleDown)),
+                )
+                .into_any_element(),
             None => Editor::new(&self.state).bordered(false).h(relative(1.)).into_any_element(),
         };
         v_flex()
@@ -815,6 +871,10 @@ impl Render for EditorView {
 impl EditorView {
     pub fn text(&self, cx: &App) -> String {
         self.state.read(cx).value().to_string()
+    }
+
+    pub fn has_picture(&self) -> bool {
+        self.picture.is_some()
     }
 
     /// The messages of the underlined problems, from the top down.

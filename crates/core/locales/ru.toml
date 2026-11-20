@@ -312,3 +312,8 @@
 "{n} files with merge conflicts are not shown; resolve them in the editor." = { one = "{n} файл с конфликтом слияния не показан; разрешите конфликт в редакторе.", few = "{n} файла с конфликтами слияния не показаны; разрешите конфликты в редакторе.", many = "{n} файлов с конфликтами слияния не показаны; разрешите конфликты в редакторе." }
 "{n} more new files are not shown." = { one = "Ещё {n} новый файл не показан.", few = "Ещё {n} новых файла не показаны.", many = "Ещё {n} новых файлов не показаны." }
 "Get the Installer" = "Скачать установщик"
+"My Scheme {n}" = "Моя схема {n}"
+"New Scheme…" = "Новая схема…"
+"The scheme {name} could not be read: {error}" = "Не удалось прочитать схему {name}: {error}"
+"There is no scheme named {name}." = "Схемы с именем {name} нет."
+"Your own schemes are .toml files in the themes folder next to settings.toml. A colour a scheme leaves out comes from the one named in based_on." = "Свои схемы — это файлы .toml в папке themes рядом с settings.toml. Цвет, которого в схеме нет, берётся из схемы, указанной в based_on."

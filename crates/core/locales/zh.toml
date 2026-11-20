@@ -313,3 +313,8 @@
 "{n} files with merge conflicts are not shown; resolve them in the editor." = "有 {n} 个存在合并冲突的文件未显示；请在编辑器中解决。"
 "{n} more new files are not shown." = "另有 {n} 个新文件未显示。"
 "Get the Installer" = "下载安装程序"
+"My Scheme {n}" = "我的配色 {n}"
+"New Scheme…" = "新建配色…"
+"The scheme {name} could not be read: {error}" = "无法读取配色 {name}：{error}"
+"There is no scheme named {name}." = "没有名为 {name} 的配色。"
+"Your own schemes are .toml files in the themes folder next to settings.toml. A colour a scheme leaves out comes from the one named in based_on." = "自定义配色是 settings.toml 旁 themes 文件夹中的 .toml 文件。配色中未写的颜色取自 based_on 指定的配色。"

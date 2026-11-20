@@ -312,3 +312,8 @@
 "{n} files with merge conflicts are not shown; resolve them in the editor." = { one = "No se muestra {n} archivo con conflictos de fusión; resuélvalo en el editor.", other = "No se muestran {n} archivos con conflictos de fusión; resuélvalos en el editor." }
 "{n} more new files are not shown." = { one = "No se muestra {n} archivo nuevo más.", other = "No se muestran {n} archivos nuevos más." }
 "Get the Installer" = "Descargar el instalador"
+"My Scheme {n}" = "Mi esquema {n}"
+"New Scheme…" = "Nuevo esquema…"
+"The scheme {name} could not be read: {error}" = "No se pudo leer el esquema {name}: {error}"
+"There is no scheme named {name}." = "No hay ningún esquema llamado {name}."
+"Your own schemes are .toml files in the themes folder next to settings.toml. A colour a scheme leaves out comes from the one named in based_on." = "Los esquemas propios son archivos .toml en la carpeta themes junto a settings.toml. Un color que un esquema omite se toma del indicado en based_on."

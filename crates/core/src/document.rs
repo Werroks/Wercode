@@ -94,6 +94,32 @@ pub fn save(path: &Path, text: &str, format: Format) -> Result<Option<SystemTime
     Ok(modified(path))
 }
 
+/// The kind of picture a file is, by its extension, for the files a tab
+/// shows as a picture rather than as text. SVG stays text: it is code people edit.
+pub fn picture_kind(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "png",
+        "jpg" | "jpeg" => "jpeg",
+        "gif" => "gif",
+        "webp" => "webp",
+        "bmp" => "bmp",
+        "ico" => "ico",
+        "tif" | "tiff" => "tiff",
+        _ => return None,
+    })
+}
+
+/// Reads a picture file with its modification time. Blocks.
+pub fn load_picture(path: &Path) -> Result<(Vec<u8>, Option<SystemTime>), LoadError> {
+    let meta = std::fs::metadata(path).map_err(|e| LoadError::Io(e.to_string()))?;
+    if meta.len() > MAX_SIZE {
+        return Err(LoadError::TooLarge);
+    }
+    let bytes = std::fs::read(path).map_err(|e| LoadError::Io(e.to_string()))?;
+    Ok((bytes, meta.modified().ok()))
+}
+
 /// The syntax highlighting name for a file, by its name or extension.
 pub fn language(path: &Path) -> &'static str {
     let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
@@ -131,6 +157,14 @@ pub fn language(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pictures_are_known_by_their_extension() {
+        assert_eq!(picture_kind(Path::new("a/Logo.PNG")), Some("png"));
+        assert_eq!(picture_kind(Path::new("photo.jpg")), Some("jpeg"));
+        assert_eq!(picture_kind(Path::new("icon.svg")), None);
+        assert_eq!(picture_kind(Path::new("README")), None);
+    }
 
     #[test]
     fn line_endings_and_bom_survive_a_round_trip() {

@@ -12,7 +12,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::file_icons;
 use wercode_core::git::{FileStatus, RepoStatus};
-use wercode_core::history::{self, Ago, Commit, CommitFile, RefKind, Row};
+use wercode_core::history::{self, Ago, Commit, CommitFile, Ref, RefKind, Row};
 
 use super::files::status_color;
 use wercode_core::i18n::{t, tn};
@@ -212,24 +212,47 @@ impl GraphView {
         let is_open = self.open.as_ref().is_some_and(|open| open.hash == commit.hash);
         let is_head = commit.refs.iter().any(|r| r.kind == RefKind::Head);
         let tip = CommitTip::new(commit);
-        let refs = commit.refs.iter().map(|r| {
-            let color = match r.kind {
-                RefKind::Head => lane_color(0),
-                RefKind::Branch => lane_color(0),
+        // One badge, so the message keeps its room; the rest are counted, and the tooltip names them all.
+        let badges = badges(&commit.refs);
+        let more = badges.len().saturating_sub(1);
+        let first = badges.into_iter().next().map(|badge| {
+            let color = match badge.kind {
+                RefKind::Head | RefKind::Branch => lane_color(0),
                 RefKind::Remote => lane_color(4),
                 RefKind::Tag => lane_color(1),
             };
-            let pill = div()
+            // A long name is cut at a fixed width: a badge left to shrink with the row
+            // collapses to its ellipsis.
+            h_flex()
                 .flex_none()
+                .gap_0p5()
                 .px_1p5()
                 .rounded(px(4.))
                 .border_1()
                 .border_color(color)
                 .text_xs()
                 .text_color(color)
-                .child(r.name.clone());
-            if r.kind == RefKind::Head { pill.bg(color.opacity(0.18)) } else { pill }
+                .when(badge.kind == RefKind::Head, |d| d.bg(color.opacity(0.18)))
+                .child(div().flex_none().max_w(px(110.)).truncate().child(badge.name))
+                .when(badge.remote, |d| d.child(Icon::new(Lucide::Cloud).xsmall().flex_none()))
         });
+        let refs = h_flex()
+            .flex_none()
+            .gap_1()
+            .children(first)
+            .when(more > 0, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .px_1()
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(muted.opacity(0.5))
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("+{more}")),
+                )
+            });
         h_flex()
             .id(("graph-commit", index))
             .test_support()
@@ -243,9 +266,9 @@ impl GraphView {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle(index, cx)))
             .tooltip(move |_, cx| cx.new(|_| tip.clone()).into())
             .child(lanes_canvas(row.clone(), lanes, theme.background, is_head))
-            // The message keeps some room; badges give way first.
-            .child(div().flex_1().min_w(px(90.)).truncate().child(commit.subject.clone()))
-            .child(h_flex().flex_shrink_1().min_w_0().overflow_hidden().gap_1().children(refs))
+            // The message gives way first (the tooltip has it whole); the one badge stays whole.
+            .child(div().flex_1().min_w(px(40.)).truncate().child(commit.subject.clone()))
+            .child(refs)
             .child(div().flex_none().max_w(px(120.)).truncate().text_xs().text_color(muted).child(commit.author.clone()))
             .into_any_element()
     }
@@ -450,6 +473,8 @@ pub fn ago_text(ago: Ago) -> String {
 struct CommitTip {
     subject: SharedString,
     details: SharedString,
+    /// Every branch and tag on the commit, since the row shows only one.
+    refs: Option<SharedString>,
 }
 
 impl CommitTip {
@@ -462,6 +487,8 @@ impl CommitTip {
         Self {
             subject: commit.subject.clone().into(),
             details: format!("{}  \u{b7}  {}  \u{b7}  {when}", commit.short(), commit.author).into(),
+            refs: (!commit.refs.is_empty())
+                .then(|| commit.refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join("  \u{b7}  ").into()),
         }
     }
 }
@@ -482,7 +509,53 @@ impl Render for CommitTip {
             .shadow_md()
             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(self.subject.clone()))
             .child(div().text_xs().text_color(theme.muted_foreground).child(self.details.clone()))
+            .when_some(self.refs.clone(), |d, refs| d.child(div().text_xs().text_color(lane_color(0)).child(refs)))
     }
+}
+
+/// A branch or tag as the graph shows it.
+#[derive(Debug, Clone, PartialEq)]
+struct Badge {
+    name: SharedString,
+    kind: RefKind,
+    /// A remote branch of the same name points at the same commit.
+    remote: bool,
+}
+
+/// The badges of a commit, most telling first: the branch checked out, other
+/// branches, tags, then remote branches no local one stands for. A local
+/// branch takes in the remote ones of its name on the same commit, so `main`
+/// and `origin/main` make one badge with a cloud.
+fn badges(refs: &[Ref]) -> Vec<Badge> {
+    let mut taken = vec![false; refs.len()];
+    let mut out = Vec::new();
+    for (i, r) in refs.iter().enumerate() {
+        if !matches!(r.kind, RefKind::Head | RefKind::Branch) {
+            continue;
+        }
+        let mut remote = false;
+        for (j, other) in refs.iter().enumerate() {
+            if other.kind == RefKind::Remote && other.name.split_once('/').is_some_and(|(_, branch)| branch == r.name) {
+                taken[j] = true;
+                remote = true;
+            }
+        }
+        taken[i] = true;
+        out.push(Badge { name: r.name.clone().into(), kind: r.kind, remote });
+    }
+    out.extend(
+        refs.iter()
+            .zip(&taken)
+            .filter(|(_, taken)| !**taken)
+            .map(|(r, _)| Badge { name: r.name.clone().into(), kind: r.kind, remote: false }),
+    );
+    out.sort_by_key(|b| match b.kind {
+        RefKind::Head => 0,
+        RefKind::Branch => 1,
+        RefKind::Tag => 2,
+        RefKind::Remote => 3,
+    });
+    out
 }
 
 #[cfg(test)]
@@ -498,5 +571,51 @@ impl GraphView {
     /// How many files the open commit lists, once they are read.
     pub fn open_files(&self) -> Option<usize> {
         self.open.as_ref()?.files.as_ref()?.as_ref().ok().map(Vec::len)
+    }
+}
+
+#[cfg(test)]
+mod badge_tests {
+    use super::{Badge, badges};
+    use wercode_core::history::{Ref, RefKind};
+
+    fn r(name: &str, kind: RefKind) -> Ref {
+        Ref { name: name.to_string(), kind }
+    }
+
+    fn shown(refs: &[Ref]) -> Vec<(String, RefKind, bool)> {
+        badges(refs).into_iter().map(|Badge { name, kind, remote }| (name.to_string(), kind, remote)).collect()
+    }
+
+    #[test]
+    fn a_branch_takes_in_its_remote_on_the_same_commit() {
+        let refs = [r("origin/main", RefKind::Remote), r("main", RefKind::Head)];
+        assert_eq!(shown(&refs), [("main".to_string(), RefKind::Head, true)]);
+    }
+
+    #[test]
+    fn the_checked_out_branch_comes_first_and_lone_remotes_last() {
+        let refs = [
+            r("upstream/feature", RefKind::Remote),
+            r("v1.0", RefKind::Tag),
+            r("staging", RefKind::Branch),
+            r("origin/staging", RefKind::Remote),
+            r("main", RefKind::Head),
+        ];
+        assert_eq!(
+            shown(&refs),
+            [
+                ("main".to_string(), RefKind::Head, false),
+                ("staging".to_string(), RefKind::Branch, true),
+                ("v1.0".to_string(), RefKind::Tag, false),
+                ("upstream/feature".to_string(), RefKind::Remote, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_remote_branch_of_another_name_stays_apart() {
+        let refs = [r("main", RefKind::Branch), r("origin/mainline", RefKind::Remote)];
+        assert_eq!(shown(&refs).len(), 2);
     }
 }

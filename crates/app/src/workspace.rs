@@ -3214,7 +3214,9 @@ mod tests {
         for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
             assert!(git(&["config", key, value]));
         }
-        let lines: String = (1..=12).map(|n| format!("line {n}\n")).collect();
+        // A line far wider than the window must not push the buttons out of sight.
+        let wide = format!("line 1 {}\n", "wide ".repeat(120));
+        let lines: String = std::iter::once(wide).chain((2..=12).map(|n| format!("line {n}\n"))).collect();
         let a = repo.join("a.txt");
         std::fs::write(&a, &lines).unwrap();
         assert!(git(&["add", "-A"]) && git(&["commit", "-q", "-m", "First"]));

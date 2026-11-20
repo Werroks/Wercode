@@ -114,6 +114,10 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   `fake::test_args(<that test's path>)`. No real server is needed in CI.
 - The editor component clears its underlines on every edit; `EditorView`
   puts the last known problems back once typing pauses.
+- A `truncate()` text inside a flex item that may shrink can collapse to
+  its ellipsis even when there is room. Give such text `flex_none()` and a
+  fixed `max_w` (as the graph's badges and author do), and let one plain
+  `flex_1()` element take what is left.
 - After finishing a feature, update `docs/features.csv` and
   `docs/build-log.md`.
 - `lsp::download::tests::real_downloads` fetches real servers from the

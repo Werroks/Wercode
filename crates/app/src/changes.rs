@@ -652,6 +652,9 @@ impl ChangesView {
         let opened = this.clone();
         Diff::new(&self.state)
             .size_full()
+            // Long lines wrap: unwrapped, a file's header and a conflict's buttons stretch as wide as
+            // its longest line and end up out of sight on the right.
+            .soft_wrap(true)
             .annotations(annotations)
             .render_annotation(footer)
             .render_header_suffix(header)

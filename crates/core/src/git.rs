@@ -414,9 +414,164 @@ pub fn create_branch(dir: &Path, name: &str) -> Result<(), String> {
     run(dir, &["switch", "--quiet", "-c", name], &[])
 }
 
+/// A folder with a checkout of the repository: its first one, or one added
+/// with `git worktree add`, which lets several branches be worked on at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: PathBuf,
+    /// `None` when no branch is checked out there.
+    pub branch: Option<String>,
+    /// The commit checked out, shortened.
+    pub head: String,
+    /// The repository's own folder, which cannot be removed.
+    pub main: bool,
+    pub locked: bool,
+    /// Its folder is gone; git still lists it until it is pruned.
+    pub prunable: bool,
+}
+
+/// The worktrees of the repository containing `dir`, its own folder first.
+pub fn worktrees(dir: &Path) -> Vec<Worktree> {
+    output(git(dir).args(["worktree", "list", "--porcelain"]))
+        .map(|out| parse_worktrees(&String::from_utf8_lossy(&out)))
+        .unwrap_or_default()
+}
+
+fn parse_worktrees(text: &str) -> Vec<Worktree> {
+    let mut found: Vec<Worktree> = Vec::new();
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            found.push(Worktree {
+                path: PathBuf::from(path),
+                branch: None,
+                head: String::new(),
+                main: found.is_empty(),
+                locked: false,
+                prunable: false,
+            });
+            continue;
+        }
+        let Some(tree) = found.last_mut() else { continue };
+        if let Some(head) = line.strip_prefix("HEAD ") {
+            tree.head = head.chars().take(7).collect();
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            tree.branch = Some(branch.strip_prefix("refs/heads/").unwrap_or(branch).to_string());
+        } else if line == "locked" || line.starts_with("locked ") {
+            tree.locked = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            tree.prunable = true;
+        } else if line == "bare" {
+            // A bare repository has no files to work on.
+            found.pop();
+        }
+    }
+    found
+}
+
+/// Where a new worktree for `branch` goes: next to the repository's own
+/// folder, named after both, so the folders of one project sit together.
+pub fn worktree_folder(main: &Path, branch: &str) -> PathBuf {
+    let base = main.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "worktree".into());
+    let tail: String = branch.trim().chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' }).collect();
+    let parent = main.parent().unwrap_or(main);
+    (1..)
+        .map(|n| if n == 1 { parent.join(format!("{base}-{tail}")) } else { parent.join(format!("{base}-{tail}-{n}")) })
+        .find(|path| !path.exists())
+        .unwrap_or_else(|| parent.join(format!("{base}-{tail}")))
+}
+
+/// Makes a worktree in `path` for a branch: a new one from the current
+/// commit, or one that exists and is not checked out anywhere else.
+pub fn add_worktree(dir: &Path, path: &Path, branch: &str) -> Result<(), String> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err(t("Write a name for the branch first.").into());
+    }
+    let folder = path.to_string_lossy();
+    if branches(dir).iter().any(|b| b == branch) {
+        run(dir, &["worktree", "add", "--quiet", &folder, branch], &[])
+    } else {
+        run(dir, &["worktree", "add", "--quiet", "-b", branch, &folder], &[])
+    }
+}
+
+/// Removes a worktree's folder. Git refuses while it has changes that are
+/// not committed; its branch stays. A worktree whose folder is already gone
+/// is forgotten.
+pub fn remove_worktree(dir: &Path, tree: &Worktree) -> Result<(), String> {
+    if tree.prunable {
+        return run(dir, &["worktree", "prune"], &[]);
+    }
+    run(dir, &["worktree", "remove", &tree.path.to_string_lossy()], &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktrees_are_listed_made_and_removed() {
+        let listed = parse_worktrees(
+            "worktree /repo\nHEAD 0123456789abcdef\nbranch refs/heads/main\n\nworktree /repo-x\nHEAD fedcba9876543210\ndetached\nlocked moved\n\nworktree /gone\nHEAD 1111111111\nbranch refs/heads/feature/a\nprunable gitdir file points to non-existent location\n",
+        );
+        assert_eq!(listed.len(), 3);
+        assert!(listed[0].main && !listed[1].main);
+        assert_eq!((listed[0].branch.as_deref(), listed[0].head.as_str()), (Some("main"), "0123456"));
+        assert_eq!(listed[1].branch, None);
+        assert!(listed[1].locked && listed[2].prunable);
+        assert_eq!(listed[2].branch.as_deref(), Some("feature/a"));
+        assert!(parse_worktrees("worktree /bare.git\nbare\n").is_empty());
+
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("wercode-worktrees-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let main = dir.join("proj");
+        std::fs::create_dir_all(&main).unwrap();
+        assert!(git(&main).args(["init", "-q", "-b", "main"]).status().unwrap().success());
+        for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")] {
+            assert!(git(&main).args(["config", key, value]).status().unwrap().success());
+        }
+        std::fs::write(main.join("a.txt"), "a\n").unwrap();
+        stage(&main, &[]).unwrap();
+        commit(&main, "First").unwrap();
+        assert_eq!(worktrees(&main).len(), 1);
+
+        // A new branch in a folder next to the project.
+        let folder = worktree_folder(&main, "agent/one two");
+        assert_eq!(folder, dir.join("proj-agent-one-two"));
+        add_worktree(&main, &folder, "agent/one two".replace(' ', "-").as_str()).unwrap();
+        assert!(folder.join("a.txt").exists());
+        let trees = worktrees(&main);
+        assert_eq!(trees.len(), 2);
+        assert_eq!(trees[1].branch.as_deref(), Some("agent/one-two"));
+        // The same list from inside the new one; the next folder for the same name is another.
+        assert_eq!(worktrees(&folder).len(), 2);
+        assert_eq!(worktree_folder(&main, "agent/one two"), dir.join("proj-agent-one-two-2"));
+        // A branch that exists is checked out, not made again.
+        assert!(git(&main).args(["branch", "spare"]).status().unwrap().success());
+        let spare = worktree_folder(&main, "spare");
+        add_worktree(&main, &spare, "spare").unwrap();
+        assert!(add_worktree(&main, &worktree_folder(&main, "x"), "  ").is_err());
+
+        // Changes keep a worktree; without them it goes, and its branch stays.
+        std::fs::write(folder.join("a.txt"), "changed\n").unwrap();
+        let tree = worktrees(&main).into_iter().find(|t| t.branch.as_deref() == Some("agent/one-two")).unwrap();
+        assert!(remove_worktree(&main, &tree).is_err());
+        discard(&folder, &[folder.join("a.txt")]).unwrap();
+        remove_worktree(&main, &tree).unwrap();
+        assert!(!folder.exists());
+        assert!(branches(&main).contains(&"agent/one-two".to_string()));
+
+        // A folder deleted by hand is only forgotten.
+        std::fs::remove_dir_all(&spare).unwrap();
+        let gone = worktrees(&main).into_iter().find(|t| t.branch.as_deref() == Some("spare")).unwrap();
+        assert!(gone.prunable);
+        remove_worktree(&main, &gone).unwrap();
+        assert_eq!(worktrees(&main).len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn blame_of_a_line_is_read() {

@@ -1781,6 +1781,8 @@ mod tests {
     use super::TerminalArea;
 
     fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<TerminalArea>) {
+        // The terminals start real shells, whose reader threads park.
+        cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::apply(Settings::default(), cx);

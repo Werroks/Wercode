@@ -13,7 +13,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::input::{GoToDefinition, Input, InputEvent, InputState, ToggleCodeActions};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::finder;
@@ -56,6 +56,8 @@ actions!(
         NewWindow,
         OpenSettings,
         SwitchBranch,
+        /// Lists the folders checked out from the repository, to switch to one or make one.
+        SwitchWorktree,
         QuickOpen,
         ShowProblems,
         /// Shows the commands the project describes, to run one in a terminal tab.
@@ -192,6 +194,7 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("Project: Switch to Recent\u{2026}"), Box::new(SwitchProject)),
         (t("Preferences: Settings"), Box::new(OpenSettings)),
         (t("Git: Switch or Create Branch\u{2026}"), Box::new(SwitchBranch)),
+        (t("Git: Switch or Create Worktree\u{2026}"), Box::new(SwitchWorktree)),
         (t("Git: Pull"), Box::new(git_panel::Pull)),
         (t("Git: Push"), Box::new(git_panel::Push)),
         (t("Git: Fetch"), Box::new(git_panel::Fetch)),
@@ -236,6 +239,18 @@ struct BranchMenu {
     _subscription: Subscription,
 }
 
+/// The list of the repository's worktrees over the status bar.
+struct WorktreeMenu {
+    /// `None` until git has listed them.
+    trees: Option<Vec<git::Worktree>>,
+    /// The branch for a new worktree.
+    input: Entity<InputState>,
+    error: Option<String>,
+    /// Git is making or removing one; the list waits.
+    busy: bool,
+    _subscription: Subscription,
+}
+
 /// The list for opening a file by a few letters of its name.
 struct FileFinder {
     state: Entity<CommandState>,
@@ -270,6 +285,7 @@ pub struct Workspace {
     /// The command of the task that was run last in this window.
     last_task: Option<String>,
     branches: Option<BranchMenu>,
+    worktrees: Option<WorktreeMenu>,
     /// The list of named things in code to go to, while it is showing.
     symbols: Option<(Entity<SymbolPicker>, Subscription)>,
     /// The settings screen, while it is showing.
@@ -323,6 +339,7 @@ impl Workspace {
             tasks: None,
             last_task: None,
             branches: None,
+            worktrees: None,
             symbols: None,
             settings: None,
             closing: false,
@@ -550,6 +567,237 @@ impl Workspace {
             self.focus_terminals(window, cx);
             cx.notify();
         }
+    }
+
+    /// Shows the folders checked out from the repository, to switch to one,
+    /// open one in another window, or make one for a branch.
+    fn open_worktrees(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switcher_open = false;
+        self.palette = None;
+        self.branches = None;
+        if !self.project.as_ref().is_some_and(|p| p.git.is_some()) {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t("New worktree: a branch name, then Enter")));
+        let subscription = cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                let name = input.read(cx).value().to_string();
+                this.add_worktree(name, window, cx);
+            }
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.worktrees = Some(WorktreeMenu { trees: None, input, error: None, busy: false, _subscription: subscription });
+        self.list_worktrees(cx);
+        cx.notify();
+    }
+
+    fn list_worktrees(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
+        let root = project.root.clone();
+        cx.spawn(async move |this, cx| {
+            let trees = cx.background_executor().spawn(async move { git::worktrees(&root) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(menu) = &mut this.worktrees {
+                    menu.trees = Some(trees);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Makes a worktree for a branch next to the repository's own folder and
+    /// switches this window to it.
+    fn add_worktree(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
+        let Some(menu) = &mut self.worktrees else { return };
+        if menu.busy {
+            return;
+        }
+        let main = menu.trees.as_ref().and_then(|trees| trees.first()).map(|tree| tree.path.clone());
+        let main = main.unwrap_or_else(|| project.root.clone());
+        menu.busy = true;
+        menu.error = None;
+        let root = project.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let folder = git::worktree_folder(&main, &branch);
+                    git::add_worktree(&root, &folder, &branch).map(|()| folder)
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(folder) => {
+                        this.worktrees = None;
+                        this.switch_to(folder, window, cx);
+                    }
+                    Err(error) => {
+                        if let Some(menu) = &mut this.worktrees {
+                            menu.busy = false;
+                            menu.error = Some(error);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Removes a worktree's folder; the list shows what is left, or what git said against it.
+    fn remove_worktree(&mut self, tree: git::Worktree, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else { return };
+        let Some(menu) = &mut self.worktrees else { return };
+        if menu.busy {
+            return;
+        }
+        menu.busy = true;
+        menu.error = None;
+        let root = project.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { git::remove_worktree(&root, &tree) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(menu) = &mut this.worktrees {
+                    menu.busy = false;
+                    menu.error = result.err();
+                }
+                this.list_worktrees(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Opens a worktree in a window of its own, beside this one.
+    fn open_worktree_window(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.worktrees = None;
+        cx.notify();
+        let state = self.fresh_state();
+        let state_path = self.state_path.clone();
+        let bounds = Some(WindowBounds::Windowed(beside(window.bounds())));
+        let path = normalize(&path);
+        cx.defer(move |cx| open_window(Some(path), state, state_path, bounds, cx));
+    }
+
+    fn close_worktrees(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.worktrees.take().is_some() {
+            self.focus_terminals(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn render_worktrees(&self, menu: &WorktreeMenu, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, border, hover, danger) = (theme.muted_foreground, theme.border, theme.list_hover, theme.danger);
+        let (popover, popover_text) = (theme.popover, theme.popover_foreground);
+        let root = self.project.as_ref().map(|p| p.root.clone());
+        let trees = menu.trees.clone().unwrap_or_default();
+        let busy = menu.busy;
+        let rows: Vec<_> = trees
+            .into_iter()
+            .enumerate()
+            .map(|(index, tree)| {
+                let current = root.as_deref() == Some(normalize(&tree.path).as_path());
+                let usable = !current && !tree.prunable;
+                let what = match (&tree.branch, tree.prunable) {
+                    (_, true) => t("its folder is gone").to_string(),
+                    (Some(branch), _) => branch.clone(),
+                    (None, _) => tf("detached at {commit}", &[("commit", &tree.head)]),
+                };
+                let (target, other, gone) = (tree.path.clone(), tree.path.clone(), tree.clone());
+                h_flex()
+                    .id(("worktree", index))
+                    .test_support()
+                    .w_full()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .hover(|s| s.bg(hover))
+                    .when(usable, |d| {
+                        d.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.worktrees = None;
+                            this.switch_to(target.clone(), window, cx);
+                        }))
+                    })
+                    .child(Icon::new(Lucide::FolderGit2).xsmall().text_color(muted))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().child(folder_name(&tree.path)))
+                            .child(div().text_xs().text_color(muted).truncate().child(what)),
+                    )
+                    .when(current, |d| d.child(Icon::new(IconName::Check).xsmall().text_color(muted)))
+                    .when(usable, |d| {
+                        d.child(
+                            Button::new(("worktree-window", index))
+                                .ghost()
+                                .xsmall()
+                                .icon(Lucide::AppWindow)
+                                .tooltip(t("Open in a New Window"))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_worktree_window(other.clone(), window, cx);
+                                })),
+                        )
+                    })
+                    .when(!tree.main && !current, |d| {
+                        d.child(
+                            Button::new(("worktree-remove", index))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Close)
+                                .tooltip(t("Remove Worktree"))
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    // The row under the button would switch to it.
+                                    cx.stop_propagation();
+                                    this.remove_worktree(gone.clone(), window, cx);
+                                })),
+                        )
+                    })
+            })
+            .collect();
+        self.backdrop("worktrees-backdrop", cx).child(
+            v_flex()
+                .id("worktrees")
+                .absolute()
+                .bottom(px(28.))
+                .left(px(8.))
+                .w(px(380.))
+                .max_h(px(420.))
+                .p_1()
+                .gap_1()
+                .rounded_lg()
+                .border_1()
+                .border_color(border)
+                .bg(popover)
+                .text_color(popover_text)
+                .shadow_lg()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.close_worktrees(window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(div().px_3().py_1().text_xs().text_color(muted).child(t("WORKTREES")))
+                .child(v_flex().id("worktree-list").flex_1().min_h_0().overflow_y_scroll().children(rows))
+                .child(div().h(px(1.)).bg(border))
+                .child(div().p_1().child(Input::new(&menu.input).small()))
+                .child(div().px_3().pb_1().text_xs().text_color(muted).child(t(
+                    "Each worktree is a folder of its own with another branch checked out, so several agents can work at once without getting in each other's way.",
+                )))
+                .when_some(menu.error.clone(), |d, error| {
+                    d.child(div().id("worktree-error").px_3().pb_1().text_xs().text_color(danger).child(error))
+                }),
+        )
     }
 
     /// Lists the named things of the file that is showing, or searches the
@@ -1533,6 +1781,7 @@ impl Workspace {
                 this.close_finder(window, cx);
                 this.close_settings(window, cx);
                 this.close_branches(window, cx);
+                this.close_worktrees(window, cx);
                 this.close_symbols(window, cx);
                 cx.notify();
             }),
@@ -1993,6 +2242,19 @@ impl Workspace {
                             .child(Icon::new(Lucide::GitBranch).xsmall())
                             .child(if changed > 0 { format!("{branch}*") } else { branch }),
                     )
+                    .child(
+                        item()
+                            .id("status-worktrees")
+                            .test_support()
+                            .px_1()
+                            .rounded_sm()
+                            .hover(|s| s.bg(theme.secondary_hover))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(t("Worktrees: a folder for each branch")).build(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_worktrees(window, cx)))
+                            .child(Icon::new(Lucide::FolderGit2).xsmall()),
+                    )
                     .when(git.ahead > 0, |d| {
                         d.child(
                             item()
@@ -2178,6 +2440,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &GoToSymbol, window, cx| this.open_symbols(false, window, cx)))
             .on_action(cx.listener(|this, _: &GoToProjectSymbol, window, cx| this.open_symbols(true, window, cx)))
             .on_action(cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)))
+            .on_action(cx.listener(|this, _: &SwitchWorktree, window, cx| this.open_worktrees(window, cx)))
             .on_action(cx.listener(|this, _: &git_panel::Pull, window, cx| this.git_remote(Remote::Pull, window, cx)))
             .on_action(cx.listener(|this, _: &git_panel::Push, window, cx| this.git_remote(Remote::Push, window, cx)))
             .on_action(
@@ -2240,6 +2503,7 @@ impl Render for Workspace {
                 d.child(self.backdrop("symbols-backdrop", cx).flex().justify_center().items_start().child(picker))
             })
             .when_some(self.branches.as_ref(), |d, menu| d.child(self.render_branches(menu, cx)))
+            .when_some(self.worktrees.as_ref(), |d, menu| d.child(self.render_worktrees(menu, cx)))
             .when_some(self.settings.as_ref().map(|(view, _)| view.clone()), |d, view| {
                 d.child(self.render_settings(&view, cx))
             })
@@ -2822,6 +3086,65 @@ mod tests {
         assert!(staged().contains("+fresh"));
         assert_eq!(view.read_with(cx, |v, _| v.names()), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
+    async fn worktrees_are_made_switched_to_and_removed(cx: &mut TestAppContext) {
+        use std::process::Command;
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let repo = project_dir("worktrees");
+        let git = |args: &[&str]| Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success();
+        assert!(git(&["init", "-q", "-b", "main"]));
+        for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")] {
+            assert!(git(&["config", key, value]));
+        }
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        assert!(git(&["add", "-A"]) && git(&["commit", "-q", "-m", "First"]));
+        let folder = repo.parent().unwrap().join("one-agent-1");
+
+        let f = open(cx, "worktrees");
+        let click = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+            cx.update_window(f.window, |_, window, cx| window.click(id, cx)).unwrap();
+            cx.run_until_parked();
+        };
+        let root = |cx: &mut TestAppContext| f.workspace.read_with(cx, |w, _| w.root());
+        let listed = |cx: &mut TestAppContext| {
+            wait_until(cx, "the worktrees", |cx| {
+                f.workspace.read_with(cx, |w, _| w.worktrees.as_ref().is_some_and(|m| m.trees.is_some() && !m.busy))
+            });
+            f.workspace.read_with(cx, |w, _| w.worktrees.as_ref().unwrap().trees.clone().unwrap())
+        };
+        wait_until(cx, "the repository", |cx| f.workspace.read_with(cx, |w, _| w.git().is_some()));
+
+        // The button in the status bar lists the one folder; a branch name makes another, and the window goes there.
+        click(cx, "status-worktrees".into());
+        assert_eq!(listed(cx).len(), 1);
+        cx.update_window(f.window, |_, window, cx| window.input("agent-1", cx)).unwrap();
+        press(cx, f.window, &["enter"]);
+        wait_until(cx, "the new worktree", |cx| root(cx) == Some(normalize(&folder)));
+        assert!(folder.join("a.txt").exists());
+        assert!(f.workspace.read_with(cx, |w, _| w.worktrees.is_none()));
+
+        // From there the list has both; a click goes back.
+        wait_until(cx, "the repository", |cx| f.workspace.read_with(cx, |w, _| w.git().is_some()));
+        click(cx, "status-worktrees".into());
+        let trees = listed(cx);
+        assert_eq!(trees.len(), 2);
+        assert_eq!(trees[1].branch.as_deref(), Some("agent-1"));
+        click(cx, ("worktree", 0usize).into());
+        wait_until(cx, "the first folder", |cx| root(cx) == Some(repo.clone()));
+
+        // The other one is removed from the list; its branch stays.
+        wait_until(cx, "the repository", |cx| f.workspace.read_with(cx, |w, _| w.git().is_some()));
+        click(cx, "status-worktrees".into());
+        assert_eq!(listed(cx).len(), 2);
+        click(cx, ("worktree-remove", 1usize).into());
+        assert_eq!(listed(cx).len(), 1);
+        assert!(!folder.exists());
+        let _ = std::fs::remove_dir_all(&f.dir);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[gpui_kit::test]

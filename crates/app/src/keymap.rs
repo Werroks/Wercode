@@ -16,7 +16,7 @@ use crate::term::{
 use crate::theme::AppState;
 use crate::workspace::{
     CommandPalette, NewWindow, OpenFolder, OpenSettings, QuickOpen, RerunTask, RunTask, ShowFiles, ShowGit, ShowProblems, ShowSearch,
-    SwitchBranch, SwitchProject, TogglePanel,
+    SwitchBranch, SwitchProject, SwitchWorktree, TogglePanel,
 };
 use wercode_core::i18n::{t, tf};
 
@@ -53,6 +53,7 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("workspace.open_folder", "Workspace", OpenFolder, ["ctrl-shift-o"], t("Project: Open Folder\u{2026}")),
         shortcut!("workspace.switch_project", "Workspace", SwitchProject, [], t("Project: Switch to Recent\u{2026}")),
         shortcut!("workspace.switch_branch", "Workspace", SwitchBranch, [], t("Git: Switch or Create Branch\u{2026}")),
+        shortcut!("workspace.switch_worktree", "Workspace", SwitchWorktree, [], t("Git: Switch or Create Worktree\u{2026}")),
         shortcut!("workspace.new_window", "Workspace", NewWindow, ["ctrl-shift-n"], t("Window: New Window")),
         shortcut!("workspace.settings", "Workspace", OpenSettings, [], t("Preferences: Settings")),
         // X for "execute"; L for the last one again.

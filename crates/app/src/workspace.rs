@@ -65,7 +65,8 @@ actions!(
         /// Runs again the task that was run last.
         RerunTask,
         /// Hides the title bar, the side panel and the status bar and fills
-        /// the screen with the tabs, or brings everything back.
+        /// the screen with the tabs (on Linux the window keeps its size), or
+        /// brings everything back.
         ToggleZen
     ]
 );
@@ -1283,7 +1284,10 @@ impl Workspace {
         if self.project.is_none() {
             return;
         }
-        let fullscreen = !window.is_fullscreen();
+        // Not on Linux: there GPUI learns of full screen only from the compositor,
+        // and one that does not say (WSLg's) left the window stuck full screen,
+        // since the second toggle asked for full screen again.
+        let fullscreen = cfg!(not(target_os = "linux")) && !window.is_fullscreen();
         if fullscreen {
             window.toggle_fullscreen();
         }

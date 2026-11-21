@@ -4,15 +4,32 @@ name: Release
 # GitHub release with the files and latest.json, which installed copies read
 # to update themselves. Started by hand, it only builds and keeps the files
 # as workflow artifacts, to try them out.
+#
+# A push to main builds too, and keeps nothing but the compiled dependencies
+# in the cache: a tag's run cannot use the cache of another tag, only that of
+# the default branch, so without this every release compiled everything anew.
+# The files a tag builds are the same either way; only the time differs.
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    # Notes alone change nothing that is compiled. (Tags ignore this.)
+    paths-ignore: ["docs/**", "**.md"]
   workflow_dispatch:
+
+# A newer push to main makes a build of the one before pointless.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
 
 env:
   CARGO_TERM_COLOR: always
   # Marks the build as one that may update itself (crates/core/src/update.rs).
   WERCODE_RELEASE: "1"
+  # The files are packed and kept for a tag or a run started by hand, not for main.
+  SHIP: ${{ github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' }}
+  # Only main writes the cache: what a tag's run would save no other run can read.
+  SAVE_CACHE: ${{ github.ref == 'refs/heads/main' }}
 
 jobs:
   version:
@@ -37,38 +54,75 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ env.SAVE_CACHE }}
       - name: Build
         run: cargo build --release --locked -p wercode
       - name: Installer
+        if: env.SHIP == 'true'
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=${{ needs.version.outputs.version }}" packaging\windows\wercode.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
+        if: env.SHIP == 'true'
         with:
-          name: windows
+          name: release-windows
           path: dist/*.exe
           if-no-files-found: error
 
+  # The Apple silicon and Intel programs are built side by side, each in a
+  # job of its own (they took turns in one job before, half the time of the
+  # whole release); macos-bundle joins them into one Wercode.app.
   macos:
     needs: version
     runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The job's name is the same for both: the target tells the caches apart.
+          key: ${{ matrix.target }}
+          save-if: ${{ env.SAVE_CACHE }}
       - name: Build
-        run: |
-          cargo build --release --locked -p wercode --target aarch64-apple-darwin
-          cargo build --release --locked -p wercode --target x86_64-apple-darwin
+        run: cargo build --release --locked -p wercode --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        if: env.SHIP == 'true'
+        with:
+          name: macos-program-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/wercode
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-bundle:
+    needs: [version, macos]
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-program-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-program-x86_64-apple-darwin
+          path: target/x86_64-apple-darwin/release
       - name: Bundle
-        run: sh packaging/macos/bundle.sh "${{ needs.version.outputs.version }}"
+        run: |
+          # Artifacts do not keep the mark that a file is a program.
+          chmod +x target/*/release/wercode
+          sh packaging/macos/bundle.sh "${{ needs.version.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: macos
+          name: release-macos
           path: |
             dist/*.dmg
             dist/*.tar.gz
@@ -82,6 +136,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ env.SAVE_CACHE }}
       - name: Packages
         run: |
           # A mirror that does not answer leaves the package lists empty; try again.
@@ -95,16 +151,18 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p wercode
       - name: Pack
+        if: env.SHIP == 'true'
         run: sh packaging/linux/package.sh "${{ needs.version.outputs.version }}"
       - uses: actions/upload-artifact@v4
+        if: env.SHIP == 'true'
         with:
-          name: linux
+          name: release-linux
           path: dist/*.tar.gz
           if-no-files-found: error
 
   publish:
     if: github.ref_type == 'tag'
-    needs: [version, windows, macos, linux]
+    needs: [version, windows, macos-bundle, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -113,6 +171,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          # The packed files only, not the two halves of the Mac program.
+          pattern: release-*
           merge-multiple: true
       - name: Manifest
         run: python3 packaging/manifest.py "${{ needs.version.outputs.version }}" "$GITHUB_REPOSITORY" dist

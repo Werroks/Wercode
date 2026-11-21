@@ -14,6 +14,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 lipo -create -output "$app/Contents/MacOS/wercode" \
     "$root/target/aarch64-apple-darwin/release/wercode" \
     "$root/target/x86_64-apple-darwin/release/wercode"
+# The halves may come from workflow artifacts, which do not keep this.
+chmod 755 "$app/Contents/MacOS/wercode"
 sed "s/@VERSION@/$version/g" "$root/packaging/macos/Info.plist" > "$app/Contents/Info.plist"
 
 # Every icon size macOS asks for, from one large picture.

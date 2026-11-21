@@ -150,9 +150,33 @@ pub fn restart(cx: &mut App) {
         return;
     }
     cx.update_global::<Updater, _>(|updater, _| updater.relaunch = true);
-    for window in cx.windows() {
-        let _ = window.update(cx, |_, window, cx| window.dispatch_action(Box::new(CloseForUpdate), cx));
-    }
+    // Deferred: the button that asks for this is in one of the windows, and a
+    // window busy with the click cannot be reached ("window not found"), so
+    // that window never closed and nothing seemed to happen.
+    cx.defer(|cx| {
+        for window in cx.windows() {
+            let _ = window.update(cx, |_, window, cx| window.dispatch_action(Box::new(CloseForUpdate), cx));
+        }
+    });
+}
+
+/// Pretends a release was downloaded, with no schedule and nothing put in
+/// place on quit.
+#[cfg(test)]
+pub fn pretend_ready(version: &str, staged: Staged, cx: &mut App) {
+    cx.set_global(Updater {
+        status: Status::Ready(version.into()),
+        staged: Some(staged),
+        asked: false,
+        relaunch: false,
+        _schedule: None,
+    });
+}
+
+/// Whether quitting now starts the new version.
+#[cfg(test)]
+pub fn relaunch_asked(cx: &App) -> bool {
+    cx.try_global::<Updater>().is_some_and(|updater| updater.relaunch)
 }
 
 /// A window said no to closing: no restart after all.

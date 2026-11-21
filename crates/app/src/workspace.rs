@@ -2724,6 +2724,19 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn restart_to_update_closes_the_window(cx: &mut TestAppContext) {
+        let f = open(cx, "restart");
+        let staged = wercode_core::update::Staged::Executable { new: f.dir.join("new"), old: f.dir.join("old") };
+        cx.update(|cx| crate::update::pretend_ready("9.9.9", staged, cx));
+        // The button sits in the window it has to close.
+        cx.update_window(f.window, |_, window, cx| window.click("status-update", cx)).unwrap();
+        cx.run_until_parked();
+        assert!(cx.update(|cx| crate::update::relaunch_asked(cx)));
+        assert!(cx.update(|cx| cx.windows().is_empty()), "the window is still open");
+        let _ = std::fs::remove_dir_all(&f.dir);
+    }
+
+    #[gpui_kit::test]
     async fn zen_mode_leaves_only_the_tabs(cx: &mut TestAppContext) {
         let f = open(cx, "zen");
         let shown = |cx: &mut TestAppContext, id: &'static str| {

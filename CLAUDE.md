@@ -50,7 +50,9 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
 - `docs/` — planning notes: `features.csv`, `build-log.md`, `architecture.md`.
 - `packaging/` — the Windows installer script, the macOS bundle and the Linux
   archive, and `manifest.py` for `latest.json`. `.github/workflows/release.yml`
-  runs them for a tag `v<version>`; the tag must match `Cargo.toml`.
+  runs them for a tag `v<version>`; the tag must match `Cargo.toml`. Pushes
+  to main run it too, without packing or publishing: a tag's run can read only
+  main's cache, not another tag's, and that cache is what makes it quick.
 - `tools/drive.ps1` — Windows-only helper for checking the running window. Not shipped.
 
 ## Commands

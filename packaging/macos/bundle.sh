@@ -41,5 +41,8 @@ rm -rf "$stage"
 mkdir -p "$stage"
 cp -R "$app" "$stage/"
 ln -s /Applications "$stage/Applications"
-hdiutil create -volname "Wercode $version" -srcfolder "$stage" -ov -format UDZO "$out/Wercode-$version-macos.dmg"
+# The size hdiutil guesses from the folder is sometimes too small ("No space
+# left on device" while copying the app in, release 0.7.0): give it room.
+mb=$(du -sm "$stage" | cut -f1)
+hdiutil create -volname "Wercode $version" -srcfolder "$stage" -fs HFS+ -size "$((mb + 32))m" -ov -format UDZO "$out/Wercode-$version-macos.dmg"
 rm -rf "$stage"

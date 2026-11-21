@@ -28,12 +28,15 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   status, file listing, finding a file
   by name, reading and
   writing documents, project search, watching the folder for changes,
-  dropping what the program that started Wercode left in its environment,
+  dropping what the program that started Wercode left in its environment
+  and asking the login shell for its `PATH` (`environment`),
   commit history and its graph (`history`), every change cut into hunks
   and single hunks staged or thrown away (`changes`), updates (`update`), the
   languages of the interface (`i18n`, with `locales/`), language servers
   for code checks (`lsp`: finding and running them, fetching them into
-  Wercode's own folder (`lsp::download`), the protocol, what they report), which program reads a terminal's keys (`process::key_reader`).
+  Wercode's own folder and keeping them up to date (`lsp::download`), the
+  protocol, what they report), which program reads a terminal's keys
+  (`process::key_reader`).
 - `crates/app` — the `wercode` binary: `workspace.rs` (root view, title, side
   panel, status bar, palette, welcome), `term/` (tabs, splits, terminal view),
   `panel/` (file tree, search, git panel, `graph.rs` for the history),
@@ -101,6 +104,9 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `NO_COLOR=1` and git settings
   meant for a program. `core::environment::drop_leftovers()` removes them as
   the first line of `main`; keep it before anything that starts a thread.
+- `drive.ps1` holds keys with `down:<vk>` and `up:<vk>` (Ctrl 17, Shift 16,
+  Alt 18): `down:17; down:16; key:84; up:16; up:17` is Ctrl+Shift+T. A plain
+  `key:` never has Ctrl with it.
 - `drive.ps1`'s `text:` (WM_CHAR) does not reach the current window. Type
   with `key:` and virtual key codes; switch the window to the English layout
   first (`WM_INPUTLANGCHANGEREQUEST` with `LoadKeyboardLayout("00000409")`),
@@ -118,6 +124,17 @@ A desktop terminal with a file tree, git and (later) an editor next to it. Rust,
   its ellipsis even when there is room. Give such text `flex_none()` and a
   fixed `max_w` (as the graph's badges and author do), and let one plain
   `flex_1()` element take what is left.
+- Ctrl+Tab opens the tab switcher, which waits for Ctrl to be let go. A test
+  that wants the next tab presses Ctrl+PageDown; one that holds Ctrl sends a
+  modifiers-changed event first (`hold_ctrl` in `term/area.rs`): a test key
+  press does not change `window.modifiers()`.
+- A tooltip is measured before it has a width: text that wraps inside one
+  element, or a line break inside one text, runs over what is below. Give
+  each line its own element and long text a fixed `w`.
+- Linux can be checked by hand in WSLg with the release archive. Run commands
+  as `wsl.exe -d Ubuntu -e bash -lc '…'`: without `-e` the default shell
+  parses the line again and `$names` vanish. The WSLg window (class
+  `RAIL_WINDOW`) takes clicks and key presses posted to it, not `WM_CHAR`.
 - After finishing a feature, update `docs/features.csv` and
   `docs/build-log.md`.
 - `lsp::download::tests::real_downloads` fetches real servers from the

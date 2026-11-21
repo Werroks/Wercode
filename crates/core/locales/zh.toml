@@ -387,3 +387,8 @@
 "{file} could not be unpacked: {error}" = "无法解压 {file}：{error}"
 "{file} has no {program} in it." = "{file} 中没有 {program}。"
 "Underline errors and warnings in open files, using the language servers on this computer or ones Wercode downloads." = "使用此计算机上的语言服务器或 Wercode 下载的语言服务器，在打开的文件中为错误和警告加下划线。"
+"View: Switch Tab…" = "视图：切换标签页…"
+"View: Switch Tab Backwards…" = "视图：反向切换标签页…"
+"View: Zen Mode" = "视图：禅模式"
+"Zen mode. {keys} brings everything back." = "禅模式。按 {keys} 恢复全部界面。"
+"Zen mode. \"View: Zen Mode\" in the command palette brings everything back." = "禅模式。在命令面板中选择“视图：禅模式”即可恢复全部界面。"

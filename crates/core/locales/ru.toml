@@ -386,3 +386,8 @@
 "{file} could not be unpacked: {error}" = "Не удалось распаковать {file}: {error}"
 "{file} has no {program} in it." = "В {file} нет {program}."
 "Underline errors and warnings in open files, using the language servers on this computer or ones Wercode downloads." = "Подчёркивать ошибки и предупреждения в открытых файлах с помощью языковых серверов, установленных на компьютере или скачанных Wercode."
+"View: Switch Tab…" = "Вид: переключить вкладку…"
+"View: Switch Tab Backwards…" = "Вид: переключить вкладку в обратном порядке…"
+"View: Zen Mode" = "Вид: режим «дзен»"
+"Zen mode. {keys} brings everything back." = "Режим «дзен». {keys} вернёт всё обратно."
+"Zen mode. \"View: Zen Mode\" in the command palette brings everything back." = "Режим «дзен». Команда «Вид: режим „дзен“» в палитре вернёт всё обратно."

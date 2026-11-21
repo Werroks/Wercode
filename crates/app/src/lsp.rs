@@ -20,6 +20,10 @@ actions!(lsp, [RestartLanguageServers]);
 const RETRY: Duration = Duration::from_secs(10);
 /// How long Wercode waits for the servers to stop as it quits.
 const QUIT_WAIT: Duration = Duration::from_millis(1500);
+/// The fetched servers are first looked at this long after start, when the
+/// window is up, and again this often (each at most once a day).
+const SERVER_UPDATES_FIRST: Duration = Duration::from_secs(30);
+const SERVER_UPDATES_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 pub enum CheckerEvent {
     /// What the servers say about this file changed.
@@ -100,6 +104,49 @@ pub fn checker(cx: &App) -> Option<Entity<Checker>> {
 
 pub fn init(cx: &mut App) {
     init_with(lsp::builtin(), cx);
+    // Asking the login shell for its PATH takes a moment; done now, the first
+    // server does not wait for it.
+    cx.background_executor().spawn(async { wercode_core::environment::login_path(); }).detach();
+    keep_fetched_servers_updated(cx);
+}
+
+/// Clears the server versions an earlier session replaced, then fetches
+/// newer versions of the servers Wercode fetched: a little after start and
+/// every few hours, each server at most once a day. A server picks up its
+/// new version the next time it starts. Follows the switch for updates.
+fn keep_fetched_servers_updated(cx: &mut App) {
+    let fetchable: Vec<(String, lsp::download::Download)> =
+        lsp::builtin().into_iter().filter_map(|spec| Some((spec.name, spec.download?))).collect();
+    cx.spawn(async move |cx| {
+        // Nothing of this session runs from a replaced version yet.
+        cx.background_executor()
+            .spawn(async {
+                if let Some(dir) = lsp::download::servers_dir() {
+                    lsp::download::prune(&dir);
+                }
+            })
+            .await;
+        cx.background_executor().timer(SERVER_UPDATES_FIRST).await;
+        loop {
+            let wanted = cx.update(|cx| {
+                let settings = &cx.global::<AppState>().settings;
+                settings.auto_update && settings.language_servers
+            });
+            if wanted {
+                let fetchable = fetchable.clone();
+                let results = cx.background_executor().spawn(async move { lsp::download::update_all(&fetchable) }).await;
+                for (name, result) in results {
+                    match result {
+                        Ok(true) => eprintln!("language server updated: {name}"),
+                        Ok(false) => {}
+                        Err(error) => eprintln!("language server {name} not updated: {error}"),
+                    }
+                }
+            }
+            cx.background_executor().timer(SERVER_UPDATES_EVERY).await;
+        }
+    })
+    .detach();
 }
 
 /// Starts checking with the servers in `specs`; tests pass a server of their own.

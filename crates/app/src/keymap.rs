@@ -11,12 +11,12 @@ use crate::symbols::{GoToProjectSymbol, GoToSymbol};
 use crate::lsp::RestartLanguageServers;
 use crate::panel::git::{Commit, Fetch, Pull, Push, ShowAllChanges, StageAll};
 use crate::term::{
-    ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, ToggleTerminal,
+    ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight, SwitchTab, SwitchTabBack, ToggleTerminal,
 };
 use crate::theme::AppState;
 use crate::workspace::{
     CommandPalette, NewWindow, OpenFolder, OpenSettings, QuickOpen, RerunTask, RunTask, ShowFiles, ShowGit, ShowProblems, ShowSearch,
-    SwitchBranch, SwitchProject, SwitchWorktree, TogglePanel,
+    SwitchBranch, SwitchProject, SwitchWorktree, TogglePanel, ToggleZen,
 };
 use wercode_core::i18n::{t, tf};
 
@@ -49,6 +49,8 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("workspace.show_files", "Workspace", ShowFiles, [], t("View: Show Files")),
         shortcut!("workspace.show_git", "Workspace", ShowGit, ["ctrl-shift-g"], t("View: Show Git")),
         shortcut!("workspace.show_problems", "Workspace", ShowProblems, ["ctrl-shift-m"], t("View: Show Problems")),
+        // Z for "zen": redo in the editor is Ctrl+Y, so this key is free there too.
+        shortcut!("workspace.toggle_zen", "Workspace", ToggleZen, ["ctrl-shift-z"], t("View: Zen Mode")),
         shortcut!("workspace.restart_language_servers", "Workspace", RestartLanguageServers, [], t("Language Servers: Restart")),
         shortcut!("workspace.open_folder", "Workspace", OpenFolder, ["ctrl-shift-o"], t("Project: Open Folder\u{2026}")),
         shortcut!("workspace.switch_project", "Workspace", SwitchProject, [], t("Project: Switch to Recent\u{2026}")),
@@ -73,8 +75,12 @@ pub fn shortcuts() -> Vec<Shortcut> {
         shortcut!("terminal.close_pane", "TerminalArea", ClosePane, ["ctrl-shift-w"], t("Terminal: Close Pane")),
         shortcut!("terminal.split_right", "TerminalArea", SplitRight, ["ctrl-shift-d"], t("Terminal: Split Right")),
         shortcut!("terminal.split_down", "TerminalArea", SplitDown, ["ctrl-shift-e"], t("Terminal: Split Down")),
-        shortcut!("terminal.next_tab", "TerminalArea", NextTab, ["ctrl-tab", "ctrl-pagedown"], t("Terminal: Next Tab")),
-        shortcut!("terminal.previous_tab", "TerminalArea", PrevTab, ["ctrl-shift-tab", "ctrl-pageup"], t("Terminal: Previous Tab")),
+        shortcut!("terminal.next_tab", "TerminalArea", NextTab, ["ctrl-pagedown"], t("Terminal: Next Tab")),
+        shortcut!("terminal.previous_tab", "TerminalArea", PrevTab, ["ctrl-pageup"], t("Terminal: Previous Tab")),
+        // As in VS Code and Zed: a quick press goes back to the tab used last;
+        // with Ctrl held the list stays up for more presses.
+        shortcut!("terminal.switch_tab", "TerminalArea", SwitchTab, ["ctrl-tab"], t("View: Switch Tab\u{2026}")),
+        shortcut!("terminal.switch_tab_back", "TerminalArea", SwitchTabBack, ["ctrl-shift-tab"], t("View: Switch Tab Backwards\u{2026}")),
         // The arrows go to the terminal on that side; round the circle is in the palette.
         shortcut!("terminal.pane_left", "TerminalArea", PaneLeft, ["ctrl-alt-left"], t("Terminal: Go to the Pane on the Left")),
         shortcut!("terminal.pane_right", "TerminalArea", PaneRight, ["ctrl-alt-right"], t("Terminal: Go to the Pane on the Right")),

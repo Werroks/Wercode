@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wercode_core::file_icons;
 use wercode_core::i18n::{t, tn};
@@ -159,21 +160,72 @@ impl ProblemsPanel {
                     (None, None) => String::new(),
                 };
                 let place = format!("{}:{}", problem.line + 1, problem.column + 1);
+                let tip = ProblemTip {
+                    message: problem.message.trim().to_string().into(),
+                    origin: format!("{origin}  {place}").trim().to_string().into(),
+                };
+                // The message comes first: when the row is short of room the source
+                // gives way, down to nothing, before the message is cut (it took up
+                // to 40% before). The place stays whole; the tooltip has everything.
                 row.pl_6()
+                    .tooltip(move |_, cx| cx.new(|_| tip.clone()).into())
                     .child(severity_icon(problem.severity, cx).xsmall().flex_none())
-                    .child(div().flex_1().min_w_0().truncate().child(message))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(relative(0.4))
-                            .truncate()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("{origin}  {place}").trim().to_string()),
-                    )
+                    .child(div().flex_auto().min_w(px(60.)).truncate().child(message))
+                    .when(!origin.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .flex_grow_0()
+                                .flex_shrink(1000.)
+                                .min_w_0()
+                                .max_w(px(180.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(origin),
+                        )
+                    })
+                    .child(div().flex_none().text_xs().text_color(muted).child(place))
                     .into_any_element()
             }
         }
+    }
+}
+
+/// Characters a line of the tooltip holds before it wraps.
+const TIP_LINE: usize = 60;
+
+/// The whole of a problem, shown when the pointer rests on its row.
+#[derive(Clone)]
+struct ProblemTip {
+    message: SharedString,
+    origin: SharedString,
+}
+
+impl Render for ProblemTip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        // A tooltip is measured before it has a width, so text that wraps
+        // inside one ran over the lines below: long messages get a width of
+        // their own, short ones stay on their lines.
+        let wide = self.message.lines().any(|line| line.chars().count() > TIP_LINE);
+        v_flex()
+            .when(wide, |d| d.w(px(480.)))
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .shadow_md()
+            // One element a line: a line break inside one text is not counted in its height either.
+            .children(self.message.lines().map(|line| {
+                div().text_sm().when(wide, |d| d.w_full()).child(SharedString::from(line.to_string()))
+            }))
+            .when(!self.origin.is_empty(), |d| {
+                d.child(div().text_xs().text_color(theme.muted_foreground).child(self.origin.clone()))
+            })
     }
 }
 

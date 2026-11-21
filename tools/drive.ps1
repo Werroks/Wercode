@@ -9,6 +9,10 @@
 # Steps (coordinates are client pixels):
 #   click:x,y   rclick:x,y   move:x,y   drag:x1,y1,x2,y2   wheel:x,y,delta
 #   text:...    key:<virtual key code>   sleep:<ms>   shot:<path.png>   size
+#   down:<vk>   up:<vk>   holds a key down and lets it go: "down:17; key:9; up:17" is
+#               Ctrl+Tab with Ctrl held (17 Ctrl, 16 Shift, 18 Alt). The window's
+#               thread is told the key is down, so its shortcuts see it; nothing
+#               else on the computer does.
 param([string]$Steps = "size")
 # A build from target\ first: an installed Wercode may be open with real work in it.
 $all = @(Get-Process wercode -ErrorAction SilentlyContinue)
@@ -24,6 +28,34 @@ public class Drive {
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+  [DllImport("user32.dll")] public static extern bool GetKeyboardState(byte[] state);
+  [DllImport("user32.dll")] public static extern bool SetKeyboardState(byte[] state);
+  static uint mine, theirs;
+  // Shares the key state with the window's thread until Detach: detached
+  // too early, the thread goes back to its own state before it reads ours.
+  public static void Attach(IntPtr h) {
+    if (theirs != 0) return;
+    mine = GetCurrentThreadId(); theirs = GetWindowThreadProcessId(h, IntPtr.Zero);
+    AttachThreadInput(mine, theirs, true);
+  }
+  public static void Detach() {
+    if (theirs == 0) return;
+    AttachThreadInput(mine, theirs, false); theirs = 0;
+  }
+  // Marks a key down or up in the key state the window's thread reads.
+  public static void Hold(IntPtr h, int vk, bool down) {
+    Attach(h);
+    byte[] state = new byte[256];
+    GetKeyboardState(state);
+    state[vk] = (byte)(down ? 0x80 : 0);
+    // The left or right key as well as the generic one.
+    int[] sides = vk == 17 ? new[] { 0xA2, 0xA3 } : vk == 16 ? new[] { 0xA0, 0xA1 } : vk == 18 ? new[] { 0xA4, 0xA5 } : new int[0];
+    if (sides.Length > 0) state[sides[0]] = (byte)(down ? 0x80 : 0);
+    SetKeyboardState(state);
+  }
   public struct RECT { public int L, T, R, B; }
   public struct POINT { public int X, Y; }
   public static IntPtr Pos(int x, int y) { return (IntPtr)((y << 16) | (x & 0xFFFF)); }
@@ -71,6 +103,8 @@ foreach ($step in $Steps -split ';') {
     }
     'text' { foreach ($c in $arg.ToCharArray()) { & $post 0x102 ([int]$c) ([IntPtr]1); Start-Sleep -Milliseconds 15 } }
     'key' { & $post 0x100 $n[0] ([IntPtr]1); Start-Sleep -Milliseconds 30; & $post 0x101 $n[0] ([IntPtr]0xC0000001L) }
+    'down' { [Drive]::Hold($h, $n[0], $true); & $post 0x100 $n[0] ([IntPtr]1); Start-Sleep -Milliseconds 30 }
+    'up' { [Drive]::Hold($h, $n[0], $false); & $post 0x101 $n[0] ([IntPtr]0xC0000001L); Start-Sleep -Milliseconds 30 }
     'sleep' { Start-Sleep -Milliseconds $n[0] }
     'shot' {
       $r = New-Object Drive+RECT; [Drive]::GetClientRect($h, [ref]$r) | Out-Null
@@ -86,3 +120,6 @@ foreach ($step in $Steps -split ';') {
     default { "unknown step: $step" }
   }
 }
+# Keys held with down: are let go at the end, and the window has read them by then.
+Start-Sleep -Milliseconds 200
+[Drive]::Detach()

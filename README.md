@@ -174,7 +174,7 @@ Get the latest version from the **[Releases page](https://github.com/Werroks/Wer
 | --- | --- | --- |
 | Windows 10 and 11 | `Wercode-Setup-<version>-x64.exe` | Installs for your user, no admin rights. Not signed yet: if SmartScreen complains, click **More info → Run anyway**. |
 | macOS 11+ (Apple silicon and Intel) | `Wercode-<version>-macos.dmg` | Not notarized yet: open it once, then **System Settings → Privacy & Security → Open Anyway**. |
-| Linux x86-64 | `Wercode-<version>-linux-x64.tar.gz` | Unpack and run `./install.sh`: it puts `wercode` in `~/.local/bin` and adds a menu entry. |
+| Linux x86-64 | `Wercode-<version>-linux-x64.tar.gz` | Unpack and run `./install.sh`: it puts `wercode` in `~/.local/bin` and adds a menu entry. A minimal system (a server, WSL) may first need `sudo apt install libxkbcommon-x11-0 libxcb-xkb1`; `install.sh` names any library that is missing. |
 
 Then open a folder from the welcome screen, or from a terminal:
 

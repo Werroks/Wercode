@@ -340,15 +340,41 @@ fn extra_dirs() -> Vec<PathBuf> {
         dirs.push("/usr/local/bin".into());
         if let Some(home) = &home {
             dirs.push(home.join(".npm-global").join("bin"));
+            // Node.js from nvm: the newest version first.
+            let nvm = std::env::var_os("NVM_DIR").map(PathBuf::from).unwrap_or_else(|| home.join(".nvm"));
+            dirs.extend(node_versions(&nvm.join("versions").join("node")).into_iter().map(|version| version.join("bin")));
+            dirs.push(home.join(".volta").join("bin"));
+            dirs.push(home.join(".bun").join("bin"));
         }
     }
     dirs
 }
 
-/// The folders searched for programs: `PATH`, then [`extra_dirs`].
+/// The folders of `dir` named like Node.js versions (`v20.11.1`), the
+/// newest first. nvm keeps one such folder for each version it installed.
+#[cfg_attr(windows, allow(dead_code))]
+fn node_versions(dir: &Path) -> Vec<PathBuf> {
+    let number = |name: &str| -> Option<Vec<u64>> {
+        name.strip_prefix('v')?.split('.').map(|part| part.parse().ok()).collect()
+    };
+    let mut found: Vec<(Vec<u64>, PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| Some((number(&entry.file_name().to_string_lossy())?, entry.path())))
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// The folders searched for programs: `PATH`, then the folders the login
+/// shell adds to it (when Wercode was started from the Dock or a desktop
+/// menu), then [`extra_dirs`].
 pub fn search_path() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-    for dir in extra_dirs() {
+    let login: Vec<PathBuf> =
+        crate::environment::login_path().map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    for dir in login.into_iter().chain(extra_dirs()) {
         if !dirs.contains(&dir) {
             dirs.push(dir);
         }
@@ -481,6 +507,19 @@ mod tests {
         assert_eq!(find_program_in("fake-server", &dirs), Some(dir.join(name)));
         assert_eq!(find_program_in("no-such-server", &dirs), None);
         assert_eq!(find_program_in(&dir.join(name).to_string_lossy(), &[]), Some(dir.join(name)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_newest_node_from_nvm_comes_first() {
+        let dir = temp("nvm");
+        for name in ["v9.11.2", "v20.11.1", "v18.20.4", "v20.9.0", "system", "v21-nightly"] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        let names: Vec<String> =
+            node_versions(&dir).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["v20.11.1", "v20.9.0", "v18.20.4", "v9.11.2"]);
+        assert!(node_versions(&dir.join("missing")).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

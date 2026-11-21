@@ -81,6 +81,72 @@ pub unsafe fn drop_leftovers() {
     }
 }
 
+/// What the login shell prints around its `PATH`, so that whatever its
+/// startup files print as well can be told apart.
+#[cfg_attr(not(unix), allow(dead_code))]
+const PATH_MARK: &str = "_WERCODE_PATH_";
+
+/// The `PATH` between the marks in what the login shell printed.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn path_between_marks(output: &str) -> Option<OsString> {
+    let mut parts = output.split(PATH_MARK);
+    parts.next()?;
+    let path = parts.next()?;
+    parts.next()?;
+    (!path.trim().is_empty()).then(|| OsString::from(path.trim()))
+}
+
+/// The `PATH` the user's login shell sets up, for finding programs such as
+/// language servers. A window started from the Dock on macOS (or from a
+/// desktop menu on Linux) gets only the system folders: `~/.cargo/bin`,
+/// Homebrew and nvm are added by the shell's startup files, which only a
+/// terminal runs. Asked once, off the UI thread, and only when Wercode was
+/// not started from a terminal (whose `PATH` it already has). `None` on
+/// Windows, where programs register their folders for every process.
+pub fn login_path() -> Option<&'static std::ffi::OsStr> {
+    static PATH: std::sync::OnceLock<Option<OsString>> = std::sync::OnceLock::new();
+    PATH.get_or_init(ask_login_shell).as_deref()
+}
+
+#[cfg(unix)]
+fn ask_login_shell() -> Option<OsString> {
+    use std::io::{IsTerminal as _, Read as _};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    if std::io::stdin().is_terminal() {
+        return None;
+    }
+    let shell = std::env::var_os("SHELL").filter(|shell| !shell.is_empty())?;
+    // `-i` too: nvm and many others are set up in `.zshrc` and `.bashrc`, which
+    // only an interactive shell reads. fish joins a quoted `$PATH` with colons.
+    let script = format!("printf '{PATH_MARK}%s{PATH_MARK}' \"$PATH\"");
+    let mut child = Command::new(shell)
+        .args(["-l", "-i", "-c", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = String::new();
+        let _ = stdout.read_to_string(&mut output);
+        let _ = sender.send(output);
+    });
+    // A startup file that waits for something must not hold the servers up for long.
+    let output = receiver.recv_timeout(Duration::from_secs(5));
+    let _ = child.kill();
+    let _ = child.wait();
+    path_between_marks(&output.ok()?)
+}
+
+#[cfg(not(unix))]
+fn ask_login_shell() -> Option<OsString> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +192,15 @@ mod tests {
     fn an_editors_password_pipe_goes() {
         let from_cursor = ["PATH", "GIT_ASKPASS", "VSCODE_GIT_ASKPASS_MAIN", "VSCODE_GIT_IPC_HANDLE", "NO_COLOR"];
         assert_eq!(left(&from_cursor), ["GIT_ASKPASS", "VSCODE_GIT_ASKPASS_MAIN", "VSCODE_GIT_IPC_HANDLE"]);
+    }
+
+    #[test]
+    fn the_login_shells_path_is_read_between_the_marks() {
+        let printed = "Welcome back!\n_WERCODE_PATH_/opt/homebrew/bin:/usr/bin_WERCODE_PATH_";
+        assert_eq!(path_between_marks(printed), Some(OsString::from("/opt/homebrew/bin:/usr/bin")));
+        assert_eq!(path_between_marks("no marks at all"), None);
+        assert_eq!(path_between_marks("_WERCODE_PATH_/usr/bin"), None);
+        assert_eq!(path_between_marks("_WERCODE_PATH__WERCODE_PATH_"), None);
     }
 
     #[cfg(windows)]

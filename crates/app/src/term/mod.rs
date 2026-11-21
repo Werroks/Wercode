@@ -20,6 +20,11 @@ actions!(
         SplitDown,
         NextTab,
         PrevTab,
+        /// Lists the tabs, the one used last first, and picks the one before
+        /// this; held down with Ctrl, further presses go down the list.
+        SwitchTab,
+        /// The same list, going up from the bottom.
+        SwitchTabBack,
         NextPane,
         PrevPane,
         /// The keyboard goes to the terminal on that side of this one.

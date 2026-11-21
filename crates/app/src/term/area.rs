@@ -21,7 +21,7 @@ use wercode_core::state::{self, Layout, PaneLayout, TabLayout};
 use super::view::{TerminalView, TerminalViewEvent};
 use super::{
     ClosePane, CloseTab, Find, NewTab, PaneDown, PaneLeft, PaneRight, PaneUp, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
-    ToggleTerminal,
+    SwitchTab, SwitchTabBack, ToggleTerminal,
 };
 use crate::changes::{ChangesEvent, ChangesView};
 use crate::diff::DiffView;
@@ -339,6 +339,53 @@ pub struct TerminalArea {
     renaming: Option<Renaming>,
     /// The tab whose line between two files is being dragged, by id.
     beside_dragging: Option<usize>,
+    /// Tab ids, the one used last first.
+    recent: Vec<usize>,
+    /// The list of tabs Ctrl+Tab shows.
+    switcher: Option<TabSwitcher>,
+}
+
+/// The list of tabs Ctrl+Tab shows, the one used last at the top.
+struct TabSwitcher {
+    /// Tab ids in the order listed.
+    order: Vec<usize>,
+    selected: usize,
+    /// The keys held as it opened (Ctrl, or whatever the shortcut was
+    /// changed to); letting go of them opens the selected tab. None held
+    /// (opened from the palette): it waits for Enter or a click.
+    held: Modifiers,
+    focus: FocusHandle,
+}
+
+impl TabSwitcher {
+    fn holding(&self) -> bool {
+        self.held.control || self.held.alt || self.held.platform
+    }
+
+    /// Whether a key that opened the list is still down.
+    fn still_held(&self, now: &Modifiers) -> bool {
+        (self.held.control && now.control) || (self.held.alt && now.alt) || (self.held.platform && now.platform)
+    }
+
+    fn step(&mut self, by: isize) {
+        let count = self.order.len() as isize;
+        if count > 0 {
+            self.selected = (self.selected as isize + by).rem_euclid(count) as usize;
+        }
+    }
+}
+
+/// The tabs in the order the switcher lists them: the one showing, then
+/// the others from the one used last, then those never used, in the row's
+/// order.
+fn switcher_order(tabs: &[usize], active: Option<usize>, recent: &[usize]) -> Vec<usize> {
+    let mut order: Vec<usize> = Vec::new();
+    for id in active.into_iter().chain(recent.iter().copied()).chain(tabs.iter().copied()) {
+        if tabs.contains(&id) && !order.contains(&id) {
+            order.push(id);
+        }
+    }
+    order
 }
 
 impl EventEmitter<AreaEvent> for TerminalArea {}
@@ -373,6 +420,8 @@ impl TerminalArea {
             dock_bounds: Rc::default(),
             renaming: None,
             beside_dragging: None,
+            recent: Vec::new(),
+            switcher: None,
         };
         if let Some(layout) = layout {
             this.restore(layout, window, cx);
@@ -409,6 +458,11 @@ impl TerminalArea {
     /// Remembers the tab that is showing as the last one of its kind.
     fn note_active(&mut self) {
         if let Some(tab) = self.tabs.get(self.active) {
+            if self.recent.first() != Some(&tab.id) {
+                let id = tab.id;
+                self.recent.retain(|&other| other != id);
+                self.recent.insert(0, id);
+            }
             if tab.is_terminal() {
                 self.last_terminal = Some(tab.id);
                 self.terminal_hidden = false;
@@ -1497,6 +1551,179 @@ impl TerminalArea {
             .into_any_element()
     }
 
+    /// What a tab shows: its name, the picture of its file (none for a
+    /// terminal), and whether it has edits that are not on disk.
+    fn look(tab: &Tab, cx: &App) -> (SharedString, Option<&'static str>, bool) {
+        match &tab.body {
+            Body::Terminals { active, .. } => {
+                let label = tab.name.clone().map(SharedString::from).unwrap_or_else(|| active.read(cx).label());
+                (label, None, false)
+            }
+            Body::Editor { first, beside, .. } => {
+                let name = first.read(cx).file_name();
+                let picture = file_icons::for_file(&name).and_then(crate::assets::file_icon);
+                let label = match beside {
+                    Some(beside) => format!("{name} | {}", beside.editor.read(cx).file_name()),
+                    None => name,
+                };
+                let unsaved = tab.editors().iter().any(|e| e.read(cx).is_dirty());
+                (SharedString::from(label), picture, unsaved)
+            }
+            Body::Diff(diff) => {
+                let diff = diff.read(cx);
+                let picture = file_icons::for_file(&diff.file_name()).and_then(crate::assets::file_icon);
+                (SharedString::from(diff.label()), picture, false)
+            }
+            Body::Changes(changes) => {
+                let label = match changes.read(cx).side() {
+                    Side::Unstaged => t("All Changes"),
+                    Side::Staged => t("All Staged Changes"),
+                };
+                (SharedString::from(label), crate::assets::file_icon("git"), false)
+            }
+        }
+    }
+
+    /// Where a tab is, quieter, for the list of tabs: a file's folder, or
+    /// the folder a terminal is in, inside the project when it can be.
+    fn place_of(&self, tab: &Tab, cx: &App) -> String {
+        let folder = match &tab.body {
+            Body::Terminals { active, .. } => active.read(cx).cwd(),
+            Body::Editor { .. } => tab.editor().and_then(|e| e.read(cx).path().parent().map(Path::to_path_buf)),
+            Body::Diff(_) | Body::Changes(_) => None,
+        };
+        let Some(folder) = folder else { return String::new() };
+        match folder.strip_prefix(&self.root_dir) {
+            Ok(inside) if inside.as_os_str().is_empty() => String::new(),
+            Ok(inside) => inside.to_string_lossy().replace('\\', "/"),
+            Err(_) => folder.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Opens the list of tabs on the one used before this (`back`: on the
+    /// one used longest ago), or, while it is open, moves down (up) it.
+    fn switch_tab(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(switcher) = &mut self.switcher {
+            switcher.step(if back { -1 } else { 1 });
+            cx.notify();
+            return;
+        }
+        let ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
+        let order = switcher_order(&ids, self.tabs.get(self.active).map(|tab| tab.id), &self.recent);
+        if order.len() < 2 {
+            return;
+        }
+        // Shift goes back up the list; letting go of it is not letting go of the shortcut.
+        let held = Modifiers { shift: false, ..window.modifiers() };
+        let selected = if back { order.len() - 1 } else { 1 };
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.switcher = Some(TabSwitcher { order, selected, held, focus });
+        cx.notify();
+    }
+
+    /// Closes the list of tabs, opening the selected one with `open`.
+    fn close_switcher(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(switcher) = self.switcher.take() else { return };
+        let chosen = if open { switcher.order.get(switcher.selected).copied() } else { None };
+        match chosen.and_then(|id| self.tabs.iter().position(|tab| tab.id == id)) {
+            Some(index) => self.select_tab(index, window, cx),
+            None => {
+                self.focus_active(window, cx);
+                cx.notify();
+            }
+        }
+    }
+
+    fn render_switcher(&self, switcher: &TabSwitcher, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (border, popover, foreground, muted, active_bg, hover_bg) =
+            (theme.border, theme.popover, theme.popover_foreground, theme.muted_foreground, theme.list_active, theme.list_hover);
+        let rows: Vec<AnyElement> = switcher
+            .order
+            .iter()
+            .enumerate()
+            .filter_map(|(row, id)| {
+                let tab = self.tabs.iter().find(|tab| tab.id == *id)?;
+                let (label, picture, unsaved) = Self::look(tab, cx);
+                let picture = picture.or_else(|| crate::assets::file_icon("console"));
+                let place = self.place_of(tab, cx);
+                Some(
+                    h_flex()
+                        .id(("tab-switcher-row", row))
+                        .test_support()
+                        .h(px(28.))
+                        .w_full()
+                        .px_2()
+                        .gap_2()
+                        .rounded_md()
+                        .text_sm()
+                        .when(row == switcher.selected, |d| d.bg(active_bg))
+                        .hover(|s| s.bg(hover_bg))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            if let Some(switcher) = &mut this.switcher {
+                                switcher.selected = row;
+                            }
+                            this.close_switcher(true, window, cx);
+                        }))
+                        .when_some(picture, |d, picture| d.child(img(picture).flex_none().size(px(16.))))
+                        .child(div().flex_none().max_w(px(260.)).truncate().child(label))
+                        .when(unsaved, |d| d.child(div().flex_none().size(px(7.)).rounded_full().bg(foreground)))
+                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(place))
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        div()
+            .id("tab-switcher-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .justify_center()
+            .items_start()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, window, cx| this.close_switcher(false, window, cx)))
+            .child(
+                v_flex()
+                    .id("tab-switcher")
+                    .test_support()
+                    .track_focus(&switcher.focus)
+                    .key_context("TabSwitcher")
+                    .mt(px(48.))
+                    .w(px(460.))
+                    .max_w(relative(0.9))
+                    .max_h(relative(0.8))
+                    .overflow_y_scroll()
+                    .p_1()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(border)
+                    .bg(popover)
+                    .text_color(foreground)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        let back = event.keystroke.modifiers.shift;
+                        match event.keystroke.key.as_str() {
+                            "down" => this.switch_tab(false, window, cx),
+                            "up" => this.switch_tab(true, window, cx),
+                            "tab" => this.switch_tab(back, window, cx),
+                            "enter" => this.close_switcher(true, window, cx),
+                            "escape" => this.close_switcher(false, window, cx),
+                            _ => return,
+                        }
+                        cx.stop_propagation();
+                    }))
+                    .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                        if this.switcher.as_ref().is_some_and(|s| s.holding() && !s.still_held(&event.modifiers)) {
+                            this.close_switcher(true, window, cx);
+                        }
+                    }))
+                    .children(rows),
+            )
+    }
+
     fn render_tab_bar(&self, group: Group, cx: &mut Context<Self>) -> impl IntoElement {
         let shown = match group {
             Group::All => Some(self.active),
@@ -1522,34 +1749,7 @@ impl TerminalArea {
         let tabs = self.tabs.iter().enumerate().filter(|(_, tab)| in_group(tab)).map(|(index, tab)| {
             let tab_id = tab.id;
             let selected = Some(index) == shown;
-            let (label, picture, unsaved) = match &tab.body {
-                Body::Terminals { active, .. } => {
-                    let label = tab.name.clone().map(SharedString::from).unwrap_or_else(|| active.read(cx).label());
-                    (label, None, false)
-                }
-                Body::Editor { first, beside, .. } => {
-                    let name = first.read(cx).file_name();
-                    let picture = file_icons::for_file(&name).and_then(crate::assets::file_icon);
-                    let label = match beside {
-                        Some(beside) => format!("{name} | {}", beside.editor.read(cx).file_name()),
-                        None => name,
-                    };
-                    let unsaved = tab.editors().iter().any(|e| e.read(cx).is_dirty());
-                    (SharedString::from(label), picture, unsaved)
-                }
-                Body::Diff(diff) => {
-                    let diff = diff.read(cx);
-                    let picture = file_icons::for_file(&diff.file_name()).and_then(crate::assets::file_icon);
-                    (SharedString::from(diff.label()), picture, false)
-                }
-                Body::Changes(changes) => {
-                    let label = match changes.read(cx).side() {
-                        Side::Unstaged => t("All Changes"),
-                        Side::Staged => t("All Staged Changes"),
-                    };
-                    (SharedString::from(label), crate::assets::file_icon("git"), false)
-                }
-            };
+            let (label, picture, unsaved) = Self::look(tab, cx);
             let panes = tab.panes().len();
             let terminal = tab.is_terminal();
             let renaming = self.renaming.as_ref().filter(|r| r.tab == tab_id).map(|r| r.input.clone());
@@ -1990,6 +2190,15 @@ impl Render for TerminalArea {
             }
         }
         self.note_active();
+        // The shortcut was let go before the list was first drawn (a quick
+        // press), so its own listener never heard it.
+        if let Some(switcher) = &mut self.switcher
+            && switcher.holding()
+            && !switcher.still_held(&window.modifiers())
+        {
+            switcher.held = Modifiers::default();
+            cx.defer_in(window, |this, window, cx| this.close_switcher(true, window, cx));
+        }
 
         let content = if docked {
             self.render_docked(cx)
@@ -2069,6 +2278,16 @@ impl Render for TerminalArea {
                     this.cycle_tab(-1, window, cx);
                 }
             }))
+            .on_action(cx.listener(move |this, _: &SwitchTab, window, cx| {
+                if idle {
+                    this.switch_tab(false, window, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &SwitchTabBack, window, cx| {
+                if idle {
+                    this.switch_tab(true, window, cx);
+                }
+            }))
             .on_action(cx.listener(move |this, _: &NextPane, window, cx| {
                 if idle {
                     this.cycle_pane(1, window, cx);
@@ -2120,6 +2339,7 @@ impl Render for TerminalArea {
                 }
             }))
             .child(content)
+            .when_some(self.switcher.as_ref(), |d, switcher| d.child(self.render_switcher(switcher, cx)))
             .when_some(self.confirm, |d, (_, busy)| d.child(self.render_confirm(busy, cx)))
     }
 }
@@ -2175,9 +2395,9 @@ mod tests {
 
         press(cx, window, &["ctrl-shift-t"]);
         assert_eq!(shape(cx, &area), (2, 1, 1));
-        press(cx, window, &["ctrl-tab"]);
+        press(cx, window, &["ctrl-pagedown"]);
         assert_eq!(shape(cx, &area), (2, 0, 3));
-        press(cx, window, &["ctrl-shift-tab"]);
+        press(cx, window, &["ctrl-pageup"]);
         assert_eq!(shape(cx, &area), (2, 1, 1));
 
         // Closing the only pane of a tab closes the tab.
@@ -2221,6 +2441,98 @@ mod tests {
         // The centre is never left empty.
         press(cx, window, &["ctrl-shift-q"]);
         assert_eq!(shape(cx, &area), (1, 0, 1));
+    }
+
+    /// Holds Ctrl down or lets it go, as the system reports it.
+    fn hold_ctrl(cx: &mut TestAppContext, window: AnyWindowHandle, down: bool) {
+        use gpui_kit::InputEvent as _;
+        cx.update_window(window, |_, window, cx| {
+            let modifiers = if down { gpui_kit::Modifiers::control() } else { gpui_kit::Modifiers::default() };
+            let event = gpui_kit::ModifiersChangedEvent { modifiers, capslock: Default::default() };
+            window.dispatch_event(event.to_platform_input(), cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    async fn ctrl_tab_lists_the_tabs_last_used_first(cx: &mut TestAppContext) {
+        let (window, area) = open(cx);
+        press(cx, window, &["ctrl-shift-t", "ctrl-shift-t"]);
+        let active = |cx: &mut TestAppContext| area.read_with(cx, |a, _| a.active);
+        let open_list = |cx: &mut TestAppContext| area.read_with(cx, |a, _| a.switcher.as_ref().map(|s| (s.order.len(), s.selected)));
+        assert_eq!(active(cx), 2);
+
+        // A quick press goes back to the tab used before, and another one back again.
+        hold_ctrl(cx, window, true);
+        press(cx, window, &["ctrl-tab"]);
+        assert_eq!(open_list(cx), Some((3, 1)));
+        hold_ctrl(cx, window, false);
+        assert_eq!((active(cx), open_list(cx)), (1, None));
+        hold_ctrl(cx, window, true);
+        press(cx, window, &["ctrl-tab"]);
+        hold_ctrl(cx, window, false);
+        assert_eq!(active(cx), 2);
+
+        // Held down, each press goes further down the list: the first tab was used longest ago.
+        hold_ctrl(cx, window, true);
+        press(cx, window, &["ctrl-tab", "ctrl-tab"]);
+        assert_eq!(open_list(cx), Some((3, 2)));
+        cx.update_window(window, |_, window, _| assert!(window.try_find("tab-switcher").is_some())).unwrap();
+        hold_ctrl(cx, window, false);
+        assert_eq!(active(cx), 0);
+        // Shift goes up from the bottom.
+        hold_ctrl(cx, window, true);
+        press(cx, window, &["ctrl-shift-tab"]);
+        assert_eq!(open_list(cx), Some((3, 2)));
+        hold_ctrl(cx, window, false);
+        assert_eq!(active(cx), 1);
+
+        // Let go before the list was even drawn: it still opens the tab before.
+        cx.update_window(window, |_, window, cx| {
+            use gpui_kit::InputEvent as _;
+            let event = gpui_kit::ModifiersChangedEvent { modifiers: gpui_kit::Modifiers::control(), capslock: Default::default() };
+            window.dispatch_event(event.to_platform_input(), cx);
+            window.dispatch_keystroke(gpui_kit::Keystroke::parse("ctrl-tab").unwrap(), cx);
+            let event = gpui_kit::ModifiersChangedEvent { modifiers: gpui_kit::Modifiers::default(), capslock: Default::default() };
+            window.dispatch_event(event.to_platform_input(), cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!((active(cx), open_list(cx)), (0, None));
+
+        // Without Ctrl held (from the palette) the list waits: arrows, Enter, Esc.
+        press(cx, window, &["ctrl-tab"]);
+        assert_eq!(open_list(cx), Some((3, 1)));
+        press(cx, window, &["down"]);
+        assert_eq!(open_list(cx), Some((3, 2)));
+        press(cx, window, &["escape"]);
+        assert_eq!((active(cx), open_list(cx)), (0, None));
+        press(cx, window, &["ctrl-tab", "up", "enter"]);
+        assert_eq!(active(cx), 0, "up from the tab before is the tab showing");
+        press(cx, window, &["ctrl-tab"]);
+        cx.update_window(window, |_, window, cx| window.click(("tab-switcher-row", 2usize), cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!((active(cx), open_list(cx)), (2, None));
+        // The keyboard is back in the terminal of the tab.
+        let focused = cx
+            .update_window(window, |_, window, cx| area.read(cx).tabs[2].has_focus(window, cx))
+            .unwrap();
+        assert!(focused);
+
+        // One tab alone has nothing to switch to.
+        press(cx, window, &["ctrl-shift-q", "ctrl-shift-q"]);
+        press(cx, window, &["ctrl-tab"]);
+        assert_eq!(open_list(cx), None);
+    }
+
+    #[test]
+    fn the_list_of_tabs_starts_with_the_one_showing_then_the_last_used() {
+        assert_eq!(super::switcher_order(&[1, 2, 3, 4], Some(3), &[3, 1, 9]), [3, 1, 2, 4]);
+        assert_eq!(super::switcher_order(&[1, 2], None, &[]), [1, 2]);
+        assert_eq!(super::switcher_order(&[5, 6], Some(6), &[6, 6, 5]), [6, 5]);
     }
 
     #[gpui_kit::test]
@@ -2354,7 +2666,7 @@ two
         open_it(cx);
         assert_eq!(shape(cx, &area), (2, 1, 0));
         // Asking for the same file again shows the tab it is in.
-        press(cx, window, &["ctrl-tab"]);
+        press(cx, window, &["ctrl-pagedown"]);
         open_it(cx);
         assert_eq!(shape(cx, &area), (2, 1, 0));
         let editor = area.read_with(cx, |a, _| a.tabs[1].editor().unwrap().clone());
@@ -2675,9 +2987,9 @@ two
         assert_eq!(on_screen(cx), (true, true));
         assert_eq!(shape(cx, &area), (3, 2, 0));
         // The keys move along the row the keyboard is in, not into the other one.
-        press(cx, window, &["ctrl-tab"]);
+        press(cx, window, &["ctrl-pagedown"]);
         assert_eq!(area.read_with(cx, |a, _| a.active), 1);
-        press(cx, window, &["ctrl-tab"]);
+        press(cx, window, &["ctrl-pagedown"]);
         assert_eq!(area.read_with(cx, |a, _| a.active), 2);
 
         // A split asked for from a file happens in the terminal below.

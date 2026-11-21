@@ -386,3 +386,8 @@
 "{file} could not be unpacked: {error}" = "{file} konnte nicht entpackt werden: {error}"
 "{file} has no {program} in it." = "{file} enthält kein {program}."
 "Underline errors and warnings in open files, using the language servers on this computer or ones Wercode downloads." = "Fehler und Warnungen in geöffneten Dateien unterstreichen, mit den Sprachservern auf diesem Computer oder solchen, die Wercode herunterlädt."
+"View: Switch Tab…" = "Ansicht: Tab wechseln…"
+"View: Switch Tab Backwards…" = "Ansicht: Tab rückwärts wechseln…"
+"View: Zen Mode" = "Ansicht: Zen-Modus"
+"Zen mode. {keys} brings everything back." = "Zen-Modus. {keys} holt alles zurück."
+"Zen mode. \"View: Zen Mode\" in the command palette brings everything back." = "Zen-Modus. „Ansicht: Zen-Modus“ in der Befehlspalette holt alles zurück."

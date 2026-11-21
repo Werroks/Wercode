@@ -35,7 +35,7 @@ use crate::panel::{
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::term::{
     ClosePane, CloseTab, Find, NewTab, RenameTab, NextPane, NextTab, PrevPane, PrevTab, SplitDown, SplitRight,
-    TerminalArea, ToggleTerminal,
+    SwitchTab, SwitchTabBack, TerminalArea, ToggleTerminal,
 };
 use crate::term::area::AreaEvent;
 use crate::theme::AppState;
@@ -63,9 +63,23 @@ actions!(
         /// Shows the commands the project describes, to run one in a terminal tab.
         RunTask,
         /// Runs again the task that was run last.
-        RerunTask
+        RerunTask,
+        /// Hides the title bar, the side panel and the status bar and fills
+        /// the screen with the tabs, or brings everything back.
+        ToggleZen
     ]
 );
+
+/// How long the note on how to leave zen mode stays up.
+const ZEN_NOTE: Duration = Duration::from_secs(4);
+
+/// Zen mode, while it is on.
+struct Zen {
+    /// Wercode made the window fill the screen, and puts it back after.
+    fullscreen: bool,
+    /// Takes the note on how to leave away after a while.
+    note: Option<Task<()>>,
+}
 
 /// How often the repository status is read again while the window is active.
 const GIT_POLL: Duration = Duration::from_secs(2);
@@ -170,6 +184,7 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("Terminal: Close Tab"), Box::new(CloseTab)),
         (t("Terminal: Next Tab"), Box::new(NextTab)),
         (t("Terminal: Previous Tab"), Box::new(PrevTab)),
+        (t("View: Switch Tab\u{2026}"), Box::new(SwitchTab)),
         (t("Terminal: Next Pane"), Box::new(NextPane)),
         (t("Terminal: Previous Pane"), Box::new(PrevPane)),
         (t("Terminal: Find\u{2026}"), Box::new(Find)),
@@ -184,6 +199,7 @@ fn palette_commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (t("Go to Symbol in File\u{2026}"), Box::new(GoToSymbol)),
         (t("Go to Symbol in Project\u{2026}"), Box::new(GoToProjectSymbol)),
         (t("View: Toggle Side Panel"), Box::new(TogglePanel)),
+        (t("View: Zen Mode"), Box::new(ToggleZen)),
         (t("View: Show Files"), Box::new(ShowFiles)),
         (t("Search: Find in Files"), Box::new(ShowSearch)),
         (t("View: Show Git"), Box::new(ShowGit)),
@@ -298,6 +314,8 @@ pub struct Workspace {
     closing: bool,
     /// A terminal command is on its way to the terminals.
     forwarding: bool,
+    /// Zen mode: nothing but the tabs on screen.
+    zen: Option<Zen>,
     state: State,
     /// Where `state` is saved; `None` keeps it in memory only.
     state_path: Option<PathBuf>,
@@ -348,6 +366,7 @@ impl Workspace {
             settings: None,
             closing: false,
             forwarding: false,
+            zen: None,
             state,
             state_path,
             save_task: None,
@@ -1253,7 +1272,76 @@ impl Workspace {
         }
     }
 
+    /// Enters zen mode, filling the screen, or leaves it and puts the window
+    /// back the way it was.
+    fn toggle_zen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        if self.zen.is_some() {
+            self.leave_zen(window, cx);
+            return;
+        }
+        if self.project.is_none() {
+            return;
+        }
+        let fullscreen = !window.is_fullscreen();
+        if fullscreen {
+            window.toggle_fullscreen();
+        }
+        let note = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ZEN_NOTE).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(zen) = &mut this.zen {
+                    zen.note = None;
+                    cx.notify();
+                }
+            });
+        });
+        self.zen = Some(Zen { fullscreen, note: Some(note) });
+        self.focus_terminals(window, cx);
+        cx.notify();
+    }
+
+    fn leave_zen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(zen) = self.zen.take() else { return };
+        if zen.fullscreen && window.is_fullscreen() {
+            window.toggle_fullscreen();
+        }
+        cx.notify();
+    }
+
+    /// The note on how to leave zen mode, while it shows.
+    fn render_zen_note(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let text = match crate::keymap::label_for("workspace.toggle_zen", cx) {
+            Some(keys) => tf("Zen mode. {keys} brings everything back.", &[("keys", &keys)]),
+            None => t("Zen mode. \"View: Zen Mode\" in the command palette brings everything back.").to_string(),
+        };
+        div().absolute().top(px(12.)).left_0().w_full().flex().justify_center().child(
+            div()
+                .id("zen-note")
+                .test_support()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .text_color(theme.popover_foreground)
+                .text_sm()
+                .shadow_md()
+                .child(text),
+        )
+    }
+
     fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        if self.zen.take().is_some() {
+            // The panel is asked for: zen mode ends and the panel shows.
+            self.panel_open = true;
+            self.state.panel_open = true;
+            self.save();
+            cx.notify();
+            return;
+        }
         self.panel_open = !self.panel_open;
         self.state.panel_open = self.panel_open;
         self.save();
@@ -1262,6 +1350,11 @@ impl Workspace {
 
     /// Shows a side panel; choosing the one already showing hides it.
     fn show_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
+        // A panel asked for in zen mode ends it.
+        if self.zen.is_some() {
+            self.leave_zen(window, cx);
+            self.panel_open = false;
+        }
         if self.panel_open && self.panel == kind {
             self.panel_open = false;
             self.focus_terminals(window, cx);
@@ -2352,6 +2445,7 @@ impl Workspace {
 
         h_flex()
             .id("status-bar")
+            .test_support()
             .h(px(24.))
             .flex_none()
             .px_3()
@@ -2430,7 +2524,7 @@ impl Workspace {
     }
 
     fn render_body(&self, project: &Project, cx: &mut Context<Self>) -> AnyElement {
-        if !self.panel_open {
+        if !self.panel_open || self.zen.is_some() {
             return project.terminals.clone().into_any_element();
         }
         let settings = &cx.global::<AppState>().settings;
@@ -2453,10 +2547,12 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let zen = self.zen.as_ref().map(|zen| zen.note.is_some());
         let (body, status) = match &self.project {
-            Some(project) => {
-                (self.render_body(project, cx), Some(self.render_status(project, cx).into_any_element()))
-            }
+            Some(project) => (
+                self.render_body(project, cx),
+                zen.is_none().then(|| self.render_status(project, cx).into_any_element()),
+            ),
             None => (self.render_welcome(cx).into_any_element(), None),
         };
 
@@ -2469,6 +2565,7 @@ impl Render for Workspace {
             .text_color(cx.theme().foreground)
             .font_weight(FontWeight::MEDIUM)
             .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
+            .on_action(cx.listener(|this, _: &ToggleZen, window, cx| this.toggle_zen(window, cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| this.pick_folder(window, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, window, cx| {
                 if !(this.panel_open && this.panel == PanelKind::Files) {
@@ -2543,13 +2640,16 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, a: &CloseTab, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &NextTab, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &PrevTab, window, cx| this.forward(a, window, cx)))
+            .on_action(cx.listener(|this, a: &SwitchTab, window, cx| this.forward(a, window, cx)))
+            .on_action(cx.listener(|this, a: &SwitchTabBack, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &NextPane, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &PrevPane, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &Find, window, cx| this.forward(a, window, cx)))
             .on_action(cx.listener(|this, a: &RenameTab, window, cx| this.forward(a, window, cx)))
-            .child(self.render_title(cx))
+            .when(zen.is_none(), |d| d.child(self.render_title(cx)))
             .child(div().flex_1().min_h_0().child(body))
             .children(status)
+            .when(zen == Some(true), |d| d.child(self.render_zen_note(cx)))
             .when(self.switcher_open, |d| d.child(self.render_switcher(cx)))
             .when_some(self.palette.clone(), |d, palette| d.child(self.render_palette(&palette, cx)))
             .when_some(self.finder.as_ref(), |d, finder| d.child(self.render_finder(finder, cx)))
@@ -2617,6 +2717,45 @@ mod tests {
             }
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn zen_mode_leaves_only_the_tabs(cx: &mut TestAppContext) {
+        let f = open(cx, "zen");
+        let shown = |cx: &mut TestAppContext, id: &'static str| {
+            cx.update_window(f.window, |_, window, cx| {
+                window.render_frame(cx);
+                window.try_find(id).is_some()
+            })
+            .unwrap()
+        };
+        let panel = |cx: &mut TestAppContext| f.workspace.read_with(cx, |w, _| (w.zen.is_some(), w.panel_open, w.panel));
+        assert!(shown(cx, "project-switcher") && shown(cx, "status-bar"));
+        assert_eq!(panel(cx), (false, true, PanelKind::Files));
+
+        press(cx, f.window, &["ctrl-shift-z"]);
+        assert_eq!(panel(cx), (true, true, PanelKind::Files));
+        assert!(!shown(cx, "project-switcher") && !shown(cx, "status-bar") && !shown(cx, "panel-files"));
+        assert!(shown(cx, "terminal-area") && shown(cx, "zen-note"));
+        // The note on how to leave goes after a while.
+        cx.executor().advance_clock(std::time::Duration::from_secs(5));
+        cx.run_until_parked();
+        assert!(!shown(cx, "zen-note") && !shown(cx, "status-bar"));
+        // The same keys bring everything back, the panel as it was.
+        press(cx, f.window, &["ctrl-shift-z"]);
+        assert_eq!(panel(cx), (false, true, PanelKind::Files));
+        assert!(shown(cx, "project-switcher") && shown(cx, "status-bar") && shown(cx, "panel-files"));
+
+        // Asking for a panel ends zen mode and shows it.
+        press(cx, f.window, &["ctrl-shift-z", "ctrl-shift-g"]);
+        assert_eq!(panel(cx), (false, true, PanelKind::Git));
+        press(cx, f.window, &["ctrl-shift-b", "ctrl-shift-z", "ctrl-shift-b"]);
+        assert_eq!(panel(cx), (false, true, PanelKind::Git));
+        // Terminal keys go on working in zen mode.
+        press(cx, f.window, &["ctrl-shift-z", "ctrl-shift-t"]);
+        let tabs = f.workspace.read_with(cx, |w, cx| w.terminals().read(cx).tab_count());
+        assert_eq!(tabs, 2);
+        let _ = std::fs::remove_dir_all(&f.dir);
     }
 
     #[gpui_kit::test]
@@ -3874,7 +4013,7 @@ three
         })
         .unwrap();
         cx.run_until_parked();
-        press(cx, f.window, &["ctrl-shift-tab"]);
+        press(cx, f.window, &["ctrl-pageup"]);
         let closed = cx
             .update_window(f.window, |_, window, cx| f.workspace.update(cx, |w, cx| w.should_close(window, cx)))
             .unwrap();

@@ -14,6 +14,16 @@ if command -v update-desktop-database > /dev/null; then
     update-desktop-database "$data/applications" || true
 fi
 echo "Wercode is installed: $bin/wercode"
+# A desktop has every library Wercode uses; a minimal system (a server, WSL)
+# may lack the keyboard ones for X11.
+if command -v ldd > /dev/null; then
+    missing="$(ldd "$bin/wercode" 2>/dev/null | awk '/not found/ { print $1 }')"
+    if [ -n "$missing" ]; then
+        echo "Wercode needs libraries this system does not have:"
+        echo "$missing" | sed 's/^/  /'
+        echo "On Debian or Ubuntu: sudo apt install libxkbcommon-x11-0 libxcb-xkb1"
+    fi
+fi
 case ":$PATH:" in
     *":$bin:"*) ;;
     *) echo "Add $bin to PATH to start it as wercode from a terminal." ;;
